@@ -20,7 +20,8 @@ from .scope import Scope
 from .profiles import Profile, get as get_profile
 from .models import (Endpoint, Parameter, Finding, Hypothesis,
                       write_jsonl, read_jsonl, Confidence,
-                      ValidationStatus, stable_finding_id)
+                      ValidationStatus, stable_finding_id,
+                      RESULT_STATUSES, ResultStatus)
 from .logging_setup import get_logger, attach_file_handler
 from .shell import run, which, AdaptiveRateLimiter
 from .budgets import BudgetTracker, BudgetExceeded
@@ -332,6 +333,10 @@ class Orchestrator:
         # ── 10. REPORT ──────────────────────────────────────────────────
         ck.mark("report", "running")
         metrics.scan_duration_seconds = time.time() - started
+        metrics.result_status_counts = {status: sum(
+            1 for finding in findings
+            if finding.result_status == status)
+            for status in RESULT_STATUSES}
         metrics.write(out_dir / "metrics.json")
         (out_dir / "coverage.json").write_text(
             __import__("json").dumps(coverage.to_dict(), indent=2))
@@ -1274,6 +1279,10 @@ class Orchestrator:
                                                PLUGIN_ORDER):
                     if res.status in ("skipped", "error"):
                         continue
+                    if res.status == "blocked":
+                        coverage.record(test_class, "blocked",
+                                        f"{plugin.name} blocked")
+                        continue
                     self._apply_plugin_result(
                         f, plugin, res, evidence, test_class, coverage)
                     applied = True
@@ -1452,18 +1461,24 @@ class Orchestrator:
                              test_class: str, coverage: CoverageTracker):
         """Map a TestResult onto a Finding, preserving the pre-plugin
         overwrite semantics (last applicable plugin wins)."""
-        if res.status == "confirmed":
-            status, conf, cov = ("confirmed", "confirmed", "confirmed")
-        elif res.status == "candidate":
-            status, conf, cov = ("strong_candidate", "probable",
-                                 "candidate")
-        elif res.status == "negative":
-            status, conf, cov = ("false_positive", "probable",
-                                 "tested_negative")
+        result_status = res.result_status
+        if result_status == ResultStatus.VERIFIED_EFFECT.value:
+            conf = "confirmed"
+        elif result_status == ResultStatus.CANDIDATE.value:
+            conf = "probable"
+        elif result_status == ResultStatus.NEGATIVE.value:
+            conf = "probable"
         else:
-            status, conf, cov = ("inconclusive", "unknown",
-                                 "inconclusive")
-        f.validation_status = status
+            conf = "unknown"
+        if result_status is None:
+            # Older/custom plugins may still return only the legacy status.
+            result_status = {
+                "confirmed": ResultStatus.VERIFIED_EFFECT.value,
+                "candidate": ResultStatus.CANDIDATE.value,
+                "negative": ResultStatus.NEGATIVE.value,
+                "inconclusive": ResultStatus.INCONCLUSIVE.value,
+            }.get(res.status, ResultStatus.INCONCLUSIVE.value)
+        f.set_result_status(result_status)
         f.confidence = conf
         notes = "; ".join(res.observations)[:500]
         if getattr(plugin, "allocates_evidence", True):
@@ -1480,8 +1495,8 @@ class Orchestrator:
             evidence.record(
                 f, request_text=f"{f.method} {f.matched_at}",
                 response_text=notes)
-        coverage.record(test_class, cov,
-                        notes or f"plugin {plugin.name}")
+        coverage.record_result(test_class, result_status,
+                               notes or f"plugin {plugin.name}")
 
     def _differential_probe(self, endpoints: List[Endpoint],
                             diff: DifferentialTester,
@@ -1630,6 +1645,14 @@ class Orchestrator:
                          dict(getattr(i, "auth_headers", None) or {})
                          for i in identities}
 
+        def ownership_fields_for(endpoint):
+            overrides = cfg_a.ownership_fields_by_endpoint or {}
+            for selector in (endpoint.url, endpoint.normalized_url,
+                             endpoint.path):
+                if selector in overrides:
+                    return list(overrides[selector] or [])
+            return list(cfg_a.ownership_fields or [])
+
         # — pass 1: harvest object IDs from every target (global pool
         # enables cross-endpoint replay, not just same-endpoint swap) —
         pool = []
@@ -1648,7 +1671,8 @@ class Orchestrator:
                 pool.extend(harvest_ids(
                     client, ep, identities,
                     timeout=self.cfg.scan.http_timeout,
-                    max_ids_per_param=cfg_a.max_ids_per_endpoint))
+                    max_ids_per_param=cfg_a.max_ids_per_endpoint,
+                    ownership_fields=ownership_fields_for(ep)))
             except BudgetExceeded:
                 coverage.record("authz", "blocked",
                                 f"budget: {ep.normalized_url}")
@@ -1768,7 +1792,7 @@ class Orchestrator:
                             client, batch, tester,
                             timeout=self.cfg.scan.http_timeout,
                             matrix=matrix, owner_headers=owner_headers,
-                            ownership_fields=cfg_a.ownership_fields)
+                            ownership_fields=ownership_fields_for(ep))
                         all_swaps.extend(swaps)
                         handle_swaps(swaps, ep)
                     except BudgetExceeded:
@@ -2559,28 +2583,105 @@ class Orchestrator:
         return {"status": v.status, "detail": v.detail,
                 "evidence": v.evidence}
 
+    def _verify_race_single_use(self, client, ep, body, headers,
+                                key_name: str) -> dict:
+        """Sequentially re-submit a token-like value after a race signal."""
+        from .verify.base import verify_token_reuse
+        v = verify_token_reuse(client, "POST", ep.url, body, headers,
+                               key_name, self.cfg.scan.http_timeout)
+        return {"status": v.status, "detail": v.detail,
+                "evidence": v.evidence}
+
+    def _read_race_inventory(self, client, ep, headers) -> dict:
+        """Read a configured inventory field before/after a reservation race."""
+        from urllib.parse import urljoin
+        from .logic.race import inventory_value
+        raw_url = (self.cfg.race.inventory_read_url or "").strip()
+        if not raw_url:
+            return {"status": "inconclusive",
+                    "detail": "race.inventory_read_url is required"}
+        read_url = (raw_url if raw_url.startswith(("http://", "https://"))
+                    else urljoin(ep.url, raw_url))
+        if not self.scope.is_in_scope(read_url):
+            return {"status": "inconclusive",
+                    "detail": "inventory read URL is out of scope",
+                    "read_url": read_url}
+        try:
+            self._paced()
+            response = client.get(read_url, headers=headers,
+                                  timeout=self.cfg.scan.http_timeout)
+        except BudgetExceeded:
+            return {"status": "blocked",
+                    "detail": "inventory read blocked by request budget",
+                    "read_url": read_url}
+        except Exception as e:
+            return {"status": "inconclusive",
+                    "detail": f"inventory read failed: {e}"[:200],
+                    "read_url": read_url}
+        if response.status_code != 200:
+            return {"status": "inconclusive",
+                    "detail": f"inventory read → HTTP {response.status_code}",
+                    "read_url": read_url}
+        value = inventory_value(response.text or "",
+                                self.cfg.race.inventory_jsonpath)
+        if value is None:
+            return {"status": "inconclusive",
+                    "detail": "inventory JSONPath did not select one number",
+                    "read_url": read_url}
+        return {"status": "read", "value": value,
+                "read_url": read_url}
+
     # ── RACE ENGINE (stateful slice, opt-in) ───────────────────────────
     def _race_probe(self, endpoints: List[Endpoint],
                     evidence: EvidenceStore, metrics: Metrics,
                     budgets: BudgetTracker,
                     coverage: CoverageTracker, client,
                     identities) -> List[Finding]:
-        from .logic.race import run_race
+        from .logic.race import run_race, single_use_field
         cfg_r = self.cfg.race
+        profile = (cfg_r.profile or "generic").lower()
+        if profile not in ("generic", "single_use", "idempotency",
+                           "inventory"):
+            coverage.record("race", "untestable",
+                            f"unknown race profile: {profile}")
+            return []
         targets = [e for e in endpoints
                    if e.body_parameters and e.endpoint_type != "static"
                    and self.scope.active_test_allowed(e.url)]
-        targets = targets[:cfg_r.max_endpoints]
-        if not targets:
-            coverage.record("race", "untestable",
-                            "no POST-able endpoints")
-            return []
         actors = [i for i in identities if i.name != "anonymous"] or \
             identities[:1]
         actor = actors[0]
         aname = getattr(actor, "name", "anonymous")
         atenant = getattr(actor, "tenant", "") or ""
         aheaders = dict(getattr(actor, "auth_headers", None) or {})
+        if profile == "single_use":
+            targets = [e for e in targets if single_use_field({
+                p.name: p.sample_value for p in e.body_parameters
+                if p.name and p.sample_value})]
+        elif profile == "idempotency":
+            targets = [e for e in targets if
+                       any("idempotency" in p.name.lower()
+                           and p.sample_value for p in e.body_parameters
+                           if p.name)
+                       or any("idempotency" in k.lower() and v
+                              for k, v in aheaders.items())]
+        elif profile == "inventory":
+            selector = (cfg_r.inventory_endpoint or "").strip()
+            if not selector or not cfg_r.inventory_read_url or \
+                    not cfg_r.inventory_jsonpath:
+                coverage.record(
+                    "race", "untestable",
+                    "inventory profile requires inventory_endpoint, "
+                    "inventory_read_url, and inventory_jsonpath")
+                return []
+            targets = [e for e in targets
+                       if e.path == selector or e.url == selector or
+                       e.path.endswith(selector)]
+        targets = targets[:cfg_r.max_endpoints]
+        if not targets:
+            coverage.record("race", "untestable",
+                            f"no POST-able endpoints match {profile} profile")
+            return []
         log.info("race: %d endpoints ×%d/%d as %s", len(targets),
                  cfg_r.concurrency, cfg_r.rounds, aname)
         if not self._reserve_or_block(
@@ -2601,15 +2702,99 @@ class Orchestrator:
                 continue
             body = {p.name: (p.sample_value or "1")
                     for p in ep.body_parameters if p.name}
+            inventory_before = None
+            if profile == "inventory":
+                before = self._read_race_inventory(client, ep, aheaders)
+                if before.get("status") != "read":
+                    before_status = ("blocked" if
+                                     before.get("status") == "blocked"
+                                     else "inconclusive")
+                    coverage.record("race", before_status,
+                                    before.get("detail", "inventory read failed"))
+                    continue
+                inventory_before = before["value"]
+                if inventory_before <= 0:
+                    coverage.record("race", "untestable",
+                                    "inventory precondition requires stock > 0")
+                    continue
             try:
                 res = run_race(client, "POST", ep.url, body, aheaders,
                                concurrency=cfg_r.concurrency,
                                rounds=cfg_r.rounds,
-                               timeout=self.cfg.scan.http_timeout)
+                               timeout=self.cfg.scan.http_timeout,
+                               profile=profile)
             except BudgetExceeded:
                 coverage.record("race", "blocked",
                                 f"budget: {ep.normalized_url}")
                 continue
+            inventory_verification = None
+            if profile == "inventory":
+                after = self._read_race_inventory(client, ep, aheaders)
+                completed = all(
+                    not rr.errors and len(rr.statuses) == cfg_r.concurrency
+                    and all(200 <= status < 300 or 400 <= status < 500
+                            for status in rr.statuses)
+                    for rr in res.round_results)
+                accepted = sum(
+                    1 for rr in res.round_results for status in rr.statuses
+                    if 200 <= status < 300)
+                if after.get("status") != "read":
+                    if (after.get("status") == "blocked" and
+                            accepted > inventory_before):
+                        res.verdict = "strong_candidate"
+                    else:
+                        res.verdict = "inconclusive"
+                    res.notes = "inventory post-read failed: " + \
+                        after.get("detail", "unknown error")
+                    inventory_verification = {
+                        "status": "inconclusive", "detail": res.notes,
+                        "evidence": {"before": inventory_before}}
+                elif after["value"] < 0:
+                    from .logic.observations import (evaluate_observation,
+                                                      violated)
+                    obs = {"action": "write", "resource": ep.url,
+                           "quantity_after": after["value"]}
+                    res.violations = [v.to_dict() for v in
+                                      violated(evaluate_observation(obs))]
+                    res.verdict = "strong_candidate"
+                    res.notes = (f"inventory fell below zero: "
+                                 f"{after['value']}")
+                    inventory_verification = {
+                        "status": "verified", "detail": res.notes,
+                        "evidence": {"before": inventory_before,
+                                     "after": after["value"],
+                                     "accepted": accepted,
+                                     "read_url": after.get("read_url")}}
+                elif accepted > inventory_before:
+                    res.verdict = "strong_candidate"
+                    res.notes = (f"{accepted} reservations accepted with "
+                                 f"starting inventory {inventory_before}; "
+                                 "post-read did not prove a negative balance")
+                    inventory_verification = {
+                        "status": "inconclusive", "detail": res.notes,
+                        "evidence": {"before": inventory_before,
+                                     "after": after["value"],
+                                     "accepted": accepted,
+                                     "read_url": after.get("read_url")}}
+                elif completed and after["value"] >= 0:
+                    res.verdict = "negative"
+                    res.notes = (f"inventory remained non-negative "
+                                 f"({inventory_before} → {after['value']}); "
+                                 "completed requests respected available stock")
+                    inventory_verification = {
+                        "status": "refuted", "detail": res.notes,
+                        "evidence": {"before": inventory_before,
+                                     "after": after["value"],
+                                     "accepted": accepted,
+                                     "read_url": after.get("read_url")}}
+                else:
+                    res.verdict = "inconclusive"
+                    res.notes = "inventory race responses were incomplete or ambiguous"
+                    inventory_verification = {
+                        "status": "inconclusive", "detail": res.notes,
+                        "evidence": {"before": inventory_before,
+                                     "after": after["value"],
+                                     "accepted": accepted}}
             metrics.race_tests += 1
             if res.verdict == "strong_candidate":
                 metrics.race_candidates += 1
@@ -2617,8 +2802,15 @@ class Orchestrator:
                 metrics.invariants_tested += 1
                 metrics.invariants_violated += len(res.violations)
                 coverage.record("race", "candidate", res.notes)
-                ver = self._verify_race_idempotent(
-                    client, ep, body, aheaders)
+                if inventory_verification is not None:
+                    ver = inventory_verification
+                elif profile == "single_use":
+                    ver = self._verify_race_single_use(
+                        client, ep, body, aheaders,
+                        single_use_field(body))
+                else:
+                    ver = self._verify_race_idempotent(
+                        client, ep, body, aheaders)
                 status, conf = (
                     ValidationStatus.STRONG_CANDIDATE.value,
                     Confidence.PROBABLE.value)

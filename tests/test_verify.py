@@ -332,6 +332,7 @@ def test_race_idempotency_upgrade():
     cfg = Config()
     cfg.race.concurrency = 2
     cfg.race.rounds = 1
+    cfg.race.profile = "idempotency"
     orch = Orchestrator(cfg, out, profile=get_profile("standard"))
     ep = _ep("https://t.com/pay", [], "api")
     ep.body_parameters.append(__import__(
@@ -351,7 +352,7 @@ def test_race_idempotency_upgrade():
     assert m.effects_verified == 1
 
 
-def test_race_no_key_stays_candidate():
+def test_race_idempotency_profile_skips_without_key():
     import tempfile
     from pathlib import Path
     from apex_fuzzer.orchestrator import Orchestrator
@@ -372,13 +373,14 @@ def test_race_no_key_stays_candidate():
     cfg = Config()
     cfg.race.concurrency = 2
     cfg.race.rounds = 1
+    cfg.race.profile = "idempotency"
     orch = Orchestrator(cfg, out, profile=get_profile("standard"))
     ep = _ep("https://t.com/make", [], "api")
     ep.body_parameters.append(P(name="name", location="body",
                                 source=["test"], sample_value="x"))
     found = orch._race_probe(
         [ep], EvidenceStore(out / "proofs"), Metrics(),
-        BudgetTracker(cfg), CoverageTracker(), H(),
+        BudgetTracker(cfg), (cov := CoverageTracker()), H(),
         [Identity(name="user_a")])
-    assert found and found[0].validation_status == "strong_candidate"
-    assert "verified-effect" not in found[0].tags
+    assert found == []
+    assert cov.summary()["race"] == "untestable"

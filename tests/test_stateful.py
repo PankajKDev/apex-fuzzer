@@ -299,6 +299,118 @@ def test_race_no_ids_and_different_responses_is_inconclusive():
     assert res.verdict != "negative"
 
 
+def test_race_single_use_requires_one_success_per_round():
+    import threading
+    count = [0]
+    lock = threading.Lock()
+
+    class H:
+        def post(self, url, **kw):
+            with lock:
+                count[0] += 1
+                first = count[0] == 1
+            return FakeResp(200 if first else 409,
+                            json.dumps({"accepted": first}))
+
+    res = run_race(H(), "POST", "https://t.com/redeem",
+                   {"token": "one-use"}, {}, concurrency=3, rounds=1,
+                   profile="single_use")
+    assert res.profile == "single_use"
+    assert res.verdict == "negative"
+
+
+def test_race_single_use_multiple_accepts_are_candidate():
+    class H:
+        def post(self, url, **kw):
+            return FakeResp(200, json.dumps({"accepted": True}))
+
+    res = run_race(H(), "POST", "https://t.com/redeem",
+                   {"token": "one-use"}, {}, concurrency=3, rounds=1,
+                   profile="single_use")
+    assert res.verdict == "strong_candidate"
+    assert res.violations
+
+
+def test_inventory_value_requires_one_finite_number():
+    from apex_fuzzer.logic.race import inventory_value
+    assert inventory_value('{"stock": 4}', "$.stock") == 4
+    assert inventory_value('{"stock": null}', "$.stock") is None
+    assert inventory_value('{"stock": 4, "other": 2}', "$") is None
+
+
+def test_single_use_profile_requires_sequential_replay_verification():
+    import tempfile
+    from pathlib import Path
+    from apex_fuzzer.orchestrator import Orchestrator
+    from apex_fuzzer.profiles import get as get_profile
+    from apex_fuzzer.reporting.metrics import Metrics
+    from apex_fuzzer.reporting.coverage import CoverageTracker
+    from apex_fuzzer.budgets import BudgetTracker
+    from apex_fuzzer.validation.evidence import EvidenceStore
+
+    class H:
+        def post(self, url, **kw):
+            return FakeResp(200, '{"accepted": true}')
+
+    out = Path(tempfile.mkdtemp())
+    cfg = Config()
+    cfg.race.profile = "single_use"
+    cfg.race.concurrency = 2
+    cfg.race.rounds = 1
+    orch = Orchestrator(cfg, out, profile=get_profile("standard"))
+    ep = _ep("https://t.com/redeem", [], ["token"], "api")
+    ep.body_parameters[0].sample_value = "single-use-1"
+    found = orch._race_probe(
+        [ep], EvidenceStore(out / "proofs"), Metrics(),
+        BudgetTracker(cfg), CoverageTracker(), H(), [_ident("user_a")])
+    assert found and found[0].validation_status == "confirmed"
+    assert found[0].raw["verification"]["status"] == "verified"
+
+
+def test_race_inventory_profile_verifies_negative_stock():
+    import tempfile
+    from pathlib import Path
+    from apex_fuzzer.orchestrator import Orchestrator
+    from apex_fuzzer.profiles import get as get_profile
+    from apex_fuzzer.reporting.metrics import Metrics
+    from apex_fuzzer.reporting.coverage import CoverageTracker
+    from apex_fuzzer.budgets import BudgetTracker
+    from apex_fuzzer.validation.evidence import EvidenceStore
+
+    class H:
+        reads = 0
+        writes = 0
+
+        def get(self, url, **kw):
+            self.reads += 1
+            stock = 2 if self.reads == 1 else -1
+            return FakeResp(200, json.dumps({"available": stock}))
+
+        def post(self, url, **kw):
+            self.writes += 1
+            return FakeResp(200, json.dumps({"id": self.writes}))
+
+    out = Path(tempfile.mkdtemp())
+    cfg = Config()
+    cfg.race.profile = "inventory"
+    cfg.race.inventory_endpoint = "/api/reserve"
+    cfg.race.inventory_read_url = "/api/stock/1"
+    cfg.race.inventory_jsonpath = "$.available"
+    cfg.race.concurrency = 3
+    cfg.race.rounds = 1
+    orch = Orchestrator(cfg, out, profile=get_profile("standard"))
+    ep = _ep("https://t.com/api/reserve", [], ["sku"], "api")
+    metrics, coverage = Metrics(), CoverageTracker()
+    found = orch._race_probe(
+        [ep], EvidenceStore(out / "proofs"), metrics,
+        BudgetTracker(cfg), coverage, H(), [_ident("user_a")])
+    assert found and found[0].validation_status == "confirmed"
+    assert found[0].result_status == "verified_effect"
+    assert found[0].raw["verification"]["evidence"]["before"] == 2
+    assert metrics.invariants_violated == 1
+    assert coverage.summary()["race"] == "candidate"
+
+
 def test_stable_finding_id_deterministic():
     import hashlib
     from apex_fuzzer.models import stable_finding_id

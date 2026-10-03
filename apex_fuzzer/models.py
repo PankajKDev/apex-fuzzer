@@ -39,6 +39,44 @@ class ValidationStatus(str, Enum):
     INCONCLUSIVE = "inconclusive"; FALSE_POSITIVE = "false_positive"
 
 
+class ResultStatus(str, Enum):
+    """Canonical evidence outcome, independent of coverage/execution."""
+    OBSERVATION = "observation"
+    CANDIDATE = "candidate"
+    VERIFIED_EFFECT = "verified_effect"
+    NEGATIVE = "negative"
+    INCONCLUSIVE = "inconclusive"
+
+
+RESULT_STATUSES = tuple(status.value for status in ResultStatus)
+
+_RESULT_FROM_VALIDATION = {
+    ValidationStatus.NOT_TESTED.value: ResultStatus.OBSERVATION.value,
+    ValidationStatus.STRONG_CANDIDATE.value: ResultStatus.CANDIDATE.value,
+    ValidationStatus.CONFIRMED.value: ResultStatus.VERIFIED_EFFECT.value,
+    ValidationStatus.FALSE_POSITIVE.value: ResultStatus.NEGATIVE.value,
+    ValidationStatus.INCONCLUSIVE.value: ResultStatus.INCONCLUSIVE.value,
+}
+_VALIDATION_FROM_RESULT = {
+    ResultStatus.OBSERVATION.value: ValidationStatus.NOT_TESTED.value,
+    ResultStatus.CANDIDATE.value: ValidationStatus.STRONG_CANDIDATE.value,
+    ResultStatus.VERIFIED_EFFECT.value: ValidationStatus.CONFIRMED.value,
+    ResultStatus.NEGATIVE.value: ValidationStatus.FALSE_POSITIVE.value,
+    ResultStatus.INCONCLUSIVE.value: ValidationStatus.INCONCLUSIVE.value,
+}
+
+
+def result_status_from_validation(status: str) -> str:
+    """Map the legacy Finding validation vocabulary to the canonical one."""
+    return _RESULT_FROM_VALIDATION.get(
+        status, ResultStatus.INCONCLUSIVE.value)
+
+
+def validation_status_from_result(status: str) -> str:
+    """Map canonical outcomes to the backward-compatible validation field."""
+    return _VALIDATION_FROM_RESULT[status]
+
+
 @dataclass
 class Parameter:
     name: str
@@ -123,6 +161,26 @@ class Finding:
     identity: str = ""
     tenant: str = ""
     resource_key: str = ""
+    # Canonical evidence result. None means derive from the legacy field;
+    # keeping validation_status lets older consumers and artifacts work.
+    result_status: Optional[str] = None
+
+    def __post_init__(self):
+        if self.result_status is None:
+            self.result_status = result_status_from_validation(
+                self.validation_status)
+        elif self.result_status in _VALIDATION_FROM_RESULT:
+            self.validation_status = validation_status_from_result(
+                self.result_status)
+        else:
+            raise ValueError(f"unknown result status: {self.result_status}")
+
+    def set_result_status(self, status: str) -> None:
+        """Set the canonical result and its legacy validation alias."""
+        if status not in _VALIDATION_FROM_RESULT:
+            raise ValueError(f"unknown result status: {status}")
+        self.result_status = status
+        self.validation_status = validation_status_from_result(status)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -247,6 +305,22 @@ class TestResult:
     errors: List[str] = field(default_factory=list)
     requests_used: int = 0
     duration_seconds: float = 0.0
+    # Canonical taxonomy is separate from status, which retains the legacy
+    # engine/execution vocabulary (including blocked/skipped/error).
+    result_status: Optional[str] = None
+
+    def __post_init__(self):
+        if self.result_status is None and self.status in (
+                RESULT_CONFIRMED, RESULT_CANDIDATE, RESULT_NEGATIVE,
+                RESULT_INCONCLUSIVE):
+            self.result_status = {
+                RESULT_CONFIRMED: ResultStatus.VERIFIED_EFFECT.value,
+                RESULT_CANDIDATE: ResultStatus.CANDIDATE.value,
+                RESULT_NEGATIVE: ResultStatus.NEGATIVE.value,
+                RESULT_INCONCLUSIVE: ResultStatus.INCONCLUSIVE.value,
+            }[self.status]
+        elif self.result_status not in (None,) + RESULT_STATUSES:
+            raise ValueError(f"unknown result status: {self.result_status}")
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

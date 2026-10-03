@@ -55,6 +55,8 @@ class Metrics:
     effects_verified: int = 0
     invariants_tested: int = 0
     invariants_violated: int = 0
+    # Final persisted finding counts in the canonical M2.3 taxonomy.
+    result_status_counts: Dict[str, int] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

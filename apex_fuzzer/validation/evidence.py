@@ -33,6 +33,7 @@ class EvidenceStore:
             "finding_id": finding.id, "url": finding.matched_at,
             "method": finding.method, "severity": finding.severity,
             "validation_status": finding.validation_status,
+            "result_status": finding.result_status,
             "confidence": finding.confidence,
             "template_id": finding.template_id,
             "source": finding.source,

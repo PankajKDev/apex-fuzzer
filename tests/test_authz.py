@@ -80,6 +80,8 @@ def test_compare_levels():
     # tester without identifiers → cannot confirm
     r7 = compare_access(owner, json.dumps({"msg": "hi"}))
     assert r7["level"] == "none"
+    r8 = compare_access(owner, tester, owner_generic=True)
+    assert r8["level"] == "none" and "owner baseline" in r8["detail"]
 
 
 # ── harvest markers ───────────────────────────────────────────────────
@@ -98,6 +100,37 @@ def test_harvest_records_markers_and_redacted_snippet():
     assert owner_rec.markers["owner_id"] == "u_a"
     assert "SUPERSECRETVALUE123" not in owner_rec.snippet
     assert owner_rec.to_dict()["markers"]["owner_id"] == "u_a"
+
+
+def test_harvest_custom_nested_ownership_field():
+    class H:
+        def get(self, url, **kw):
+            return FakeResp(200, json.dumps(
+                {"id": 1, "profile": {"department": "research"}}))
+
+    ids = harvest_ids(H(), _ep("https://t.com/api/u"),
+                      [Identity(name="user_a")],
+                      ownership_fields=["department"])
+    assert [h.param for h in ids] == ["id"]
+    assert ids[0].markers["department"] == "research"
+    body = json.dumps({"id": 1,
+                       "profile": {"department": "research"}})
+    result = swap_ids(
+        _swap_http(body, body), ids,
+        Identity(name="user_b", auth_headers={"Cookie": "s=B"}),
+        ownership_fields=["department"])
+    assert result[0].markers_matched == ["department"]
+
+
+def test_per_endpoint_ownership_fields_config_loads(tmp_path):
+    path = tmp_path / "config.yaml"
+    path.write_text(
+        "authorization:\n"
+        "  ownership_fields_by_endpoint:\n"
+        "    /api/profile: [account_ref, email]\n")
+    cfg = Config.load(path)
+    assert cfg.authorization.ownership_fields_by_endpoint["/api/profile"] == [
+        "account_ref", "email"]
 
 
 # ── swap with comparison ──────────────────────────────────────────────

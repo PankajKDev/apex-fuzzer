@@ -71,6 +71,9 @@ class AuthorizationConfig:
         default_factory=lambda: ["owner_id", "user_id", "account_id",
                                   "tenant_id", "created_by", "owner",
                                   "email"])
+    # Optional endpoint-specific replacements, keyed by exact URL or path.
+    ownership_fields_by_endpoint: Dict[str, List[str]] = field(
+        default_factory=dict)
 
 
 @dataclass
@@ -92,6 +95,12 @@ class RaceConfig:
     concurrency: int = 10
     rounds: int = 3
     max_endpoints: int = 5
+    # Generic preserves the original duplicate-processing detector.
+    # Specialized profiles attach an invariant and require verification.
+    profile: str = "generic"  # generic | single_use | idempotency | inventory
+    inventory_endpoint: str = ""
+    inventory_read_url: str = ""
+    inventory_jsonpath: str = ""
 
 
 @dataclass

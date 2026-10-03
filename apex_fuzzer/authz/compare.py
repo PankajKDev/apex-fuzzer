@@ -79,27 +79,14 @@ def _extract_named_fields(body_text: str,
     declares `ownership_fields: [department]` means that exact key,
     so it is scanned directly (string or numeric scalar values).
     """
-    import re
-    out: Dict[str, str] = {}
-    text = body_text or ""
-    for name in names or []:
-        if not name:
-            continue
-        m = re.search(r'"' + re.escape(name) +
-                      r'"\s*:\s*"([^"]{1,200}"?)', text)
-        if m:
-            out[name] = m.group(1).rstrip('"')
-            continue
-        m = re.search(r'"' + re.escape(name) +
-                      r'"\s*:\s*(-?\d+(?:\.\d+)?)', text)
-        if m:
-            out[name] = m.group(1)
-    return out
+    from ..authorization.harvest import extract_named_fields
+    return extract_named_fields(body_text or "", names or [])
 
 
 def compare_access(owner_markers: Dict[str, str], tester_body: str,
                    ownership_fields: List[str] | None = None,
-                   exclude: str = "") -> Dict[str, Any]:
+                   exclude: str = "",
+                   owner_generic: bool = False) -> Dict[str, Any]:
     """Decide how much a shape match is worth.
 
     `exclude` is the swapped parameter itself: its equality in both
@@ -117,17 +104,24 @@ def compare_access(owner_markers: Dict[str, str], tester_body: str,
               (ownership_fields if ownership_fields is not None
                else DEFAULT_OWNERSHIP_FIELDS)]
     generic, why = is_generic_response(tester_body)
+    if owner_generic:
+        return {"level": "none", "matched": [],
+                "detail": "owner baseline is a generic response — "
+                          "not evidence of object access"}
     if generic:
         return {"level": "none", "matched": [],
                 "detail": f"tester response is generic ({why}) — "
                           "not evidence of access"}
-    owner_markers = dict(owner_markers or {})
+    owner_markers = {str(k).lower(): str(v)
+                     for k, v in (owner_markers or {}).items()}
     if not owner_markers:
         return {"level": "medium", "matched": [],
                 "detail": "no ownership markers in baseline — "
                           "shape match stands alone"}
     tester_ids = _tester_identifiers(tester_body)
     tester_ids.update(_extract_named_fields(tester_body, fields))
+    tester_ids = {str(k).lower(): str(v)
+                  for k, v in tester_ids.items()}
     if not tester_ids:
         return {"level": "none", "matched": [],
                 "detail": "tester response carries no identifiers — "

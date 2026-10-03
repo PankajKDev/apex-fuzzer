@@ -154,8 +154,9 @@ def test_request_plan_totals():
 
 
 def test_planner_math():
-    assert plan_race(3, 10, 3).total == 90  # E × C × R
+    assert plan_race(3, 10, 3).total == 96  # burst + 2 verify/read requests
     assert plan_race(3, 10, 3).concurrency_requests == 90
+    assert plan_race(3, 10, 3).verification_requests == 6
     d = plan_differential(5, 3)
     assert d.total == 15 and d.mutation_requests == 15
     a = plan_authz_matrix(2, 3, 5, 3)

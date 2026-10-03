@@ -31,6 +31,7 @@ class HarvestedId:
     snippet: str = ""
     # GraphQL __typename when the response is a GraphQL payload
     resource_type_hint: str = ""
+    owner_generic: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {"endpoint_url": self.endpoint_url,
@@ -40,7 +41,8 @@ class HarvestedId:
                 "shape": self.shape, "body_hash": self.body_hash,
                 "source": self.source, "markers": dict(self.markers),
                 "snippet": self.snippet,
-                "resource_type_hint": self.resource_type_hint}
+                "resource_type_hint": self.resource_type_hint,
+                "owner_generic": self.owner_generic}
 
 
 def _walk_json(value: Any, out: Dict[str, str], depth: int = 0):
@@ -71,8 +73,41 @@ def extract_ids_from_body(body: str) -> Dict[str, str]:
     return out
 
 
+def extract_named_fields(body: str, names: List[str]) -> Dict[str, str]:
+    """Extract configured ownership fields from JSON at any nesting depth."""
+    import json as _json
+    wanted = {str(name).lower() for name in (names or []) if name}
+    if not wanted:
+        return {}
+    try:
+        data = _json.loads(body or "")
+    except (ValueError, TypeError):
+        return {}
+    out: Dict[str, str] = {}
+
+    def walk(value, depth=0):
+        if depth > 8:
+            return
+        if isinstance(value, dict):
+            for key, item in value.items():
+                if (str(key).lower() in wanted and
+                        isinstance(item, (str, int, float)) and
+                        not isinstance(item, bool)):
+                    out.setdefault(str(key), str(item))
+                else:
+                    walk(item, depth + 1)
+        elif isinstance(value, list):
+            for item in value[:50]:
+                walk(item, depth + 1)
+
+    walk(data)
+    return out
+
+
 def harvest_ids(http, endpoint, identities, timeout: int = 10,
-                max_ids_per_param: int = 3) -> List[HarvestedId]:
+                max_ids_per_param: int = 3,
+                ownership_fields: List[str] | None = None
+                ) -> List[HarvestedId]:
     """GET ``endpoint`` as each identity; learn object IDs from JSON.
 
     ``identities`` are Identity objects (name/auth_headers/tenant).
@@ -105,7 +140,13 @@ def harvest_ids(http, endpoint, identities, timeout: int = 10,
                 _json2.loads(r.text or "{}"))
         except Exception:
             typename = ""
-        for param, value in extract_ids_from_body(r.text or "").items():
+        ids = extract_ids_from_body(r.text or "")
+        body_markers = dict(ids)
+        body_markers.update(extract_named_fields(
+            r.text or "", ownership_fields or []))
+        from ..authz.compare import is_generic_response
+        owner_generic, _ = is_generic_response(r.text or "")
+        for param, value in ids.items():
             key = (endpoint.normalized_url, param, value, name)
             if key in seen:
                 continue
@@ -122,9 +163,10 @@ def harvest_ids(http, endpoint, identities, timeout: int = 10,
                 param=param, value=value, owner=name,
                 owner_tenant=tenant, shape=norm.get("key_shape", ""),
                 body_hash=norm.get("body_hash", ""),
-                markers=dict(extract_ids_from_body(r.text or "")),
+                markers=dict(body_markers),
                 snippet=redact((r.text or "")[:500]),
-                resource_type_hint=typename))
+                resource_type_hint=typename,
+                owner_generic=owner_generic))
     if out:
         log.info("harvest: %d ids from %s", len(out), endpoint.url)
     return out

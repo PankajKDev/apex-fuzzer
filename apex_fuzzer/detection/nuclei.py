@@ -116,6 +116,7 @@ class NucleiRunner:
                     raw=d,
                     confidence=Confidence.PROBABLE.value,
                     validation_status=ValidationStatus.NOT_TESTED.value,
+                    result_status="candidate",
                     root_cause_key=make_root_cause_key(d),
                 ))
         log.info("nuclei returned %d findings", len(findings))
@@ -278,6 +279,7 @@ def run_hypothesis_templates(runner: "NucleiRunner",
                 raw=d,
                 confidence=Confidence.PROBABLE.value,
                 validation_status=ValidationStatus.NOT_TESTED.value,
+                result_status="candidate",
                 root_cause_key=make_root_cause_key(d),
             ))
     log.info("AI templates produced %d nuclei findings", len(findings))

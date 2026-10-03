@@ -38,6 +38,14 @@ KNOWN_CLASSES = [
 _PRECEDENCE = [CONFIRMED, CANDIDATE, INCONCLUSIVE, BLOCKED,
                TESTED_NEGATIVE, UNTESTABLE, NOT_TESTED, NOT_APPLICABLE]
 
+_RESULT_TO_COVERAGE = {
+    "observation": NOT_TESTED,
+    "candidate": CANDIDATE,
+    "verified_effect": CONFIRMED,
+    "negative": TESTED_NEGATIVE,
+    "inconclusive": INCONCLUSIVE,
+}
+
 
 class CoverageTracker:
     def __init__(self, known: Optional[List[str]] = None):
@@ -59,6 +67,20 @@ class CoverageTracker:
                 self.detail[test_class] = detail[:300]
         self.counts[test_class] = self.counts.get(test_class, 0) + 1
         return self.status.get(test_class, NOT_TESTED)
+
+    def record_result(self, test_class: str, result_status: str,
+                      detail: str = "") -> str:
+        """Record a canonical result using the established coverage terms.
+
+        Execution outcomes (blocked, skipped, error) remain explicit calls
+        to record(); they are not vulnerability-result categories.
+        """
+        try:
+            coverage_status = _RESULT_TO_COVERAGE[result_status]
+        except KeyError:
+            raise ValueError(
+                f"unknown result status: {result_status}")
+        return self.record(test_class, coverage_status, detail)
 
     def mark_untestable(self, test_class: str, reason: str):
         self.record(test_class, UNTESTABLE, reason)

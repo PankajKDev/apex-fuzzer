@@ -89,6 +89,7 @@ def swap_ids(http, harvested, tester, timeout: int = 10,
             continue
         shape, body_hash = h.shape or "", h.body_hash or ""
         markers = dict(getattr(h, "markers", None) or {})
+        owner_generic = bool(getattr(h, "owner_generic", False))
         if (not shape or not body_hash) and owner_headers is not None \
                 and h.owner in (owner_headers or {}):
             try:
@@ -114,11 +115,16 @@ def swap_ids(http, harvested, tester, timeout: int = 10,
                 continue
             # baseline response belongs to the TARGET endpoint:
             # extract its markers (never reuse another endpoint's)
-            from ..authorization.harvest import extract_ids_from_body
+            from ..authorization.harvest import (
+                extract_ids_from_body, extract_named_fields)
             try:
                 markers = dict(extract_ids_from_body(b.text or ""))
+                markers.update(extract_named_fields(
+                    b.text or "", ownership_fields or []))
             except Exception:
                 pass
+            from ..authz.compare import is_generic_response
+            owner_generic, _ = is_generic_response(b.text or "")
         url = _with_param(h.endpoint_url, h.param, h.value)
         try:
             r = http.get(url, headers=headers, timeout=timeout)
@@ -142,7 +148,8 @@ def swap_ids(http, harvested, tester, timeout: int = 10,
         if match:
             comparison = compare_access(
                 markers, r.text or "",
-                ownership_fields, exclude=h.param)
+                ownership_fields, exclude=h.param,
+                owner_generic=owner_generic)
             try:
                 tester_snippet = redact((r.text or "")[:500])
             except Exception:

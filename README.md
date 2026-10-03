@@ -620,7 +620,8 @@ old artifacts still load):
 - **Extended matrix** (`authz/matrix.py`): every tested cell with an
   explicit identity × role × tenant × resource × endpoint × method
   status in coverage vocabulary (`negative` renders as
-  `tested_negative` — one status language, no second taxonomy).
+  `tested_negative`); this is the legacy coverage view of canonical
+  result outcomes.
 - **Roles** (`authz/roles.py`): per-role endpoint×method access map
   plus vertical-escalation analysis (non-privileged role receiving
   the same 200 object as an admin role).
@@ -634,7 +635,9 @@ old artifacts still load):
 - **Graph** (`authz/graph.py`): ownership/tenancy/exposure edges
   (`OWNS`, `CONTAINS`, `EXPOSED_BY`) for the chain engine and AI
   loop. Per-endpoint `ownership_fields` override the default
-  identifier list (`owner_id`, `user_id`, `account_id`, …).
+  identifier list (`owner_id`, `user_id`, `account_id`, …). Configure
+  endpoint-specific replacements with `authorization.ownership_fields_by_endpoint`,
+  keyed by the endpoint's exact URL or path.
 
 ### 8c. Stored-XSS correlation (opt-in: persists canaries)
 
@@ -675,12 +678,16 @@ dotted paths, `[n]` indexes, one `[?(@.k == v)]` filter).
 
 With `race.enabled` (`--race`; off in every profile), POST endpoints
 fire N identical requests through a start barrier (`logic/race.py`).
-All-200 with divergent object IDs → `strong_candidate` with round
-detail; fully consistent rounds → `tested_negative`; mixed errors →
-`inconclusive`. Budget exhaustion propagates as `blocked`, never a
-negative. Divergent bursts carrying an idempotency key get a
-sequential double-submit re-check: double acceptance with different
-objects upgrades to `confirmed`; otherwise the candidate stands.
+The default `generic` profile preserves the all-200/divergent-ID check.
+Opt-in `single_use` requires a token-like body field and verifies a race
+candidate with a sequential replay; `idempotency` requires an
+idempotency-key field and verifies using the same key; `inventory`
+requires an endpoint selector, an in-scope read URL, and a JSONPath for
+one numeric stock value. Inventory reads establish a positive baseline
+and verify state afterward; only a negative balance upgrades to
+`verified_effect`. Other profile outcomes stay candidate or
+inconclusive. Request reservation includes two verification/readback
+requests per endpoint. Budget exhaustion is `blocked`, never a negative.
 
 ### 8f. Workflow discovery (always on, zero network)
 
@@ -731,8 +738,9 @@ structural chunk (`plan_js_chunk`). See
 
 ### 10. Report → `report.html`, `metrics.json`, `coverage.json`
 
-Severity-filtered HTML with Confirmed / Strong Candidates / Informational
-sections, each finding showing impact, numbered reproduction steps,
+Severity-filtered HTML with Verified Effects / Candidates / Observations &
+Inconclusive sections, each finding showing its canonical result status,
+legacy validation label, impact, numbered reproduction steps,
 false-positive notes, curl one-liner, and direct evidence-file links; a
 Coverage section naming tested vs explicitly untested attack classes; plus
 a hypotheses section split into validated-vs-pending.
@@ -741,9 +749,24 @@ a hypotheses section split into validated-vs-pending.
 
 ## Validation semantics
 
-`Finding.validation_status`: `not_tested → inconclusive | strong_candidate |
-confirmed | false_positive`. `confidence`: `unknown | possible | probable |
-confirmed`.
+Canonical `Finding.result_status` and `TestResult.result_status` use five
+evidence outcomes:
+
+| Canonical result | Meaning | Legacy `validation_status` | Coverage status |
+|------------------|---------|---------------------------|-----------------|
+| `observation` | Signal recorded, no vulnerability verdict yet | `not_tested` | `not_tested` |
+| `candidate` | Evidence suggests a security effect, not verified | `strong_candidate` | `candidate` |
+| `verified_effect` | Required behavioral effect was verified | `confirmed` | `confirmed` |
+| `negative` | Preconditions held and the completed probe found no effect | `false_positive` | `tested_negative` |
+| `inconclusive` | Probe could not distinguish the result | `inconclusive` | `inconclusive` |
+
+The canonical field is additive. Old `findings.jsonl` records without
+`result_status` are upgraded in memory from `validation_status`, and new
+records continue to write the legacy field for existing consumers. Plugin
+execution states (`blocked`, `skipped`, `error`) stay in `TestResult.status`;
+they are not vulnerability outcomes and cannot map to `negative`.
+`metrics.json` includes final finding counts by canonical result status.
+`confidence`: `unknown | possible | probable | confirmed`.
 
 | engine | strong_candidate when | confirmed when |
 |--------|----------------------|----------------|
@@ -918,7 +941,8 @@ JSONL keys are ignored on load, so old artifacts stay readable):
 - **`Technology`**: `name, version, confidence, evidence[]`, `category`
   (server, frontend, gateway, auth, cloud, waf, other) — drives test gating.
 - **`Finding`**: identity (`id, source, template_id`), `name, severity,
-  confidence, validation_status`, location (`host, matched_at, endpoint_url,
+  confidence, canonical `result_status`, backward-compatible
+  `validation_status`, location (`host, matched_at, endpoint_url,
   parameter, method`), traffic (`request_headers/body, response_status/
   headers/snippet`), triage (`impact, reproduction_steps,
   false_positive_notes, reproduction, description, tags`), attribution
@@ -933,10 +957,11 @@ JSONL keys are ignored on load, so old artifacts stay readable):
 - **`Resource`**: server-side object with stable `key`
   (`<endpoint>::<location>:<param>`), `resource_type`, `identifiers`,
   `owner`, `tenant`, `exposed_by`.
-- **`TestResult`**: plugin outcome — `status` (confirmed | candidate |
-  negative | inconclusive | blocked | skipped | error), `evidence`,
-  `observations`, `errors`, `requests_used`, `duration_seconds`.
-  Infrastructure states are never mapped to vulnerability negatives.
+- **`TestResult`**: plugin outcome — legacy `status` plus canonical
+  `result_status` (observation | candidate | verified_effect | negative |
+  inconclusive), `evidence`, `observations`, `errors`, `requests_used`,
+  `duration_seconds`. Execution states (`blocked`, `skipped`, `error`) have
+  no canonical result status and are never mapped to vulnerability negatives.
 - **`AttackChain`**: finding-sequence schema (`nodes, edges, evidence,
   impact, confidence`) — populated by the Phase 9 chain engine.
 
@@ -1175,7 +1200,9 @@ self-DoS and the false negatives that timeouts masquerade as.
 make ci                                  # lint + types + tests + security + build
 ```
 
-347 tests: URL normalization, endpoint classification, parameter extraction
+Last full local run: 350 passed, 4 skipped (354 collected) after M2.5
+authz-comparison hardening. The tests cover URL normalization, endpoint
+classification, parameter extraction
 (URL/HTML/JS), scope rules, secret redaction, plus v5.2 coverage — Arjun JSON
 parsing, WAF fingerprinting, JS-bundle tech gating, structural JS chunking,
 source-map parsing, differential verdicts (BOLA / broken-access / healthy /

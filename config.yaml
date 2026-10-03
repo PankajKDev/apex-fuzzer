@@ -43,6 +43,9 @@ authorization:
   # tester responses (Phase 7 comparison)
   # ownership_fields: ["owner_id", "user_id", "account_id",
   #                    "tenant_id", "created_by", "owner", "email"]
+  # Endpoint-specific replacements; keys may be exact URL or path.
+  # ownership_fields_by_endpoint:
+  #   /api/profile: ["account_ref", "email"]
 
 # Business-logic mutations (quantity/price/refund/token-reuse).
 business:
@@ -68,6 +71,12 @@ race:
   concurrency: 10
   rounds: 3
   max_endpoints: 5
+  profile: generic         # generic | single_use | idempotency | inventory
+  # inventory profile requires a selector, an in-scope read URL, and a
+  # JSONPath selecting exactly one numeric stock/quantity value.
+  inventory_endpoint: ""  # exact path, e.g. /api/orders/reserve
+  inventory_read_url: ""  # e.g. /api/items/42/inventory
+  inventory_jsonpath: ""  # e.g. $.available
 
 # Browser-driven discovery + sessions (GET navigations only, safe).
 # Needs: pip install "apex-fuzzer[browser]" (Playwright + Chromium).

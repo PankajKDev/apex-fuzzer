@@ -7,7 +7,7 @@ the evidence files.
 import html as _h
 from pathlib import Path
 from typing import List, Dict, Optional
-from ..models import Finding, ValidationStatus
+from ..models import Finding, ResultStatus
 from ..validation.evidence import build_reproduction
 from .impact import build_impact, build_repro_steps, build_fp_notes
 
@@ -25,15 +25,14 @@ def render_html(output: Path, target: str, findings: List[Finding],
     findings = [f for f in findings
                 if MIN_RANK.get(f.severity, 4) >= min_rank]
     findings.sort(key=lambda f: ORDER.get(f.severity, 5))
-    confirmed = [f for f in findings
-                 if f.validation_status == ValidationStatus.CONFIRMED.value]
-    strong = [f for f in findings
-              if f.validation_status ==
-              ValidationStatus.STRONG_CANDIDATE.value]
+    verified = [f for f in findings
+                if f.result_status == ResultStatus.VERIFIED_EFFECT.value]
+    candidates = [f for f in findings
+                  if f.result_status == ResultStatus.CANDIDATE.value]
     informational = [f for f in findings
-                     if f.validation_status in
-                     (ValidationStatus.NOT_TESTED.value,
-                      ValidationStatus.INCONCLUSIVE.value)]
+                     if f.result_status in
+                     (ResultStatus.OBSERVATION.value,
+                      ResultStatus.INCONCLUSIVE.value)]
     parts = [
         "<!DOCTYPE html><html><head><meta charset='utf-8'>",
         f"<title>Apex-Fuzzer — {_h.escape(target)}</title>",
@@ -43,9 +42,10 @@ def render_html(output: Path, target: str, findings: List[Finding],
         _metrics_block(metrics),
         _coverage_block(coverage),
         _safety_block(safety_info),
-        _section("🟥 Confirmed", confirmed, output_dir),
-        _section("🟧 Strong Candidates", strong, output_dir),
-        _section("🟦 Informational & Untested", informational, output_dir),
+        _section("🟥 Verified Effects", verified, output_dir),
+        _section("🟧 Candidates", candidates, output_dir),
+        _section("🟦 Observations & Inconclusive", informational,
+                 output_dir),
         _hypotheses_block(hypotheses),
         "</body></html>"]
     output.write_text("".join(parts))
@@ -105,6 +105,11 @@ def _metrics_block(m: Dict) -> str:
             ("Takeovers", m.get("takeover_confirmed")),
             ("WAF", m.get("waf_detected")),
             ("Duration", f"{m.get('scan_duration_seconds', 0):.1f}s")]
+    result_counts = m.get("result_status_counts") or {}
+    if result_counts:
+        counts_text = ", ".join(
+            f"{k}: {v}" for k, v in sorted(result_counts.items()))
+        keys.append(("Result statuses", counts_text))
     boxes = "".join(
         f"<div class='box'>{_h.escape(k)}<b>{v}</b></div>"
         for k, v in keys if v is not None)
@@ -195,9 +200,9 @@ def _evidence_links(f: Finding, output_dir: Optional[Path]) -> str:
 
 def _finding_row(f: Finding, output_dir: Optional[Path] = None) -> str:
     status_cls = ""
-    if f.validation_status == ValidationStatus.CONFIRMED.value:
+    if f.result_status == ResultStatus.VERIFIED_EFFECT.value:
         status_cls = "confirmed"
-    elif f.validation_status == ValidationStatus.STRONG_CANDIDATE.value:
+    elif f.result_status == ResultStatus.CANDIDATE.value:
         status_cls = "strong"
     repro = _h.escape(build_reproduction(f))
     # ── triage layer (spec §11) ────────────────────────────────────────
@@ -223,7 +228,9 @@ def _finding_row(f: Finding, output_dir: Optional[Path] = None) -> str:
             f"<td><a href='{_h.escape(f.matched_at)}' target='_blank'>"
             f"{_h.escape(f.matched_at)}</a>{ev_links}</td>"
             f"<td><span class='status {status_cls}'>"
-            f"{_h.escape(f.validation_status)}</span></td>"
+            f"{_h.escape(f.result_status or 'observation')}</span>"
+            f"<br><small>legacy: "
+            f"{_h.escape(f.validation_status)}</small></td>"
             f"<td><code>{repro}</code></td></tr>"
             f"{detail}")
 

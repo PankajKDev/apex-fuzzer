@@ -22,6 +22,36 @@ from .observations import (observation_from_race, evaluate_observation,
                            violated)
 
 log = get_logger("race")
+_SINGLE_USE_NAME = re.compile(
+    r"coupon|voucher|promo|invite|reset|token|nonce", re.I)
+
+
+def single_use_field(body: Dict[str, Any]) -> str:
+    """Return the first transaction field that names a single-use value."""
+    return next((str(name) for name in body
+                 if _SINGLE_USE_NAME.search(str(name))), "")
+
+
+def inventory_value(body_text: str, jsonpath: str):
+    """Read one numeric inventory value using the supported JSONPath subset."""
+    import json
+    import math
+    from ..verify.assertions import jsonpath_get
+    try:
+        data = json.loads(body_text or "")
+    except (ValueError, TypeError):
+        return None
+    understood, matches = jsonpath_get(data, jsonpath)
+    if not understood or len(matches) != 1:
+        return None
+    value = matches[0]
+    if isinstance(value, bool):
+        return None
+    try:
+        number = float(value)
+    except (TypeError, ValueError):
+        return None
+    return number if math.isfinite(number) else None
 
 
 @dataclass
@@ -42,11 +72,13 @@ class RaceResult:
     verdict: str = "inconclusive"
     notes: str = ""
     violations: List[Dict[str, Any]] = field(default_factory=list)
+    profile: str = "generic"
 
     def to_dict(self) -> Dict[str, Any]:
         return {"endpoint_url": self.endpoint_url, "method": self.method,
                 "concurrency": self.concurrency, "rounds": self.rounds,
                 "verdict": self.verdict, "notes": self.notes,
+                "profile": self.profile,
                 "violations": self.violations,
                 "rounds_detail": [
                     {"statuses": r.statuses, "hashes": r.hashes,
@@ -81,9 +113,10 @@ def _single_fire(http, method: str, url: str, body: Dict,
 
 def run_race(http, method: str, url: str, body: Dict, headers: Dict,
              concurrency: int = 10, rounds: int = 3,
-             timeout: int = 10) -> RaceResult:
+             timeout: int = 10, profile: str = "generic") -> RaceResult:
     res = RaceResult(endpoint_url=url, method=method,
-                     concurrency=concurrency, rounds=rounds)
+                     concurrency=concurrency, rounds=rounds,
+                     profile=profile)
     tokenish = bool(re.search(r"coupon|voucher|promo|invite|reset|token",
                               url, re.I))
     for _ in range(rounds):
@@ -112,6 +145,18 @@ def run_race(http, method: str, url: str, body: Dict, headers: Dict,
     for i, rr in enumerate(res.round_results):
         if rr.errors or not rr.statuses:
             continue
+        if profile == "single_use":
+            # A single-use value must succeed once and be rejected on
+            # concurrent replays. 5xx and non-HTTP failures are ambiguous.
+            if any(not (200 <= s < 300 or 400 <= s < 500)
+                   for s in rr.statuses):
+                continue
+            accepted = sum(1 for s in rr.statuses if 200 <= s < 300)
+            if accepted > 1:
+                candidate_round = i
+            elif accepted == 1:
+                clean_rounds += 1
+            continue
         if all(s == 200 for s in rr.statuses):
             distinct = {tuple(sorted(s)) for s in rr.id_sets
                         if s}
@@ -125,11 +170,18 @@ def run_race(http, method: str, url: str, body: Dict, headers: Dict,
     if candidate_round is not None:
         res.verdict = "strong_candidate"
         rr = res.round_results[candidate_round]
-        res.notes = (f"round {candidate_round + 1}: {concurrency}× "
-                     f"{method} all-200 with divergent object IDs "
-                     f"({len(rr.id_sets)} distinct sets) — operation "
-                     f"processed concurrently instead of once")
-        obs = observation_from_race(url, tokenish, True)
+        if profile == "single_use":
+            accepted = sum(1 for s in rr.statuses if 200 <= s < 300)
+            res.notes = (f"round {candidate_round + 1}: {accepted} of "
+                         f"{concurrency} concurrent replays of a "
+                         "single-use value succeeded")
+        else:
+            res.notes = (f"round {candidate_round + 1}: {concurrency}× "
+                         f"{method} all-200 with divergent object IDs "
+                         f"({len(rr.id_sets)} distinct sets) — operation "
+                         f"processed concurrently instead of once")
+        obs = observation_from_race(
+            url, profile == "single_use" or tokenish, True)
         res.violations = [v.to_dict() for v in
                           violated(evaluate_observation(obs))]
         if not res.violations:
@@ -137,7 +189,11 @@ def run_race(http, method: str, url: str, body: Dict, headers: Dict,
                          "review manually)"
     elif clean_rounds == rounds and rounds > 0:
         res.verdict = "negative"
-        res.notes = (f"{rounds} rounds fully consistent — no divergence")
+        if profile == "single_use":
+            res.notes = (f"{rounds} rounds accepted the single-use value "
+                         "once each and rejected concurrent replays")
+        else:
+            res.notes = (f"{rounds} rounds fully consistent — no divergence")
     else:
         res.notes = "mixed errors/statuses — inconclusive, not a negative"
     return res

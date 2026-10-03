@@ -107,7 +107,7 @@ def plan_authz_matrix(n_endpoints: int, n_identities: int,
 def plan_race(n_endpoints: int, concurrency: int,
               rounds: int) -> RequestPlan:
     return RequestPlan("race", "*", 0, 0, n_endpoints * concurrency
-                       * rounds)
+                       * rounds, verification_requests=n_endpoints * 2)
 
 
 def plan_business(n_endpoints: int, max_params: int) -> RequestPlan:
