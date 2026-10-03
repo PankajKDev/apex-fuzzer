@@ -50,8 +50,10 @@ def resolve_modules(cfg, profile) -> List[ModuleState]:
          "profile.run_tko + GITHUB_TOKEN present"),
         ("differential", dv, "profile.differential or "
                              "validation.differential"),
-        ("oast", bool(getattr(p, "oast", False) or c.validation.ssrf),
-         "profile.oast or validation.ssrf"),
+        ("oast", bool(getattr(p, "oast", False) or c.validation.ssrf
+                       or c.validation.second_order_ssrf),
+         "profile.oast or validation.ssrf or "
+         "validation.second_order_ssrf"),
         ("validation", bool(getattr(p, "run_validation", False)
                             or c.validation.enabled),
          "profile.run_validation or validation.enabled"),
@@ -59,8 +61,10 @@ def resolve_modules(cfg, profile) -> List[ModuleState]:
                               or c.authorization.enabled),
          "profile.authz_matrix or authorization.enabled"),
         ("second_order", bool(getattr(p, "second_order", False)
-                              or c.validation.second_order),
-         "profile.second_order or validation.second_order"),
+                              or c.validation.second_order
+                              or c.validation.second_order_ssrf),
+         "profile.second_order or validation.second_order or "
+         "validation.second_order_ssrf"),
         ("business_logic", bool(getattr(p, "business_logic", False)
                                 or c.business.enabled),
          "profile.business_logic or business.enabled"),
@@ -120,6 +124,12 @@ def plan_second_order(n_forms: int, n_renders: int) -> RequestPlan:
                        verification_requests=n_forms * n_renders)
 
 
+def plan_second_order_ssrf(n_injections: int,
+                           n_triggers: int) -> RequestPlan:
+    return RequestPlan("second_order_ssrf", "*", 0, n_injections,
+                       verification_requests=n_injections * n_triggers)
+
+
 def plan_oast(n_endpoints: int, max_params: int) -> RequestPlan:
     return RequestPlan("oast", "*", 0, n_endpoints * max_params * 2)
 
@@ -176,10 +186,16 @@ def dry_run_plan(target: str, cfg, profile,
     if "business_logic" in names:
         plans.append(plan_business(cfg.business.max_endpoints,
                                    cfg.business.max_params))
-    if "second_order" in names:
+    if (getattr(profile, "second_order", False)
+            or cfg.validation.second_order):
         plans.append(plan_second_order(
             cfg.validation.second_order_max_endpoints,
             cfg.validation.second_order_max_renders))
+    if cfg.validation.second_order_ssrf:
+        injections = (cfg.validation.second_order_max_endpoints *
+                      cfg.validation.second_order_ssrf_max_fields)
+        plans.append(plan_second_order_ssrf(
+            injections, cfg.validation.second_order_max_renders))
     if "oast" in names:
         plans.append(plan_oast(cfg.oast.max_endpoints,
                                cfg.oast.max_params_per_endpoint))

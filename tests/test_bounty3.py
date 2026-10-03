@@ -11,7 +11,7 @@ from apex_fuzzer.authorization.access_tests import (
     swap_ids, sweep_methods)
 from apex_fuzzer.validation.second_order import (
     make_canary, classify_context, inject_canary, find_renders,
-    INERT_TAG)
+    make_ssrf_canary, second_order_ssrf_fields, INERT_TAG)
 from apex_fuzzer.budgets import BudgetExceeded
 from apex_fuzzer.models import Identity, Endpoint, Parameter, Finding
 from apex_fuzzer.config import Config
@@ -529,6 +529,154 @@ def test_second_order_no_forms_untestable():
     assert cov.summary()["second_order"] == "untestable"
 
 
+def test_second_order_ssrf_selects_url_fields_and_builds_unique_callback():
+    ep = _ep("https://t.com/import", ["url", "comment", "callback"],
+             "import")
+    fields = second_order_ssrf_fields(ep, max_fields=1)
+    assert [p.name for p in fields] == ["url"]
+    one = make_ssrf_canary("registered.oast.pro")
+    two = make_ssrf_canary("registered.oast.pro")
+    from urllib.parse import urlparse
+    assert urlparse(one).hostname.startswith("registered.so")
+    assert one != two
+
+
+def test_second_order_ssrf_candidate_scoring_uses_operation_context():
+    from apex_fuzzer.validation.oast import ssrf_candidate_score
+    endpoint = _ep("https://t.com/api/profile", ["file", "comment"], "api")
+    file_param = endpoint.body_parameters[0]
+    assert ssrf_candidate_score(file_param, endpoint)[0] == 0
+    endpoint.path = "/api/avatar/preview"
+    endpoint.summary = "Fetch remote avatar preview"
+    assert ssrf_candidate_score(file_param, endpoint)[0] > 0
+    assert ssrf_candidate_score(Parameter("webhookUrl", "body"), endpoint)[0] > 0
+
+
+def test_openapi_ssrf_metadata_preserves_locations_and_nested_schema():
+    from apex_fuzzer.discovery.api_specs import _parse_spec
+    spec = _parse_spec({
+        "openapi": "3.0.0",
+        "components": {"schemas": {"Input": {
+            "type": "object", "required": ["options"],
+            "properties": {"options": {"type": "object", "properties": {
+                "callbackUrl": {"type": "string"}}}}}}},
+        "paths": {"/api/import": {
+            "parameters": [{"name": "X-Source-URL", "in": "header"}],
+            "post": {
+                "operationId": "importRemoteFeed",
+                "summary": "Import remote feed",
+                "tags": ["feeds"],
+                "parameters": [{"name": "dryRun", "in": "query"}],
+                "requestBody": {"content": {"application/json": {
+                    "schema": {"$ref": "#/components/schemas/Input"}}}},
+            }}}})
+    endpoint = spec["endpoints"][0]
+    assert endpoint["operation_id"] == "importRemoteFeed"
+    assert endpoint["summary"] == "Import remote feed"
+    assert endpoint["tags"] == ["feeds"]
+    assert {p["name"] for p in endpoint["parameters"]
+            if p["in"] == "body"} == {"options", "options.callbackUrl"}
+    assert {p["name"] for p in endpoint["parameters"]
+            if p["in"] == "header"} == {"X-Source-URL"}
+    assert {p["name"] for p in endpoint["parameters"]
+            if p["in"] == "query"} == {"dryRun"}
+
+
+def test_ssrf_trigger_ranking_prefers_related_result_routes():
+    from apex_fuzzer.orchestrator import (
+        _rank_ssrf_triggers, _materialize_trigger_urls)
+    sink = _ep("https://t.com/api/imports", ["url"], "import")
+    sink.path = "/api/imports"
+    result = _ep("https://t.com/api/imports/7/status", [], "api")
+    result.path = "/api/imports/{id}/status"
+    result.method = "GET"
+    unrelated = _ep("https://t.com/account", [], "page")
+    unrelated.path = "/account"
+    ranked = _rank_ssrf_triggers(sink, [result, unrelated])
+    assert ranked and ranked[0][0] is result
+    assert all(row[0] is not unrelated for row in ranked)
+    response = FakeResp(202, json.dumps({"jobId": "job-42"}),
+                        {"Location": "/api/imports/job-42"})
+    assert _materialize_trigger_urls(
+        ["https://t.com/api/imports/{jobId}/status"], response,
+        "https://t.com/api/imports")[0].endswith("/job-42/status")
+
+
+def test_second_order_ssrf_correlates_stored_callback(tmp_path):
+    from apex_fuzzer.orchestrator import Orchestrator
+    from apex_fuzzer.profiles import get as get_profile
+    from apex_fuzzer.reporting.metrics import Metrics
+    from apex_fuzzer.reporting.coverage import CoverageTracker
+    from apex_fuzzer.budgets import BudgetTracker
+    from apex_fuzzer.validation.evidence import EvidenceStore
+    from apex_fuzzer.validation.oast import matching_interactions
+    from urllib.parse import urlparse
+
+    cfg = Config()
+    cfg.validation.second_order_ssrf = True
+    cfg.validation.second_order_ssrf_max_fields = 2
+    cfg.validation.second_order_max_renders = 2
+    cfg.oast.poll_timeout = 1
+    orch = Orchestrator(cfg, tmp_path, profile=get_profile("standard"))
+
+    class Provider:
+        interactions = []
+        emit = True
+
+        def available(self):
+            return True
+
+        def create_token(self):
+            return "registered.oast.pro"
+
+        def poll(self, **kwargs):
+            return self.interactions
+
+    provider = Provider()
+
+    class Http:
+        def post(self, url, **kwargs):
+            callback = kwargs["data"]["url"]
+            host = urlparse(callback).hostname
+            provider.interactions = ([{
+                "protocol": "dns", "full-id": host,
+                "raw-request": f"QUERY {host} A"}]
+                if provider.emit else [])
+            return FakeResp(202, "accepted")
+
+        def get(self, url, **kwargs):
+            return FakeResp(200, "triggered")
+
+    ep = _ep("https://t.com/api/import", ["url", "name"], "import")
+    ep.method = "POST"
+    trigger = _ep("https://t.com/admin/jobs", [], "page")
+    metrics, coverage = Metrics(), CoverageTracker()
+    findings = orch._second_order_ssrf_probe(
+        [ep, trigger], EvidenceStore(tmp_path / "proofs"), metrics,
+        BudgetTracker(cfg), coverage, Http(),
+        [Identity(name="operator", auth_headers={"Cookie": "s=1"})],
+        provider)
+    assert len(findings) == 1
+    finding = findings[0]
+    assert finding.source == "second-order-ssrf"
+    assert finding.validation_status == "confirmed"
+    assert finding.parameter == "url"
+    assert metrics.second_order_ssrf_tests == 1
+    assert metrics.second_order_ssrf_confirmed == 1
+    assert coverage.summary()["second_order_ssrf"] == "confirmed"
+    assert matching_interactions(
+        provider.interactions, finding.raw["callback_host"])
+
+    provider.emit = False
+    negative_metrics, negative_coverage = Metrics(), CoverageTracker()
+    not_confirmed = orch._second_order_ssrf_probe(
+        [ep, trigger], EvidenceStore(tmp_path / "proofs-no-hit"),
+        negative_metrics, BudgetTracker(cfg), negative_coverage, Http(),
+        [Identity(name="operator")], provider)
+    assert not_confirmed == []
+    assert negative_coverage.summary()["second_order_ssrf"] == "inconclusive"
+
+
 # ── config / profiles / impact ────────────────────────────────────────
 def test_validate_runs_authz_and_second_order_steps():
     import tempfile
@@ -612,6 +760,10 @@ def test_cli_second_order_flag():
     args = build_parser().parse_args(["-d", "x.com", "--second-order"])
     cfg = apply_cli_overrides(Config(), args)
     assert cfg.validation.second_order is True
+    ssrf_args = build_parser().parse_args(
+        ["-d", "x.com", "--second-order-ssrf"])
+    ssrf_cfg = apply_cli_overrides(Config(), ssrf_args)
+    assert ssrf_cfg.validation.second_order_ssrf is True
 
 
 def test_impact_new_classes():

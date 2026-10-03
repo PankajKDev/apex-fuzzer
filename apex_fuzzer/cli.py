@@ -45,6 +45,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Enable differential auth-context (BOLA/IDOR) tests")
     p.add_argument("--second-order", action="store_true",
                    help="Enable stored-XSS correlation (persists canaries)")
+    p.add_argument("--second-order-ssrf", action="store_true",
+                   help="Enable stored-SSRF OAST correlation "
+                        "(persists callback URLs)")
     p.add_argument("--business-logic", action="store_true",
                    help="Enable business-logic mutation engine")
     p.add_argument("--race", action="store_true",
@@ -136,6 +139,7 @@ def doctor_config(cfg=None) -> list:
                             f"'{cfg.ai.provider}'")
     if (cfg.race.enabled or cfg.business.enabled
             or cfg.validation.second_order
+            or cfg.validation.second_order_ssrf
             or cfg.authorization.enabled) and not cfg.safety.strict:
         problems.append("stateful modules enabled without strict "
                         "mode — add safety.strict or --strict for "

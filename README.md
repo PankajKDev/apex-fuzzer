@@ -185,6 +185,7 @@ Results land in `output/<host>/`: `report.html`, `findings.jsonl`,
 --oast                  OAST blind-SSRF confirmation on
 --differential          differential auth-context tests on
 --second-order          stored-XSS correlation on (persists canaries)
+--second-order-ssrf     stored-SSRF OAST correlation (persists callback URLs)
 --business-logic        business-logic mutation engine on (submits abuse values)
 --race                  race-condition engine on (synchronized bursts)
 --browser               browser-driven discovery on (needs playwright)
@@ -214,10 +215,11 @@ Results land in `output/<host>/`: `report.html`, `findings.jsonl`,
 | `validation`    | ✓      | ✓          | –  | ✓  | ✓         | ✓      | –            | ✓     | ✓    | ✓ (subzy)| –            | ✓         |
 
 Combine profiles with flags: `--validate`, `--ai`, `--oast`, `--differential`,
-`--second-order` force-enable the matching stage regardless of profile.
+`--second-order` and `--second-order-ssrf` force-enable their stages
+regardless of profile.
 `--business-logic` / `--race` / `--browser` (and `--no-browser` to force
 off) do the same for their engines. Config-file keys
-(`validation.enabled/differential/ssrf/second_order`,
+(`validation.enabled/differential/ssrf/second_order/second_order_ssrf`,
 `authorization.enabled`, `business.enabled`, `race.enabled`,
 `browser.enabled`,
 `ai.enabled`) do the same. Business-logic runs in deep/validation;
@@ -264,8 +266,11 @@ validation:
   min_severity: medium     # reserved
   # Stored-XSS correlation persists canary data server-side: opt-in only.
   second_order: false       # or --second-order / validation profile
+  # Stored-SSRF writes callback URLs; opt in separately.
+  second_order_ssrf: false
   second_order_max_endpoints: 10
   second_order_max_renders: 40
+  second_order_ssrf_max_fields: 3
 
 budgets:                  # backstop against runaway testing (§50)
   requests_per_host: 10000
@@ -648,6 +653,21 @@ unknown tag, then render candidates are fetched and classified
 `javascript:` URI / raw HTML → `strong_candidate` (`source:
 second-order`) with inject request + render snippet as evidence;
 entity-encoded → `tested_negative`; never rendered → `inconclusive`.
+
+Stored SSRF is a separate explicit opt-in with
+`validation.second_order_ssrf: true`. OpenAPI operation IDs, summaries,
+tags, nested request schemas, content types, and query/body/header parameter
+locations are retained to build realistic requests. Strong URL names (such
+as `callbackUrl`) qualify directly; ambiguous names (such as `file` or
+`path`) qualify only when route or operation metadata describes a fetch-like
+action. Mutating POST/PUT/PATCH operations are submitted in their documented
+JSON or form shape. Bounded GET triggers are ranked by shared resource paths
+and processing/result semantics; `{id}` routes are filled from response IDs
+or `Location` headers. Only in-scope routes are called. A unique Interactsh
+callback confirms a server-side fetch; it does not prove internal-resource
+access. No internal addresses or metadata URLs are requested. No callback
+is `inconclusive` because asynchronous workers may run later. Preflight
+accounts for injection and trigger requests.
 
 ### 8d. Business-logic mutations (opt-in: submits abuse values)
 
@@ -1200,8 +1220,10 @@ self-DoS and the false negatives that timeouts masquerade as.
 make ci                                  # lint + types + tests + security + build
 ```
 
-Last full local run: 350 passed, 4 skipped (354 collected) after M2.5
-authz-comparison hardening. The tests cover URL normalization, endpoint
+Last full local run: 355 passed, 4 skipped (359 collected) after the
+application-aware stored-SSRF expansion. The tests cover OpenAPI operation
+metadata and request locations, nested-schema sink scoring, related trigger
+selection and response-ID substitution, URL normalization, endpoint
 classification, parameter extraction
 (URL/HTML/JS), scope rules, secret redaction, plus v5.2 coverage — Arjun JSON
 parsing, WAF fingerprinting, JS-bundle tech gating, structural JS chunking,

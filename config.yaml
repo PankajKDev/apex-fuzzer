@@ -29,8 +29,12 @@ validation:
   min_severity: medium
   # Stored-XSS correlation persists canary data server-side: opt-in only.
   second_order: false
+  # Stored-SSRF correlation persists OAST callback URLs: opt-in only;
+  # uses only URL-like body fields and in-scope page triggers.
+  second_order_ssrf: false
   second_order_max_endpoints: 10
   second_order_max_renders: 40
+  second_order_ssrf_max_fields: 3
 
 # Cross-user swap + per-method authz matrix (BOLA/BFLA/tenant isolation).
 # NOTE: the method sweep sends state-changing verbs with empty bodies.

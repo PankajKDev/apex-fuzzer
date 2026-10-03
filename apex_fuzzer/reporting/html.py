@@ -92,6 +92,7 @@ def _metrics_block(m: Dict) -> str:
             ("BOLA/IDOR", m.get("differential_candidates")),
             ("Authz matrix", m.get("authorization_confirmed")),
             ("Stored XSS", m.get("second_order_candidates")),
+            ("Stored SSRF", m.get("second_order_ssrf_confirmed")),
             ("Biz logic", m.get("business_logic_candidates")),
             ("Race", m.get("race_candidates")),
             ("Inv violated", m.get("invariants_violated")),

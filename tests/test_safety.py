@@ -11,6 +11,7 @@ from apex_fuzzer.safety.authorization import (
 from apex_fuzzer.safety.preflight import (
     resolve_modules, RequestPlan, plan_differential, plan_authz_matrix,
     plan_race, plan_business, plan_second_order, plan_oast,
+    plan_second_order_ssrf,
     render_plan_text, check_fit, StopFlag, Pacer,
     get_interrupt_flag, install_signal_handlers)
 from apex_fuzzer.config import Config
@@ -64,6 +65,13 @@ def test_resolve_modules_mirrors_orchestrator(monkeypatch):
     # takeover claiming needs the token present, fingerprint does not
     assert states["takeover_fingerprint"].enabled is True
     assert states["takeover_claim"].enabled is False
+
+    cfg = Config()
+    cfg.validation.second_order_ssrf = True
+    ssrf_states = {s.name: s for s in
+                   resolve_modules(cfg, get_profile("standard"))}
+    assert ssrf_states["second_order"].enabled is True
+    assert ssrf_states["oast"].enabled is True
 
 
 # ── authorization gates ───────────────────────────────────────────────
@@ -170,6 +178,9 @@ def test_planner_math():
             s.total) == (2, 20, 22)
     o = plan_oast(4, 3)
     assert o.total == 24
+    ssrf = plan_second_order_ssrf(6, 4)
+    assert (ssrf.mutation_requests, ssrf.verification_requests,
+            ssrf.total) == (6, 24, 30)
 
 
 # ── dry-run: zero network ─────────────────────────────────────────────

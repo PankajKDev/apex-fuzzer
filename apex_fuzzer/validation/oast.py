@@ -32,6 +32,58 @@ SSRF_PARAM_NAMES = {
     "img", "img_url", "logo", "url_to", "href", "page",
 }
 
+_STRONG_SSRF_TOKENS = {
+    "url", "uri", "callback", "webhook", "fetch", "remote", "endpoint",
+    "imageurl", "avatarurl", "sourceurl", "targeturl", "feedurl",
+    "previewurl", "downloadurl", "redirecturl", "proxyurl", "hookurl",
+    "rssurl", "importurl", "asseturl", "documenturl", "returnurl",
+}
+_CONTEXT_SSRF_TOKENS = {
+    "src", "href", "link", "source", "dest", "destination", "host",
+    "domain", "site", "feed", "rss", "image", "avatar", "logo", "img",
+    "file", "path", "proxy", "target", "open", "load", "download",
+    "import", "upload", "page", "redirect", "return", "next", "continue",
+}
+_FETCH_CONTEXT = {
+    "fetch", "preview", "thumbnail", "image", "avatar", "webhook", "hook",
+    "callback", "proxy", "import", "export", "download", "document",
+    "pdf", "feed", "rss", "asset", "remote", "url", "sync", "scrape",
+}
+
+
+def _normalized_name(name: str) -> List[str]:
+    """Split camelCase and path-like schema names into useful tokens."""
+    import re
+    value = re.sub(r"([a-z0-9])([A-Z])", r"\1_\2", name or "")
+    return [part.lower() for part in re.split(r"[^A-Za-z0-9]+", value)
+            if part]
+
+
+def ssrf_candidate_score(param, endpoint=None):
+    """Score URL-like inputs using field semantics and API operation context.
+
+    Ambiguous names (for example `path`, `file`, or `host`) only qualify when
+    the documented route/operation describes a fetch-like action.
+    """
+    name = getattr(param, "name", "") or ""
+    tokens = _normalized_name(name)
+    joined = "".join(tokens)
+    strong = joined in _STRONG_SSRF_TOKENS or any(
+        token in _STRONG_SSRF_TOKENS for token in tokens)
+    context = " ".join(str(getattr(endpoint, field, "") or "")
+                       for field in ("path", "summary", "description",
+                                     "operation_id", "endpoint_type"))
+    context += " " + " ".join(getattr(endpoint, "tags", []) or [])
+    context_tokens = set(_normalized_name(context))
+    fetch_context = bool(context_tokens & _FETCH_CONTEXT)
+    contextual = bool(set(tokens) & _CONTEXT_SSRF_TOKENS)
+    if strong:
+        priority = 4 if {"url", "uri"} & set(tokens) else 3
+        return priority, "URL-bearing parameter name"
+    if contextual and fetch_context:
+        return 2, "ambiguous parameter supported by fetch-like operation"
+    return 0, "field and operation do not establish a server-fetch sink"
+
 # cloud metadata endpoints — only used when a cloud provider is detected
 CLOUD_METADATA_PAYLOADS = {
     "Amazon S3": "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
@@ -43,9 +95,12 @@ CLOUD_METADATA_PAYLOADS = {
 
 
 def ssrf_candidates(params) -> List[Any]:
-    """Filter a parameter list down to SSRF-like names."""
-    return [p for p in params
-            if getattr(p, "name", "") and
+    """Legacy context-free first-order SSRF parameter filter.
+
+    Stateful stored-SSRF uses :func:`ssrf_candidate_score` with operation
+    metadata so ambiguous names do not qualify on their own.
+    """
+    return [p for p in params if getattr(p, "name", "") and
             p.name.lower() in SSRF_PARAM_NAMES]
 
 
@@ -154,17 +209,8 @@ class InteractshProvider:
     def correlate(self, interactions: List[Dict], token: Optional[str] = None
                   ) -> bool:
         """True if any interaction reached our callback hostname."""
-        if not interactions:
-            return False
-        needle = token or self.create_token()
-        for it in interactions:
-            if not isinstance(it, dict):
-                continue
-            haystack = " ".join(str(v) for v in it.values()
-                                if isinstance(v, (str, int, float)))
-            if needle in haystack:
-                return True
-        return False
+        return bool(matching_interactions(
+            interactions, token or self.create_token()))
 
     def close(self):
         if self._closed:
@@ -178,6 +224,23 @@ class InteractshProvider:
                             timeout=10)
         except Exception:
             pass
+
+
+def matching_interactions(interactions: List[Dict], token: str
+                          ) -> List[Dict]:
+    """Return only interactions containing a callback token/hostname."""
+    if not interactions or not token:
+        return []
+    needle = token.lower()
+    matched = []
+    for it in interactions:
+        if not isinstance(it, dict):
+            continue
+        haystack = " ".join(str(v) for v in it.values()
+                            if isinstance(v, (str, int, float))).lower()
+        if needle in haystack:
+            matched.append(it)
+    return matched
 
 
 @dataclass

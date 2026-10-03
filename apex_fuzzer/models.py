@@ -98,12 +98,18 @@ class Endpoint:
     path: str = ""
     query_parameters: List[Parameter] = field(default_factory=list)
     body_parameters: List[Parameter] = field(default_factory=list)
+    header_parameters: List[Parameter] = field(default_factory=list)
     headers: Dict[str, str] = field(default_factory=dict)
     content_type: str = ""
     source: List[str] = field(default_factory=list)
     authentication_required: Optional[bool] = None
     technology: List[str] = field(default_factory=list)
     endpoint_type: str = EndpointType.UNKNOWN.value
+    operation_id: str = ""
+    summary: str = ""
+    description: str = ""
+    tags: List[str] = field(default_factory=list)
+    request_content_types: List[str] = field(default_factory=list)
     status_code: Optional[int] = None
     response_size: Optional[int] = None
 
@@ -111,6 +117,7 @@ class Endpoint:
         d = asdict(self)
         d["query_parameters"] = [p.to_dict() for p in self.query_parameters]
         d["body_parameters"] = [p.to_dict() for p in self.body_parameters]
+        d["header_parameters"] = [p.to_dict() for p in self.header_parameters]
         return d
 
 

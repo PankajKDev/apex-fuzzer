@@ -52,8 +52,11 @@ class ValidationConfig:
     differential_max_endpoints: int = 30
     # stored-XSS correlation writes canary data: opt-in only
     second_order: bool = False
+    # blind stored-SSRF correlation writes callback URLs: opt-in only
+    second_order_ssrf: bool = False
     second_order_max_endpoints: int = 10
     second_order_max_renders: int = 40
+    second_order_ssrf_max_fields: int = 3
     min_severity: str = "medium"
 
 
@@ -404,6 +407,9 @@ def apply_cli_overrides(cfg: Config, args) -> Config:
         cfg.validation.differential = True
     if getattr(args, "second_order", False):
         cfg.validation.second_order = True
+    if getattr(args, "second_order_ssrf", False):
+        cfg.validation.second_order_ssrf = True
+        cfg.oast.enabled = True
     if getattr(args, "business_logic", False):
         cfg.business.enabled = True
     if getattr(args, "race", False):

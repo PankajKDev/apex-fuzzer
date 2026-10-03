@@ -39,6 +39,44 @@ def make_canary() -> str:
     return f"ax{rand}<{INERT_TAG}>ax"
 
 
+def second_order_ssrf_candidates(endpoint, max_fields: int = 3):
+    """Return (location, parameter, score, rationale) sink candidates."""
+    from .oast import ssrf_candidate_score
+    locations = ("body_parameters", "query_parameters", "header_parameters")
+    candidates = []
+    for attr in locations:
+        location = attr.removesuffix("_parameters")
+        for param in list(getattr(endpoint, attr, []) or []):
+            score, rationale = ssrf_candidate_score(param, endpoint)
+            if score:
+                candidates.append((location, param, score, rationale))
+    candidates.sort(key=lambda row: (-row[2], locations.index(
+        row[0] + "_parameters"), row[1].name.lower()))
+    return candidates[:max(0, max_fields)]
+
+
+def second_order_ssrf_fields(endpoint, max_fields: int = 3):
+    """Compatibility helper returning only selected parameter objects."""
+    return [candidate[1] for candidate in
+            second_order_ssrf_candidates(endpoint, max_fields)]
+
+
+def make_ssrf_canary(callback_host: str) -> str:
+    """Build a unique callback URL under the registered OAST hostname."""
+    from urllib.parse import urlsplit
+    parsed = urlsplit("//" + (callback_host or ""))
+    host = parsed.hostname or ""
+    parts = host.split(".", 1)
+    if len(parts) != 2 or not all(parts):
+        raise ValueError("callback host is empty")
+    rand = "".join(random.choice(string.ascii_lowercase + string.digits)
+                   for _ in range(10))
+    # Keep the provider's registered correlation label first; Interactsh
+    # supports a per-interaction nonce as the following DNS label.
+    unique_host = f"{parts[0]}.so{rand}.{parts[1]}"
+    return f"http://{unique_host}/stored/{rand}"
+
+
 def classify_context(html: str, canary: str) -> Dict[str, Any]:
     """Decide whether a stored canary is exploitable where rendered."""
     raw_tag = f"<{INERT_TAG}>"

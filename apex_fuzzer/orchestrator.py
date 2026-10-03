@@ -51,7 +51,8 @@ from .validation.sqli import SqliValidator
 from .validation.xss import XssValidator
 from .validation.ssrf import endpoint_from_url
 from .validation.oast import (InteractshProvider, probe_endpoint,
-                               ssrf_candidates, CLOUD_METADATA_PAYLOADS)
+                               ssrf_candidates, matching_interactions,
+                               CLOUD_METADATA_PAYLOADS)
 from .validation.differential import (DifferentialTester,
                                        has_idor_params,
                                        PRIVILEGED_TYPES)
@@ -64,7 +65,7 @@ from .safety.preflight import (StopFlag, Pacer, get_interrupt_flag,
                                plan_differential,
                                plan_authz_matrix, plan_race,
                                plan_business, plan_second_order,
-                               plan_oast)
+                               plan_second_order_ssrf, plan_oast)
 from .safety.impact import max_level
 from .safety.authorization import (
     Authorization, AuthorizationRefused, GATED_MODULES)
@@ -271,10 +272,13 @@ class Orchestrator:
         self._login_identities(out_dir, metrics)
         run_validation = (self.profile.run_validation
                           or self.cfg.validation.enabled)
+        run_second_order = (self.profile.second_order
+                            or self.cfg.validation.second_order
+                            or self.cfg.validation.second_order_ssrf)
         run_diff = (self.profile.differential
                     or self.cfg.validation.differential)
         run_oast = self.profile.oast or self.cfg.validation.ssrf
-        if run_validation or run_diff or run_oast:
+        if run_validation or run_diff or run_oast or run_second_order:
             ck.mark("validation", "running")
             findings = self._validate(findings, endpoints, evidence,
                                       metrics, client, out_dir,
@@ -563,13 +567,25 @@ class Orchestrator:
                     .urlparse(full).hostname or "",
                     path=ep["path"], method=ep["method"],
                     source=["api_spec"],
-                    endpoint_type="api")
+                    endpoint_type=classify(ep["path"]),
+                    operation_id=ep.get("operation_id", ""),
+                    summary=ep.get("summary", ""),
+                    description=ep.get("description", ""),
+                    tags=ep.get("tags", []),
+                    request_content_types=ep.get(
+                        "request_content_types", []))
                 for p in ep.get("parameters", []):
-                    e.query_parameters.append(Parameter(
-                        name=p["name"],
-                        location=p.get("in", "query"),
+                    parameter = Parameter(
+                        name=p["name"], location=p.get("in", "query"),
                         source=["api_spec"],
-                        confidence=Confidence.CONFIRMED.value))
+                        confidence=Confidence.CONFIRMED.value)
+                    location = p.get("in", "query")
+                    if location == "body":
+                        e.body_parameters.append(parameter)
+                    elif location == "header":
+                        e.header_parameters.append(parameter)
+                    elif location not in ("path", "cookie"):
+                        e.query_parameters.append(parameter)
                 endpoints.append(e)
                 added += 1
         log.info("api specs: %d endpoints added", added)
@@ -1253,7 +1269,11 @@ class Orchestrator:
         # 2) OAST sweep for blind SSRF (spec §3)
         oast_provider = self._maybe_register_oast()
         try:
-            if oast_provider and oast_provider.available():
+            run_oast_sweep = (self.profile.oast
+                              or self.cfg.validation.ssrf
+                              or self.cfg.validation.enabled)
+            if (run_oast_sweep and oast_provider and
+                    oast_provider.available()):
                 out += self._oast_sweep(endpoints, oast_provider,
                                         evidence, metrics, client, out_dir,
                                         budgets, coverage)
@@ -1304,6 +1324,10 @@ class Orchestrator:
                 out += self._second_order_probe(
                     endpoints, evidence, metrics, budgets, coverage,
                     client, identities)
+            if self.cfg.validation.second_order_ssrf:
+                out += self._second_order_ssrf_probe(
+                    endpoints, evidence, metrics, budgets, coverage,
+                    client, identities, oast_provider)
             # 5) business-logic mutations (opt-in: submits abuse values)
             if (self.profile.business_logic or
                     self.cfg.business.enabled):
@@ -2323,6 +2347,250 @@ class Orchestrator:
                                 f"{ep.normalized_url}: no render observed")
         return findings
 
+    def _second_order_ssrf_probe(self, endpoints: List[Endpoint],
+                                 evidence: EvidenceStore, metrics: Metrics,
+                                 budgets: BudgetTracker,
+                                 coverage: CoverageTracker, client,
+                                 identities, provider) -> List[Finding]:
+        """Inject unique OAST URLs into URL-like fields and correlate later
+        callbacks after in-scope render/worker trigger requests.
+
+        This is separately opt-in because injections persist a callback URL.
+        A missing callback is inconclusive: asynchronous processing and
+        worker schedules make silence insufficient to prove a negative.
+        """
+        from urllib.parse import urlsplit
+        from .validation.second_order import (
+            make_ssrf_canary, second_order_ssrf_candidates)
+        cfg_v = self.cfg.validation
+        if provider is None or not provider.available():
+            coverage.record("second_order_ssrf", "untestable",
+                            "OAST provider unavailable")
+            return []
+
+        sinks = []
+        endpoint_count = 0
+        max_endpoints = max(0, cfg_v.second_order_max_endpoints)
+        max_fields = max(0, cfg_v.second_order_ssrf_max_fields)
+        for ep in endpoints:
+            if (endpoint_count >= max_endpoints or
+                    ep.method.upper() not in ("POST", "PUT", "PATCH") or
+                    not self.scope.active_test_allowed(ep.url)):
+                continue
+            fields = second_order_ssrf_candidates(ep, max_fields)
+            if not fields:
+                continue
+            endpoint_count += 1
+            sinks.extend((ep, *candidate) for candidate in fields)
+        if not sinks:
+            coverage.record("second_order_ssrf", "untestable",
+                            "no in-scope URL-like body fields found")
+            return []
+
+        trigger_scores = {}
+        for sink_ep, *_ in sinks:
+            for trigger_ep, score, rationale in _rank_ssrf_triggers(
+                    sink_ep, endpoints):
+                if self.scope.is_in_scope(trigger_ep.url):
+                    prev = trigger_scores.get(trigger_ep.url)
+                    if prev is None or score > prev[0]:
+                        trigger_scores[trigger_ep.url] = (score, rationale)
+        trigger_cap = max(0, cfg_v.second_order_max_renders)
+        triggers = [url for url, _ in sorted(
+            trigger_scores.items(), key=lambda row: (-row[1][0], row[0]))
+            [:trigger_cap]]
+        plan = plan_second_order_ssrf(len(sinks), len(triggers))
+        if not self._reserve_or_block(
+                budgets, coverage, "second_order_ssrf", plan):
+            return []
+
+        actors = [i for i in identities
+                  if getattr(i, "name", "anonymous") != "anonymous"] \
+            or list(identities or [])[:1]
+        actor = actors[0] if actors else None
+        identity = getattr(actor, "name", "anonymous")
+        headers = dict(getattr(actor, "auth_headers", None) or {})
+        submitted = []
+        budget_blocked = False
+        incomplete = False
+        for ep, location, parameter, candidate_score, rationale in sinks:
+            if self._halted():
+                incomplete = True
+                break
+            if not budgets.consume_test(
+                    "second_order_ssrf", ep.normalized_url,
+                    limit=max_fields):
+                coverage.record("second_order_ssrf", "blocked",
+                                f"test budget: {ep.normalized_url}")
+                budget_blocked = True
+                continue
+            callback_url = make_ssrf_canary(provider.create_token())
+            callback_host = urlsplit(callback_url).hostname or ""
+            headers_for_request = dict(headers)
+            data = {p.name: (p.sample_value or "test")
+                    for p in ep.body_parameters if p.name}
+            json_body = _nested_parameter_object(data)
+            request_url = ep.url
+            if location == "body":
+                data[parameter.name] = callback_url
+                _assign_nested(json_body, parameter.name, callback_url)
+            elif location == "query":
+                request_url = _append_query_parameter(
+                    request_url, parameter.name, callback_url)
+            elif location == "header":
+                headers_for_request[parameter.name] = callback_url
+            try:
+                self._paced()
+                method = ep.method.upper()
+                request_kwargs = {"headers": headers_for_request,
+                                  "timeout": self.cfg.scan.http_timeout}
+                is_json = location == "body" and any(
+                    "json" in ct.lower() for ct in ep.request_content_types)
+                if location == "body":
+                    request_kwargs["json" if is_json else "data"] = (
+                        json_body if is_json else data)
+                request_fn = getattr(client, "request", None)
+                if callable(request_fn):
+                    response = request_fn(method, request_url,
+                                          **request_kwargs)
+                elif method == "POST" and location == "body" and not is_json:
+                    response = client.post(request_url, **request_kwargs)
+                else:
+                    raise RuntimeError("HTTP client lacks generic request support")
+            except BudgetExceeded:
+                coverage.record("second_order_ssrf", "blocked",
+                                f"budget: {ep.normalized_url}"
+                                f"::{parameter.name}")
+                budget_blocked = True
+                continue
+            except Exception as exc:
+                log.debug("second-order SSRF injection failed at %s: %s",
+                          ep.url, exc)
+                incomplete = True
+                continue
+            if response.status_code >= 400:
+                incomplete = True
+            metrics.second_order_ssrf_tests += 1
+            trigger_urls = _materialize_trigger_urls(
+                triggers, response, ep.url)
+            submitted.append({
+                "endpoint": ep, "parameter": parameter.name,
+                "location": location,
+                "candidate_score": candidate_score,
+                "candidate_rationale": rationale,
+                "method": method,
+                "callback_url": callback_url,
+                "callback_host": callback_host,
+                "status": response.status_code,
+                "trigger_urls": trigger_urls,
+            })
+
+        submitted_triggers = list(dict.fromkeys(
+            url for item in submitted for url in item["trigger_urls"]))
+        for trigger_url in submitted_triggers:
+            if self._halted():
+                incomplete = True
+                break
+            if not self.scope.is_in_scope(trigger_url):
+                continue
+            try:
+                self._paced()
+                response = client.get(
+                    trigger_url, headers=headers,
+                    timeout=self.cfg.scan.http_timeout)
+                if response.status_code >= 400:
+                    incomplete = True
+            except BudgetExceeded:
+                budget_blocked = True
+                incomplete = True
+                coverage.record("second_order_ssrf", "blocked",
+                                f"trigger request budget: {trigger_url}")
+                break
+            except Exception as exc:
+                log.debug("second-order SSRF trigger failed at %s: %s",
+                          trigger_url, exc)
+                incomplete = True
+
+        interactions = []
+        if submitted:
+            try:
+                interactions = provider.poll(
+                    timeout=self.cfg.oast.poll_timeout,
+                    interval=self.cfg.oast.poll_interval)
+            except Exception as exc:
+                log.debug("second-order SSRF OAST polling failed: %s", exc)
+                incomplete = True
+
+        findings: List[Finding] = []
+        for item in submitted:
+            ep = item["endpoint"]
+            matched = matching_interactions(
+                interactions, item["callback_host"])
+            if matched:
+                metrics.second_order_ssrf_confirmed += 1
+                self._note_candidate()
+                coverage.record(
+                    "second_order_ssrf", "confirmed",
+                    f"OAST callback for {ep.normalized_url}"
+                    f"::{item['parameter']}")
+                f = Finding(
+                    id=stable_finding_id(
+                        "second_order_ssrf", ep.normalized_url,
+                        item["parameter"]),
+                    source="second-order-ssrf",
+                    name=(f"Stored server-side fetch confirmed: {ep.path}"
+                          f"::{item['parameter']} triggered an OAST callback"),
+                    severity="medium",
+                    confidence=Confidence.CONFIRMED.value,
+                    validation_status=ValidationStatus.CONFIRMED.value,
+                    host=ep.host, matched_at=ep.url,
+                    endpoint_url=ep.url, method=item["method"],
+                    parameter=item["parameter"],
+                    description=(
+                        f"A unique callback URL stored through {item['method']} "
+                        f"{ep.url} in {item['location']} input "
+                        f"'{item['parameter']}' received an out-of-band "
+                        f"interaction after {len(item['trigger_urls'])} "
+                        "related in-scope trigger routes. "
+                        "This proves a server-side fetch, but does not by "
+                        "itself prove access to internal resources."),
+                    tags=["ssrf", "second-order", "oast",
+                          ep.endpoint_type],
+                    raw={"callback_host": item["callback_host"],
+                         "callback_url": item["callback_url"],
+                         "trigger_urls": item["trigger_urls"],
+                         "candidate_score": item["candidate_score"],
+                         "candidate_rationale": item["candidate_rationale"],
+                         "interactions": matched[:10]},
+                    false_positive_notes=(
+                        "A unique DNS/HTTP callback confirms a server-side "
+                        "fetch of the injected URL. No internal resources "
+                        "were requested or accessed."),
+                    identity=identity,
+                )
+                evidence.allocate(f)
+                evidence.record(
+                    f,
+                    request_text=(
+                        f"{item['method']} {ep.url}\n{item['location']}"
+                        f"::{item['parameter']}="
+                        f"{item['callback_url']}\n"
+                        + "\n".join(f"GET {url}" for url in
+                                   item["trigger_urls"])),
+                    response_text="\n".join(
+                        _interaction_line(it) for it in matched[:10]))
+                findings.append(f)
+            else:
+                coverage.record(
+                    "second_order_ssrf",
+                    "blocked" if budget_blocked else "inconclusive",
+                    f"no callback observed for {ep.normalized_url}"
+                    f"::{item['parameter']} after polling")
+        if incomplete and not submitted:
+            coverage.record("second_order_ssrf", "inconclusive",
+                            "injection or trigger flow was incomplete")
+        return findings
+
     # ── BUSINESS-LOGIC MUTATIONS (stateful slice) ──────────────────────
     def _business_logic_probe(self, endpoints: List[Endpoint],
                               evidence: EvidenceStore, metrics: Metrics,
@@ -2872,7 +3140,8 @@ class Orchestrator:
 
     def _maybe_register_oast(self) -> Optional[InteractshProvider]:
         want = (self.profile.oast or self.cfg.validation.ssrf
-                or self.cfg.validation.enabled)
+                or self.cfg.validation.enabled
+                or self.cfg.validation.second_order_ssrf)
         if not want or not self.cfg.oast.enabled:
             return None
         provider = InteractshProvider(
@@ -3279,12 +3548,16 @@ class Orchestrator:
         return getattr(self, "_active_waf", None)
 
     def _load_endpoints(self, out_dir: Path) -> List[Endpoint]:
-        return [Endpoint(
-            url=d["url"], normalized_url=d["normalized_url"],
-            method=d.get("method", "GET"), host=d.get("host", ""),
-            path=d.get("path", ""), source=d.get("source", []),
-            endpoint_type=d.get("endpoint_type", "unknown"))
-            for d in read_jsonl(out_dir / "endpoints.jsonl")]
+        loaded = []
+        for d in read_jsonl(out_dir / "endpoints.jsonl"):
+            kwargs = {k: v for k, v in d.items()
+                      if k in Endpoint.__dataclass_fields__}
+            for key in ("query_parameters", "body_parameters",
+                        "header_parameters"):
+                kwargs[key] = [Parameter(**p) if isinstance(p, dict) else p
+                               for p in kwargs.get(key, []) or []]
+            loaded.append(Endpoint(**kwargs))
+        return loaded
 
     @staticmethod
     def _read_lines(p: Path) -> List[str]:
@@ -3298,6 +3571,144 @@ def _interaction_line(i: Dict) -> str:
     proto = i.get("proto") or i.get("type", "?")
     return f"[{proto}] " + " ".join(str(v)[:120] for v in i.values()
                                     if isinstance(v, str))[:240]
+
+
+def _append_query_parameter(url: str, name: str, value: str) -> str:
+    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+    parts = urlsplit(url)
+    query = parse_qsl(parts.query, keep_blank_values=True)
+    query.append((name, value))
+    return urlunsplit((parts.scheme, parts.netloc, parts.path,
+                       urlencode(query, doseq=True), parts.fragment))
+
+
+def _nested_parameter_object(values: Dict[str, str]) -> Dict:
+    """Convert OpenAPI dotted property names into a JSON object."""
+    out: Dict = {}
+    for name, value in values.items():
+        _assign_nested(out, name, value)
+    return out
+
+
+def _assign_nested(out: Dict, name: str, value) -> None:
+    import re
+    parts = re.findall(r"[^.\[\]]+|\[\d*\]", name)
+    cursor = out
+    for index, raw in enumerate(parts):
+        is_last = index == len(parts) - 1
+        if raw.startswith("["):
+            if not isinstance(cursor, list):
+                return
+            slot = raw[1:-1]
+            pos = int(slot) if slot.isdigit() else 0
+            while len(cursor) <= pos:
+                cursor.append({})
+            if is_last:
+                cursor[pos] = value
+            elif not isinstance(cursor[pos], (dict, list)):
+                cursor[pos] = [] if parts[index + 1].startswith("[") else {}
+            cursor = cursor[pos]
+        else:
+            if not isinstance(cursor, dict):
+                return
+            if is_last:
+                cursor[raw] = value
+            else:
+                next_is_array = parts[index + 1].startswith("[")
+                if not isinstance(cursor.get(raw), (dict, list)):
+                    cursor[raw] = [] if next_is_array else {}
+                cursor = cursor[raw]
+
+
+def _rank_ssrf_triggers(sink: Endpoint, endpoints: List[Endpoint]):
+    """Rank safe GET routes that can plausibly process a stored sink value."""
+    import re
+    sink_path = (sink.path or "").lower().rstrip("/") or "/"
+    sink_tokens = set(re.findall(r"[a-z0-9]+", sink_path))
+    sink_context = " ".join([sink.summary, sink.description,
+                             sink.operation_id, *sink.tags]).lower()
+    sink_terms = set(re.findall(r"[a-z0-9]+", sink_context))
+    trigger_terms = {"job", "task", "status", "result", "preview", "render",
+                     "process", "worker", "history", "detail", "file", "image"}
+    ranked = []
+    for candidate in endpoints:
+        if candidate.method.upper() != "GET" or candidate.endpoint_type == "static":
+            continue
+        path = (candidate.path or "").lower().rstrip("/") or "/"
+        tokens = set(re.findall(r"[a-z0-9]+", path))
+        context = " ".join([candidate.summary, candidate.description,
+                            candidate.operation_id, *candidate.tags]).lower()
+        context_tokens = set(re.findall(r"[a-z0-9]+", context))
+        score = 0
+        rationale = []
+        if path == sink_path:
+            score += 8
+            rationale.append("same resource route")
+        overlap = sink_tokens & tokens - {"api", "v1", "v2", "v3"}
+        if overlap:
+            score += min(5, len(overlap) * 2)
+            rationale.append("shared resource path: " + ", ".join(sorted(overlap)))
+        if context_tokens & trigger_terms:
+            score += 3
+            rationale.append("documented processing or result route")
+        if tokens & trigger_terms:
+            score += 2
+            rationale.append("processing or result path segment")
+        if sink_terms & context_tokens:
+            score += 2
+            rationale.append("shared OpenAPI operation context")
+        if score >= 3:
+            ranked.append((candidate, score, "; ".join(rationale)))
+    return sorted(ranked, key=lambda item: (-item[1], item[0].url))
+
+
+def _materialize_trigger_urls(templates: List[str], response, base_url: str):
+    """Fill documented `{id}` trigger paths from a create response."""
+    import json
+    import re
+    from urllib.parse import urljoin, urlsplit
+    values = {}
+    try:
+        payload = json.loads(getattr(response, "text", "") or "")
+        if isinstance(payload, dict):
+            values.update({str(k).lower(): str(v) for k, v in payload.items()
+                           if isinstance(v, (str, int))})
+            for key in ("data", "result", "job", "task", "resource"):
+                nested = payload.get(key)
+                if isinstance(nested, dict):
+                    values.update({str(k).lower(): str(v)
+                                   for k, v in nested.items()
+                                   if isinstance(v, (str, int))})
+    except (TypeError, ValueError):
+        pass
+    location = ""
+    for key, value in (getattr(response, "headers", {}) or {}).items():
+        if str(key).lower() == "location":
+            location = urljoin(base_url, str(value))
+            break
+    location_id = urlsplit(location).path.rstrip("/").split("/")[-1]
+    if location_id and location_id.lower() not in {
+            "", "status", "result", "preview", "history"}:
+        values.setdefault("id", location_id)
+        values.setdefault("jobid", location_id)
+        values.setdefault("taskid", location_id)
+    materialized = []
+    for template in templates:
+        unresolved = False
+        def replace(match):
+            nonlocal unresolved
+            key = match.group(1).lower()
+            value = values.get(key)
+            if value is None and key.endswith("id"):
+                value = values.get("id")
+            if value is None:
+                unresolved = True
+                return match.group(0)
+            return value
+        url = re.sub(r"\{([^{}]+)\}", replace, template)
+        if not unresolved:
+            materialized.append(url)
+    return materialized
 
 
 def _classify_finding(f: Finding) -> str:
