@@ -682,6 +682,22 @@ negative. Divergent bursts carrying an idempotency key get a
 sequential double-submit re-check: double acceptance with different
 objects upgrades to `confirmed`; otherwise the candidate stands.
 
+### 8f. Workflow discovery (always on, zero network)
+
+After validation, `apex_fuzzer/workflows/` infers multi-step flows
+purely from collected data — no requests are sent, so this stage
+always runs. Producers: REST stem grouping (collection/member
+folding, CRUD-ordered steps), timestamp-ordered browser traffic
+chains, CRUD linkage from resource states, and harvested value
+overlap (producer→consumer 2-step flows). Every flow cites its
+evidence and confidence (`observed` only for sequences that
+literally happened). `mutations.py` derives bounded invalid-sequence
+variants (skip/reorder/repeat/replay/prerequisite-drop/actor-change/
+stale-token/invalid-transition) as test candidates for later phases
+— generating a mutation claims nothing. Artifacts: `workflows.json`
+(flows + mutation catalog); stored workflows append to the
+application model; step chains link into the graph.
+
 ### 9. AI → `hypotheses.jsonl`
 
 `AIPlanner` emits structured hypotheses
@@ -834,6 +850,7 @@ Per target, `output/<host>/`:
 | `application_graph.json` | persisted application graph (Phase 1) |
 | `coverage.json` | per-class test coverage (Phase 1) |
 | `authorization_matrix.json` | authz observations per identity×method |
+| `workflows.json` | discovered flows + mutation catalog (Phase 4) |
 | `state/snapshots.jsonl` | point-in-time behavior snapshots (Phase 3) |
 | `state/transitions.jsonl` | observed cross-run cell changes (Phase 3) |
 | `attack_chains.jsonl` | attack chains (schema only until Phase 9) |
@@ -859,6 +876,7 @@ invariants_tested, invariants_violated,
 effects_verified,
 logins_attempted, logins_succeeded,
 graph_nodes, graph_edges,
+workflows_discovered,
 scan_duration_seconds`.
 
 (`stage_durations` exists in the schema but is currently unpopulated —
@@ -1095,7 +1113,7 @@ self-DoS and the false negatives that timeouts masquerade as.
 .venv/bin/python -m pytest tests/ -q
 ```
 
-297 tests: URL normalization, endpoint classification, parameter extraction
+316 tests: URL normalization, endpoint classification, parameter extraction
 (URL/HTML/JS), scope rules, secret redaction, plus v5.2 coverage — Arjun JSON
 parsing, WAF fingerprinting, JS-bundle tech gating, structural JS chunking,
 source-map parsing, differential verdicts (BOLA / broken-access / healthy /
@@ -1182,6 +1200,8 @@ apex_fuzzer/
     evidence.py          per-finding proof dirs + curl reproduction
   auth/                  login workflows · sessions · identities ·
                          OAuth/OIDC modeling · passive JWT (agent Phase 2)
+  workflows/             discovery · model · replay · mutations ·
+                         dependencies (agent Phase 4, offline analysis)
   ai/planner.py          Gemini/Ollama hypotheses + JS-chunk planning
   reporting/
     html.py              triage report (impact · repro · FP notes · evidence · coverage)
@@ -1196,5 +1216,6 @@ tests/                   pytest suite (test_v52.py: 5.2 additions, test_phase1.p
                          (test_browser.py: 18 unit + 2 live-Chromium integration, test_ollama.py, test_dotenv.py)
                          (test_auth.py: 34 auth-workflow/JWT/OAuth/OIDC tests + 2 live-browser login tests)
                          (test_state.py: 13 state-graph/snapshot/transition/diff/lifecycle tests)
+                         (test_workflows.py: 19 discovery/replay/mutation/dependency tests)
 setup1.sh … setup8.sh    project scaffolding scripts
 ```

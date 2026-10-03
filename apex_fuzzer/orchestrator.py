@@ -89,6 +89,7 @@ class Orchestrator:
         self._stop_flag = StopFlag()
         self._pacer = Pacer(0)
         self._safety_info: Optional[dict] = None
+        self._harvest_pool: list = []
 
     # =====================================================================
     def run(self, targets: List[str], resume: bool = False):
@@ -263,6 +264,11 @@ class Orchestrator:
             ck.mark("validation")
         else:
             ck.mark("validation", "skipped")
+
+        # ── 8b. WORKFLOW DISCOVERY (agent Phase 4, offline) ─────────
+        # Pure analysis over collected data — zero network, always safe.
+        self._discover_workflows(out_dir, endpoints, application,
+                                 app_graph, metrics, ck)
 
         # ── 9. AI (+ loop closure into deterministic testing) ───────────
         hypotheses: List[Hypothesis] = []
@@ -1589,6 +1595,7 @@ class Orchestrator:
                 coverage.record("authz", "blocked",
                                 f"budget: {ep.normalized_url}")
                 continue
+        self._harvest_pool = pool
 
         def handle_swaps(swaps, ep):
             for sw in swaps:
@@ -1844,6 +1851,96 @@ class Orchestrator:
                                       actor=o.identity)
         store.save(state_dir / "snapshots.jsonl")
         tlog.save(state_dir / "transitions.jsonl")
+
+    # ── WORKFLOW DISCOVERY (agent Phase 4, offline) ────────────────
+    def _discover_workflows(self, out_dir: Path, endpoints, application,
+                            app_graph, metrics: Metrics, ck: Checkpoint):
+        """Infer flows from collected data only — no requests sent.
+
+        Sources: REST stem grouping, timestamp-ordered browser traffic,
+        CRUD linkage, harvested value overlap. Persists workflows.json
+        (+ mutation catalog), appends stored workflows to the
+        application model, and links step chains in the graph.
+        """
+        from .workflows.discovery import discover_all
+        from .workflows.mutations import mutation_catalog
+        from .state.resources import ResourceTracker
+        from .state.graph import ensure_workflow
+        import json as _json
+        traffic: dict = {}
+        traffic_file = out_dir / "browser_traffic.json"
+        if traffic_file.exists():
+            try:
+                traffic = _json.loads(traffic_file.read_text())
+            except Exception as e:
+                log.debug("workflow discovery: bad traffic file: %s", e)
+        # CRUD linkage from app resources × endpoint methods
+        tracker = ResourceTracker()
+        resources = []
+        if application is not None:
+            resources = getattr(application, "resources", []) or []
+        for res in resources:
+            rkey = res.get("key", "") if isinstance(res, dict) else \
+                getattr(res, "key", "")
+            rtype = res.get("resource_type", "object") \
+                if isinstance(res, dict) else getattr(
+                    res, "resource_type", "object")
+            idents = res.get("identifiers", {}) if isinstance(
+                res, dict) else getattr(res, "identifiers", {})
+            if not rkey:
+                continue
+            tracker.track(rkey, rtype,
+                          owner=res.get("owner", "") if isinstance(
+                              res, dict) else getattr(res, "owner", ""),
+                          tenant=res.get("tenant", "") if isinstance(
+                              res, dict) else getattr(res, "tenant", ""))
+            for ep in endpoints or []:
+                ep_params = {p.name for p in
+                             list(getattr(ep, "query_parameters", [])
+                                  or []) +
+                             list(getattr(ep, "body_parameters", [])
+                                  or [])}
+                if not (set(idents) & ep_params):
+                    continue
+                method = (getattr(ep, "method", "GET") or "GET").upper()
+                action = {"POST": "create", "GET": "read",
+                          "PUT": "update", "PATCH": "update",
+                          "DELETE": "delete"}.get(method, "")
+                if action:
+                    tracker.resources[rkey].link_crud(
+                        action, getattr(ep, "url", ""))
+        flows = discover_all(
+            endpoints=endpoints, traffic=traffic,
+            resources=list(tracker.resources.values()),
+            harvest_pool=list(getattr(self, "_harvest_pool", []) or []))
+        payload = {"flows": [f.to_dict() for f in flows],
+                   "mutations": mutation_catalog(flows)}
+        (out_dir / "workflows.json").write_text(
+            _json.dumps(payload, indent=2))
+        if application is not None:
+            try:
+                stored = [f.to_stored() for f in flows]
+                existing = {w.name for w in
+                            getattr(application, "workflows", []) or []}
+                application.workflows.extend(
+                    w for w in stored if w.name not in existing)
+                (out_dir / "application.json").write_text(
+                    _json.dumps(application.to_dict(), indent=2))
+                ck.save_blob("application", application.to_dict())
+            except Exception as e:
+                log.debug("workflow discovery: app persist failed: %s",
+                          e)
+        metrics.workflows_discovered = len(flows)
+        if app_graph is not None:
+            try:
+                for f in flows:
+                    ensure_workflow(app_graph, f.name,
+                                    [s.name for s in f.steps])
+            except Exception as e:
+                log.debug("workflow discovery: graph link failed: %s",
+                          e)
+        log.info("workflows: %d discovered (%d observed)",
+                 len(flows), sum(1 for f in flows if f.observed))
 
     # ── STORED-XSS CORRELATION (bounty item #3) ────────────────────────
     def _second_order_probe(self, endpoints: List[Endpoint],

@@ -34,6 +34,8 @@ class Metrics:
     logins_succeeded: int = 0
     graph_nodes: int = 0
     graph_edges: int = 0
+    workflows_discovered: int = 0
+    workflows_discovered: int = 0
     takeover_confirmed: int = 0
     hypotheses_validated: int = 0
     waf_detected: str = ""
