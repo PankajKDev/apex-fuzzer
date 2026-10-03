@@ -180,8 +180,9 @@ def generate_template_for_hypothesis(h, endpoint_url: str,
     from urllib.parse import urlparse
     host = urlparse(endpoint_url).hostname or ""
     slug = hypothesis_slug(h)
-    tid = f"ai-gen-{hashlib.md5(
-        (slug + '|' + endpoint_url).encode()).hexdigest()[:8]}"
+    digest = hashlib.md5(
+        (slug + '|' + endpoint_url).encode()).hexdigest()[:8]
+    tid = f"ai-gen-{digest}"
     words = [w for w in str(getattr(h, "hypothesis", "")).split()[:5]
              if len(w) > 2][:3]
     return {
