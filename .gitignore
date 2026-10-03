@@ -1,6 +1,9 @@
 # secrets — copy .env.example to .env locally
 .env
 
+# local progress scratch (not for the repo)
+progress.md
+
 # scan artifacts (per-target outputs, evidence, caches, resume state)
 output/
 *.log

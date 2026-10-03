@@ -121,6 +121,22 @@ auth:
     #   identity: user_b
     #   roles: ["member"]
     #   tenant: acme
+  # Automated form-login minting (agent Phase 2). Disabled unless set.
+  # Passwords come from the environment (never from this file).
+  # Only contexts that exist above AND have no headers get enriched.
+  login:
+    enabled: false
+    url: "https://target.example/login"
+    username_field: username
+    password_field: password
+    submit: "button[type=submit]"
+    success_url_contains: "/dashboard"  # or success_text: "Welcome"
+    identities:
+      # - name: user_a        # must match a context name above
+      #   username: alice@example.com
+      #   password_env: USER_A_PASSWORD
+      #   roles: ["member"]
+      #   tenant: acme
 
 reporting:
   redact_secrets: true

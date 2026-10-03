@@ -195,9 +195,35 @@ class AuthContext:
 
 
 @dataclass
+class LoginIdentityConfig:
+    """One login-capable identity. The password itself is NEVER stored
+    here — `password_env` names the environment variable holding it."""
+    name: str = ""
+    username: str = ""
+    password_env: str = ""
+    roles: List[str] = field(default_factory=list)
+    tenant: str = ""
+
+
+@dataclass
+class LoginConfig:
+    """Automated form-login minting (agent Phase 2). Disabled unless
+    explicitly configured; the login URL must be in scope."""
+    enabled: bool = False
+    url: str = ""
+    username_field: str = "username"
+    password_field: str = "password"
+    submit: str = "button[type=submit]"
+    success_url_contains: str = ""
+    success_text: str = ""
+    identities: List[LoginIdentityConfig] = field(default_factory=list)
+
+
+@dataclass
 class AuthConfig:
     # anonymous context is always implicitly present
     contexts: List[AuthContext] = field(default_factory=list)
+    login: LoginConfig = field(default_factory=LoginConfig)
 
     @property
     def has_authenticated(self) -> bool:
@@ -269,7 +295,28 @@ class Config:
                     roles=roles,
                     tenant=str(item.get("tenant") or ""),
                     storage_state=item.get("storage_state")))
-            cfg.auth = AuthConfig(contexts=ctxs)
+            login_raw = data["auth"].get("login") or {}
+            login = LoginConfig(
+                enabled=bool(login_raw.get("enabled", False)),
+                url=str(login_raw.get("url", "")),
+                username_field=str(login_raw.get("username_field",
+                                                 "username")),
+                password_field=str(login_raw.get("password_field",
+                                                 "password")),
+                submit=str(login_raw.get("submit",
+                                         "button[type=submit]")),
+                success_url_contains=str(login_raw.get(
+                    "success_url_contains", "")),
+                success_text=str(login_raw.get("success_text", "")),
+                identities=[LoginIdentityConfig(
+                    name=str(i.get("name", "")),
+                    username=str(i.get("username", "")),
+                    password_env=str(i.get("password_env", "")),
+                    roles=[str(r) for r in (i.get("roles") or [])],
+                    tenant=str(i.get("tenant", "")))
+                    for i in (login_raw.get("identities") or [])
+                    if isinstance(i, dict) and i.get("name")])
+            cfg.auth = AuthConfig(contexts=ctxs, login=login)
         return cfg
 
     def to_dict(self) -> Dict[str, Any]:

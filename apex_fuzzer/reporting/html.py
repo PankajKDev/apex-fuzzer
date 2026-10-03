@@ -93,6 +93,7 @@ def _metrics_block(m: Dict) -> str:
             ("Biz logic", m.get("business_logic_candidates")),
             ("Race", m.get("race_candidates")),
             ("Inv violated", m.get("invariants_violated")),
+            ("Logins", m.get("logins_succeeded")),
             ("Hypotheses", m.get("hypotheses_generated")),
             ("Hyp. validated", m.get("hypotheses_validated")),
             ("Takeovers", m.get("takeover_confirmed")),

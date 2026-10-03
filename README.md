@@ -393,6 +393,54 @@ endpoint carrying an identifier-like parameter (`id, uuid, uid, user_id,
 account_id, order_id, email, username, …`), IDOR-param endpoints first, capped
 by `validation.differential_max_endpoints`.
 
+### Automated login (agent Phase 2)
+
+When static cookies aren't available, the login engine mints sessions
+itself. Configure under `auth.login` (disabled by default):
+
+```yaml
+auth:
+  login:
+    enabled: true
+    url: "https://target.example/login"
+    username_field: username
+    password_field: password
+    submit: "button[type=submit]"
+    success_url_contains: "/dashboard"
+    identities:
+      - name: user_a          # must match a context name above
+        username: alice@example.com
+        password_env: USER_A_PASSWORD   # env var, never this file
+        roles: ["member"]
+        tenant: acme
+```
+
+Behavior: for each login identity whose context exists **and has no
+headers yet**, Chromium fills the form, submits, and verifies logout is
+gone. Success → cookies captured into a session, context enriched,
+persisted under `sessions/`. MFA challenge → persisted
+`mfa_<name>.json` checkpoint for manual completion, never bypassed or
+auto-retried. Missing password env, out-of-scope URL, or absent
+Playwright → logged skip. No login automation runs unless you opt in.
+
+### Auth sessions, JWT, OAuth/OIDC (passive)
+
+- `auth/sessions.py`: `AuthSession` records (cookies/headers/tokens,
+  expiry windows) with refresh-token rotation and secret-redacted
+  persistence; `SessionStore` creates, refreshes, prunes, and reloads.
+- `auth/jwt.py`: decodes tokens and models claims (alg, iss, aud, exp,
+  nbf, iat, kid, privilege-adjacent claims). Observations only —
+  active JWT attacks arrive in a later phase with behavioral evidence.
+- `auth/oauth.py`: PKCE pairs (RFC 7636 S256), authorize-URL builder,
+  single-use authorization-code tracking (reuse flagged), and
+  token-leakage detection over recorded traffic (codes/tokens leaving
+  first-party hosts).
+- `auth/oidc.py`: discovery-document fetch, passive issuer checks,
+  nonce issue/consume with replay detection, ID-token parsing.
+- `auth/identities.py`: `Permission` model + `IdentityRegistry`
+  (identity → roles → permissions, tenant checks) feeding later
+  authorization work.
+
 ---
 
 ## OAST setup (Interactsh)
@@ -753,6 +801,7 @@ second_order_tests, second_order_candidates,
 business_logic_tests, business_logic_candidates,
 race_tests, race_candidates,
 invariants_tested, invariants_violated,
+logins_attempted, logins_succeeded,
 scan_duration_seconds`.
 
 (`stage_durations` exists in the schema but is currently unpopulated —
@@ -921,7 +970,7 @@ self-DoS and the false negatives that timeouts masquerade as.
 .venv/bin/python -m pytest tests/ -q
 ```
 
-96 tests: URL normalization, endpoint classification, parameter extraction
+217 tests: URL normalization, endpoint classification, parameter extraction
 (URL/HTML/JS), scope rules, secret redaction, plus v5.2 coverage — Arjun JSON
 parsing, WAF fingerprinting, JS-bundle tech gating, structural JS chunking,
 source-map parsing, differential verdicts (BOLA / broken-access / healthy /
@@ -929,7 +978,10 @@ volatile-key immunity), mutation ordering and error signals, OAST
 candidate filtering and correlation, AI template generation, limiter
 backoff/recovery, and auth/OAST config parsing — plus Phase 1 foundation:
 application/graph models, invariants, coverage precedence, budgets,
-checkpoint blobs, plugin registry/prerequisites, and orchestrator wiring.
+checkpoint blobs, plugin registry/prerequisites, and orchestrator wiring —
+plus bounty engines (authz swap/BFLA, stored XSS, business logic, race),
+Ollama backend, dotenv handling, browser/session engine, and auth
+workflows (login, sessions, JWT/OAuth/OIDC passive).
 
 ---
 
@@ -998,6 +1050,8 @@ apex_fuzzer/
     differential.py      auth-context BOLA / broken-access engine
     mutate.py            WAF fingerprint + payload mutation ladders
     evidence.py          per-finding proof dirs + curl reproduction
+  auth/                  login workflows · sessions · identities ·
+                         OAuth/OIDC modeling · passive JWT (agent Phase 2)
   ai/planner.py          Gemini/Ollama hypotheses + JS-chunk planning
   reporting/
     html.py              triage report (impact · repro · FP notes · evidence · coverage)
@@ -1008,5 +1062,6 @@ config.yaml              annotated defaults (copy per engagement, add secrets)
 tests/                   pytest suite (test_v52.py: 5.2 additions, test_phase1.py: foundation)
                          (test_bounty3.py: authz/second-order, test_stateful.py: stateful slice)
                          (test_browser.py: 18 unit + 2 live-Chromium integration, test_ollama.py, test_dotenv.py)
+                         (test_auth.py: 34 auth-workflow/JWT/OAuth/OIDC tests + 2 live-browser login tests)
 setup1.sh … setup8.sh    project scaffolding scripts
 ```
