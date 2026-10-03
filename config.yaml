@@ -45,7 +45,6 @@ business:
   enabled: false           # or --business-logic / deep/validation profiles
   max_endpoints: 10
   max_params: 3
-
 # Race-condition engine. Off by default: synchronized bursts of
 # state-changing requests are the most aggressive test in the suite.
 race:
@@ -53,6 +52,19 @@ race:
   concurrency: 10
   rounds: 3
   max_endpoints: 5
+
+# Browser-driven discovery + sessions (GET navigations only, safe).
+# Needs: pip install "apex-fuzzer[browser]" (Playwright + Chromium).
+browser:
+  enabled: false           # or --browser / deep profile
+  headless: true
+  max_pages: 100
+  max_depth: 5
+  capture_network: true
+  capture_websocket: true   # record ws:// URLs for later phases
+  capture_storage: true     # cookies + web storage + session export
+  capture_dom: true
+  navigation_timeout_ms: 30000
 
 # Request budgets (§50) — backstop against runaway testing.
 # Normal scans stay far below every cap.

@@ -49,6 +49,10 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Enable business-logic mutation engine")
     p.add_argument("--race", action="store_true",
                    help="Enable race-condition engine (aggressive)")
+    p.add_argument("--browser", action="store_true",
+                   help="Enable browser-driven discovery (needs playwright)")
+    p.add_argument("--no-browser", action="store_true",
+                   help="Disable browser-driven discovery")
     p.add_argument("--no-js", action="store_true")
     p.add_argument("--min-sev", default=None,
                    choices=["info", "low", "medium", "high", "critical"])

@@ -97,6 +97,20 @@ class BudgetConfig:
 
 
 @dataclass
+class BrowserConfig:
+    """Browser-driven discovery + sessions (agent Phase 1)."""
+    enabled: bool = False
+    headless: bool = True
+    max_pages: int = 100
+    max_depth: int = 5
+    capture_network: bool = True
+    capture_websocket: bool = True
+    capture_storage: bool = True
+    capture_dom: bool = True
+    navigation_timeout_ms: int = 30000
+
+
+@dataclass
 class OastConfig:
     enabled: bool = True
     server: str = "oast.pro"
@@ -204,6 +218,7 @@ class Config:
         default_factory=AuthorizationConfig)
     business: BusinessConfig = field(default_factory=BusinessConfig)
     race: RaceConfig = field(default_factory=RaceConfig)
+    browser: BrowserConfig = field(default_factory=BrowserConfig)
     budgets: BudgetConfig = field(default_factory=BudgetConfig)
     oast: OastConfig = field(default_factory=OastConfig)
     nuclei: NucleiConfig = field(default_factory=NucleiConfig)
@@ -287,4 +302,8 @@ def apply_cli_overrides(cfg: Config, args) -> Config:
         cfg.business.enabled = True
     if getattr(args, "race", False):
         cfg.race.enabled = True
+    if getattr(args, "browser", False):
+        cfg.browser.enabled = True
+    if getattr(args, "no_browser", False):
+        cfg.browser.enabled = False
     return cfg

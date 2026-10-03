@@ -13,6 +13,9 @@ dependencies = [
     "pyyaml>=6.0",
 ]
 
+[project.optional-dependencies]
+browser = ["playwright>=1.40"]
+
 [project.scripts]
 apex-fuzzer = "apex_fuzzer.cli:main"
 

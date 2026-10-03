@@ -31,19 +31,20 @@ Version: **5.2.0**. Requires Python ≥ 3.10.
 10. [Validation semantics](#validation-semantics)
 11. [WAF-aware mutation engine](#waf-aware-mutation-engine)
 12. [AI planner and loop closure](#ai-planner-and-loop-closure)
-13. [Output files](#output-files)
-14. [Data models](#data-models)
-15. [Application model and graph (Phase 1)](#application-model-and-graph-phase-1)
-16. [Security invariants (Phase 1)](#security-invariants-phase-1)
-17. [Coverage model (Phase 1)](#coverage-model-phase-1)
-18. [Budgets (Phase 1)](#budgets-phase-1)
-19. [Plugin architecture (Phase 1)](#plugin-architecture-phase-1)
-20. [Scope enforcement](#scope-enforcement)
-21. [Evidence and secret redaction](#evidence-and-secret-redaction)
-22. [Rate limiting](#rate-limiting)
-23. [Running the tests](#running-the-tests)
-24. [Tool dependency matrix](#tool-dependency-matrix)
-25. [Project structure](#project-structure)
+13. [Browser-driven discovery (agent Phase 1)](#browser-driven-discovery-agent-phase-1)
+14. [Output files](#output-files)
+15. [Data models](#data-models)
+16. [Application model and graph (Phase 1)](#application-model-and-graph-phase-1)
+17. [Security invariants (Phase 1)](#security-invariants-phase-1)
+18. [Coverage model (Phase 1)](#coverage-model-phase-1)
+19. [Budgets (Phase 1)](#budgets-phase-1)
+20. [Plugin architecture (Phase 1)](#plugin-architecture-phase-1)
+21. [Scope enforcement](#scope-enforcement)
+22. [Evidence and secret redaction](#evidence-and-secret-redaction)
+23. [Rate limiting](#rate-limiting)
+24. [Running the tests](#running-the-tests)
+25. [Tool dependency matrix](#tool-dependency-matrix)
+26. [Project structure](#project-structure)
 
 ---
 
@@ -120,6 +121,11 @@ Optional extras:
   (e.g. `qwen2.5:14b`) give better hypotheses if you have the VRAM;
   the planner checks the model is loaded and tells you the pull
   command when it isn't.
+- **Playwright** (optional, browser-driven discovery): `pip install
+  "apex-fuzzer[browser]"` plus `playwright install chromium` (or reuse
+  an existing ms-playwright browser install). Without it the browser
+  stage logs a skip; all 18 unit tests still run, the 2 live-Chromium
+  integration tests skip.
 
 ### Environment file (.env)
 
@@ -180,6 +186,8 @@ Results land in `output/<host>/`: `report.html`, `findings.jsonl`,
 --second-order          stored-XSS correlation on (persists canaries)
 --business-logic        business-logic mutation engine on (submits abuse values)
 --race                  race-condition engine on (synchronized bursts)
+--browser               browser-driven discovery on (needs playwright)
+--no-browser            browser-driven discovery off
 --no-js                 disable JavaScript analysis
 --min-sev {info,low,medium,high,critical}
                         minimum severity rendered in the report
@@ -206,8 +214,11 @@ Results land in `output/<host>/`: `report.html`, `findings.jsonl`,
 
 Combine profiles with flags: `--validate`, `--ai`, `--oast`, `--differential`,
 `--second-order` force-enable the matching stage regardless of profile.
-Config-file keys (`validation.enabled/differential/ssrf/second_order`,
+`--business-logic` / `--race` / `--browser` (and `--no-browser` to force
+off) do the same for their engines. Config-file keys
+(`validation.enabled/differential/ssrf/second_order`,
 `authorization.enabled`, `business.enabled`, `race.enabled`,
+`browser.enabled`,
 `ai.enabled`) do the same. Business-logic runs in deep/validation;
 race stays off in every profile (opt-in via `--race`).
 
@@ -292,6 +303,19 @@ race:
   concurrency: 10
   rounds: 3
   max_endpoints: 5
+
+# Browser-driven discovery + sessions (GET navigations only, safe).
+# Needs: pip install "apex-fuzzer[browser]" (Playwright + Chromium).
+browser:
+  enabled: false           # or --browser / deep profile
+  headless: true
+  max_pages: 100
+  max_depth: 5
+  capture_network: true
+  capture_websocket: true   # record ws:// URLs for later phases
+  capture_storage: true     # cookies + web storage + session export
+  capture_dom: true
+  navigation_timeout_ms: 30000
 
 nuclei:
   bb_templates_dir: "~/nuclei-bb-templates"
@@ -408,6 +432,15 @@ stripping, `//` collapse, trailing-slash trim, sorted query) and deduped into
 fetched (cached under `cache/`) and mined for endpoints; source maps are
 fetched and **deep-parsed** — `sourcesContent` yields unminified endpoints,
 params, and secrets, `sources` yields internal module paths.
+
+With `browser.enabled` (`--browser`, deep profile), Chromium crawls
+same-host GET navigations (bounded by `max_pages`/`max_depth`/budget),
+records traffic, and merges discovered requests, form actions/inputs,
+and WebSocket URLs into the same endpoint pool (`source: ["browser"]`,
+params `probable`, form inputs `possible`). Cookies, web storage, and
+extracted tokens export to `sessions/browser.json`; auth contexts
+declaring `storage_state` files get their Cookie headers filled before
+validation. Without Playwright installed the stage logs a skip.
 
 ### 3. API-spec discovery → `api_specs.json`
 
@@ -638,6 +671,39 @@ render as pending — never as findings.
 
 ---
 
+## Browser-driven discovery (agent Phase 1)
+
+With `browser.enabled` (`--browser`, deep profile; needs
+`pip install "apex-fuzzer[browser]"`), Chromium crawls the target with
+GET navigations only — nothing state-changing:
+
+- **Lifecycle** (`browser/browser.py`): headless launch, per-scan
+  contexts, graceful skip when Playwright/Chromium is absent.
+- **Network** (`browser/network.py`): request/response interception,
+  WebSocket URL discovery, conversion of recorded traffic into endpoint
+  dicts merged into the normal pipeline (`source: ["browser"]`).
+- **DOM** (`browser/actions.py`): form/link/script/iframe snapshots;
+  form actions become endpoints with `body_parameters`, methods upgraded
+  from the form's method. Fill/click/js primitives plus an action log.
+- **Storage** (`browser/storage.py`): cookies, localStorage,
+  sessionStorage, JWT/bearer/CSRF-token extraction.
+- **Sessions** (`browser/sessions.py`): capture → `BrowserSession`
+  → `Identity` (Cookie/Authorization headers) reused straight through
+  `_HTTPClient`, differential testing, and the authz matrix.
+  Storage-state files declared in auth contexts are imported the same
+  way (static headers always win). Login-redirect/logout heuristics
+  included.
+- **Workflows** (`browser/workflows.py`): recordable goto/fill/click/
+  wait step lists (e.g. login), replayable per identity with per-step
+  results — failures stop the chain instead of crashing.
+
+Crawl bounds (`max_pages`, `max_depth`), navigation timeouts, the
+`browser_actions` budget, and scope checks apply to every navigation.
+Artifacts: `browser_urls.txt`, `browser_traffic.json`,
+`sessions/browser.json`, `metrics.browser_pages/browser_requests`.
+
+---
+
 ## Output files
 
 Per target, `output/<host>/`:
@@ -658,6 +724,9 @@ Per target, `output/<host>/`:
 | `takeover.txt`, `tko.csv` | takeover tool output |
 | `nuclei.jsonl`, `nuclei-ai.jsonl` | raw Nuclei JSONL |
 | `ai-templates/` | generated gate templates |
+| `browser_urls.txt` | in-scope URLs visited by Chromium |
+| `browser_traffic.json` | recorded browser requests + websockets |
+| `sessions/browser.json` | exported browser session (cookies/tokens) |
 | `findings.jsonl` | final deduped findings |
 | `hypotheses.jsonl` | AI hypotheses with validation status |
 | `application.json` | incremental application model (Phase 1) |
@@ -903,6 +972,11 @@ apex_fuzzer/
     application_graph.py node/edge store, queries, JSON persistence (Phase 1)
   logic/
     invariants.py        security invariant registry + built-ins (Phase 1)
+    observations.py      invariant observation producers (stateful slice)
+    business_logic.py    quantity/price/refund/replay mutations
+    race.py              barrier-synchronized burst engine
+  browser/               Chromium lifecycle · network/storage/actions ·
+                         sessions · recordable workflows (agent Phase 1)
   plugins/
     base.py              SecurityTest interface, registry, run_plugins (Phase 1)
     adapters.py          sqli/xss/ssrf adapters over existing validators
@@ -924,7 +998,7 @@ apex_fuzzer/
     differential.py      auth-context BOLA / broken-access engine
     mutate.py            WAF fingerprint + payload mutation ladders
     evidence.py          per-finding proof dirs + curl reproduction
-  ai/planner.py          Gemini hypotheses + JS-chunk planning
+  ai/planner.py          Gemini/Ollama hypotheses + JS-chunk planning
   reporting/
     html.py              triage report (impact · repro · FP notes · evidence · coverage)
     impact.py            impact / repro-step / FP-note builders
@@ -932,5 +1006,7 @@ apex_fuzzer/
     metrics.py           coverage + validation counters
 config.yaml              annotated defaults (copy per engagement, add secrets)
 tests/                   pytest suite (test_v52.py: 5.2 additions, test_phase1.py: foundation)
+                         (test_bounty3.py: authz/second-order, test_stateful.py: stateful slice)
+                         (test_browser.py: 18 unit + 2 live-Chromium integration, test_ollama.py, test_dotenv.py)
 setup1.sh … setup8.sh    project scaffolding scripts
 ```

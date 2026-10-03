@@ -28,6 +28,8 @@ class Metrics:
     differential_candidates: int = 0
     oast_endpoints_probed: int = 0
     oast_confirmed: int = 0
+    browser_pages: int = 0
+    browser_requests: int = 0
     takeover_confirmed: int = 0
     hypotheses_validated: int = 0
     waf_detected: str = ""

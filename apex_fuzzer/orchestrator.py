@@ -135,7 +135,9 @@ class Orchestrator:
             endpoints = self._load_endpoints(out_dir)
         else:
             ck.mark("discovery", "running")
-            endpoints = self._build_endpoints(scoped, host, out_dir, client)
+            endpoints = self._build_endpoints(scoped, host, out_dir,
+                                              client, base_url, budgets,
+                                              metrics)
             metrics.unique_endpoints = len(endpoints)
             metrics.parameters_discovered = sum(
                 len(e.query_parameters) + len(e.body_parameters)
@@ -211,6 +213,13 @@ class Orchestrator:
 
         # ── 8. VALIDATION (+ differential + OAST) ───────────────────────
         evidence = EvidenceStore(out_dir / "proofs")
+        # storage_state import: contexts declaring a file get its cookies
+        # (static header config always wins; safe additive enrichment)
+        from .browser.sessions import SessionManager
+        try:
+            SessionManager().apply_to_contexts(self.cfg.auth.contexts)
+        except Exception as e:
+            log.debug("session import failed: %s", e)
         run_validation = (self.profile.run_validation
                           or self.cfg.validation.enabled)
         run_diff = (self.profile.differential
@@ -392,7 +401,8 @@ class Orchestrator:
         log.info("api specs: %d endpoints added", added)
 
     def _build_endpoints(self, urls: List[str], host: str, out_dir: Path,
-                         client) -> List[Endpoint]:
+                         client, base_url: str, budgets, metrics
+                         ) -> List[Endpoint]:
         by_norm: Dict[str, Endpoint] = {}
         from urllib.parse import urlparse
         for u in urls:
@@ -431,7 +441,187 @@ class Orchestrator:
                         (sm.get("details") or {}).get("params", []))
         if js_results:
             write_jsonl(out_dir / "js_analysis.jsonl", js_results)
+        # ── browser-driven discovery (agent Phase 1) ───────────────────
+        for entry in self._browser_discover(
+                base_url, host, out_dir, budgets, metrics):
+            self._merge_browser_entry(by_norm, host, entry)
         return list(by_norm.values())
+
+    @staticmethod
+    def _merge_browser_entry(by_norm: Dict[str, Endpoint], host: str,
+                             entry: Dict):
+        """Merge one browser-discovered request/form into the pipeline."""
+        from urllib.parse import urlparse
+        url = entry.get("url", "")
+        if not url:
+            return
+        method = (entry.get("method") or "GET").upper()
+        n = normalize_url(url)
+        ep = by_norm.get(n)
+        if ep is None:
+            p = urlparse(n)
+            ep = Endpoint(url=url, normalized_url=n,
+                          host=p.hostname or host, path=p.path,
+                          method=method, source=["browser"])
+            by_norm[n] = ep
+        elif "browser" not in ep.source:
+            ep.source.append("browser")
+        new_params = []
+        for name in entry.get("params") or []:
+            new_params.append(Parameter(
+                name=name, location="query", source=["browser"],
+                confidence=Confidence.PROBABLE.value))
+        for name, sample in (entry.get("body") or {}).items():
+            new_params.append(Parameter(
+                name=name, location="body", source=["browser"],
+                sample_value=sample,
+                confidence=Confidence.PROBABLE.value))
+        for name in entry.get("inputs") or []:
+            new_params.append(Parameter(
+                name=name, location="body", source=["browser:form"],
+                confidence=Confidence.POSSIBLE.value))
+        if entry.get("form_method") and ep.method == "GET":
+            ep.method = entry["form_method"].upper()
+        ep.query_parameters = param_mod.merge(
+            ep.query_parameters, [p for p in new_params
+                                  if p.location == "query"])
+        ep.body_parameters = param_mod.merge(
+            ep.body_parameters, [p for p in new_params
+                                 if p.location != "query"])
+
+    def _browser_discover(self, base_url: str, host: str, out_dir: Path,
+                          budgets, metrics) -> List[Dict]:
+        """Crawl with Chromium (GET navigations only), record traffic.
+
+        Returns endpoint dicts for pipeline merge. Disabled, missing
+        Playwright, or launch failure → [] with a log line.
+        """
+        if not (self.profile.browser or self.cfg.browser.enabled):
+            return []
+        from .browser.browser import BrowserEngine, playwright_available
+        if not playwright_available():
+            log.info("browser: playwright not installed — skipping "
+                     "(`pip install apex-fuzzer[browser]`)")
+            return []
+        from .browser.network import NetworkRecorder
+        from .browser.actions import snapshot_dom
+        from .browser.storage import StorageCapture
+        from .browser.sessions import SessionManager
+        bcfg = self.cfg.browser
+        entries: List[Dict] = []
+        pages_visited = 0
+        try:
+            with BrowserEngine(self.cfg, headless=bcfg.headless,
+                               timeout_ms=bcfg.navigation_timeout_ms
+                               ) as engine:
+                ctx = engine.new_context()
+                page = ctx.new_page()
+                recorder = NetworkRecorder(
+                    scope=self.scope,
+                    max_requests=bcfg.max_pages * 50)
+                if bcfg.capture_network:
+                    recorder.attach(page)
+                seen, queue = set(), [(base_url, 0)]
+                while queue and pages_visited < bcfg.max_pages:
+                    url, depth = queue.pop(0)
+                    if url in seen or depth > bcfg.max_depth:
+                        continue
+                    if not self.scope.is_in_scope(url):
+                        continue
+                    if not budgets.consume_test("browser", url):
+                        log.warning("browser: action budget exhausted")
+                        break
+                    seen.add(url)
+                    try:
+                        page.goto(url, timeout=bcfg.navigation_timeout_ms)
+                        pages_visited += 1
+                    except Exception as e:
+                        log.debug("browser: goto %s failed: %s", url, e)
+                        continue
+                    if not bcfg.capture_dom:
+                        continue
+                    try:
+                        snap = snapshot_dom(page)
+                    except Exception:
+                        continue
+                    for link in snap.get("links") or []:
+                        full = self._resolve_link(url, link)
+                        if full and full not in seen and \
+                                self.scope.is_in_scope(full):
+                            queue.append((full, depth + 1))
+                    for form in snap.get("forms") or []:
+                        action = form.get("action") or url
+                        full = self._resolve_link(url, action)
+                        if not full or not self.scope.is_in_scope(full):
+                            continue
+                        entries.append({
+                            "url": full,
+                            "method": (form.get("method") or "GET").upper(),
+                            "params": [], "body": {},
+                            "inputs": [i.get("name", "")
+                                       for i in form.get("inputs") or []
+                                       if i.get("name")],
+                            "form_method": (form.get("method")
+                                             or "GET").upper()})
+                if bcfg.capture_network:
+                    entries.extend(recorder.to_endpoints())
+                if bcfg.capture_websocket:
+                    for ws in recorder.websockets:
+                        entries.append({"url": ws, "method": "WS",
+                                        "params": [], "body": {}})
+                (out_dir / "browser_urls.txt").write_text(
+                    "\n".join(sorted({e["url"] for e in entries
+                                      if e.get("url")})))
+                import json as _json
+                (out_dir / "browser_traffic.json").write_text(
+                    _json.dumps(recorder.to_dict(), indent=2))
+                if bcfg.capture_storage:
+                    try:
+                        capture = StorageCapture().capture(ctx, page)
+                        mgr = SessionManager(out_dir / "sessions")
+                        sess = mgr.from_capture(capture, "browser")
+                        mgr.save(sess)
+                        log.info("browser: session exported (%d cookies, "
+                                 "%d tokens)",
+                                 len(sess.cookies),
+                                 sum(len(v) for v in
+                                     sess.tokens.values()))
+                    except Exception as e:
+                        log.debug("browser: session export failed: %s", e)
+                page.close()
+                ctx.close()
+        except RuntimeError as e:
+            log.warning("browser discovery unavailable: %s", e)
+            return []
+        except Exception as e:
+            log.warning("browser discovery failed: %s", e, exc_info=True)
+            return []
+        metrics.browser_pages = pages_visited
+        try:
+            metrics.browser_requests = len(recorder.requests)
+        except Exception:
+            pass
+        log.info("browser: %d pages → %d endpoint entries",
+                 pages_visited, len(entries))
+        return entries
+
+    @staticmethod
+    def _resolve_link(base: str, link: str) -> Optional[str]:
+        from urllib.parse import urljoin, urlsplit
+        if not link or link.startswith(("javascript:", "mailto:",
+                                        "tel:", "#")):
+            return None
+        try:
+            full = urljoin(base, link.strip()).split("#", 1)[0]
+        except Exception:
+            return None
+        if not full.startswith(("http://", "https://")):
+            return None
+        if urlsplit(full).path.lower().endswith(
+                (".png", ".jpg", ".jpeg", ".gif", ".svg", ".webp",
+                 ".ico", ".woff", ".woff2", ".css")):
+            return None
+        return full or None
 
     def _add_js_endpoint(self, by_norm: Dict[str, Endpoint], host: str,
                          path: str, source: str = "javascript"):

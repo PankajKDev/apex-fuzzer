@@ -28,6 +28,8 @@ class Profile:
     business_logic: bool = False
     # race engine — synchronized bursts; never on by default
     race: bool = False
+    # browser-driven discovery + sessions (agent Phase 1)
+    browser: bool = False
 
 
 PROFILES = {
@@ -40,7 +42,7 @@ PROFILES = {
     "deep": Profile(
         name="deep", differential=True, js_analysis=True,
         oast=True, run_tko=True, authz_matrix=True, second_order=True,
-        business_logic=True,
+        business_logic=True, browser=True,
     ),
     "api": Profile(
         name="api", robots=False, differential=True, oast=True,
