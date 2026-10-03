@@ -139,6 +139,7 @@ cp .env.example .env   # then fill in; .env is git-ignored, never commit it
 | variable | enables |
 |----------|---------|
 | `GEMINI_API_KEY` | AI hypothesis planning via Gemini (`--ai`) |
+| `GROQ_API_KEY` | Free-tier fallback for Gemini, or direct Groq planning (`--ai-provider groq`) |
 | `OLLAMA_HOST` | (optional) Ollama server override, e.g. `http://gpu-box:11434` — no key needed for local models |
 | `GITHUB_TOKEN` | confirmed takeover claims (`tko-subs -takeover`, needs repo scope) |
 | `HEROKU_USERNAME` / `HEROKU_API_KEY` / `HEROKU_APP_NAME` | confirmed Heroku takeover claims |
@@ -330,8 +331,8 @@ nuclei:
 
 ai:
   enabled: false
-  provider: gemini          # or "ollama" (local); --ai-provider overrides
-  model: "gemini-1.5-flash"   # Generative Language API, GEMINI_API_KEY env
+  provider: gemini          # free Gemini, then free Groq fallback
+  model: "gemini-3.5-flash-lite"
   max_output_tokens: 8192
   ollama_host: "http://localhost:11434"  # or OLLAMA_HOST env
   ollama_model: "llama3.1"  # must be pulled: ollama pull llama3.1
@@ -746,10 +747,14 @@ responses. Shared identifier values link resource nodes
 
 `AIPlanner` emits structured hypotheses
 (`hypothesis, endpoint, reason, test_class, confidence, required_context,
-status`) — never confirmed vulns. Two backends: `provider: gemini`
-(cloud, needs `GEMINI_API_KEY`) or `provider: ollama` (local,
-needs `ollama serve` plus a pulled model such as `llama3.1` — no key,
-nothing leaves the machine). Ollama requests use JSON mode
+status`) — never confirmed vulns. Hosted planning uses the free Gemini
+model `gemini-3.5-flash-lite` first (`GEMINI_API_KEY`), then falls back
+to free-tier Groq models (`GROQ_API_KEY`) if Gemini is unavailable or
+returns no content. Hosted models are restricted to documented
+free-tier model IDs. Set `provider: groq` to use Groq directly, or
+`provider: ollama` for local inference (needs `ollama serve` plus a
+pulled model such as `llama3.1` — no key, nothing leaves the machine).
+Ollama requests use JSON mode
 (`format: json`) straight into the shared parser, with a longer default
 timeout for local inference. Context is prompt-budgeted per part
 (techs/endpoints/findings) and findings are grouped by host+class so one

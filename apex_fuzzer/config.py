@@ -176,10 +176,10 @@ class NucleiConfig:
 @dataclass
 class AIConfig:
     enabled: bool = False
-    # provider: "gemini" (cloud, needs GEMINI_API_KEY) or "ollama"
-    # (local, needs `ollama serve` + a pulled model, no key)
+    # Gemini is the preferred hosted provider and falls back to free-tier
+    # Groq models when unavailable. Ollama remains optional.
     provider: str = "gemini"
-    model: str = "gemini-1.5-flash"
+    model: str = "gemini-3.5-flash-lite"
     max_output_tokens: int = 8192
     ollama_host: str = "http://localhost:11434"
     ollama_model: str = "llama3.1"
@@ -187,6 +187,7 @@ class AIConfig:
     # provider-scoped blocks (M3.2) take precedence over the legacy
     # flat keys above, which keep working with a deprecation note
     gemini: Dict[str, Any] = field(default_factory=dict)
+    groq: Dict[str, Any] = field(default_factory=dict)
     ollama: Dict[str, Any] = field(default_factory=dict)
     # how many JS chunks get sent to the planner (spec §6)
     js_chunk_budget: int = 6
@@ -197,6 +198,13 @@ class AIConfig:
         out = {"model": self.model, "timeout": 30,
                "max_output_tokens": self.max_output_tokens}
         out.update({k: v for k, v in (self.gemini or {}).items()
+                    if v is not None})
+        return out
+
+    def effective_groq(self) -> Dict[str, Any]:
+        out = {"model": "openai/gpt-oss-20b", "timeout": 60,
+               "max_output_tokens": self.max_output_tokens}
+        out.update({k: v for k, v in (self.groq or {}).items()
                     if v is not None})
         return out
 

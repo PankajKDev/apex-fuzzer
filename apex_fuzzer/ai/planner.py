@@ -21,6 +21,14 @@ _RETRYABLE_STATUS = {429, 502, 503, 504}
 _MAX_ATTEMPTS = 3
 _LOG_BODY_LIMIT = 300
 
+# These are the free-tier model IDs documented by the providers. Keep paid
+# models out of both the default route and user-configurable overrides.
+FREE_GEMINI_MODELS = {"gemini-3.5-flash-lite", "gemini-3.1-flash-lite"}
+FREE_GROQ_MODELS = (
+    "openai/gpt-oss-20b",
+    "openai/gpt-oss-120b",
+)
+
 
 def _truncate(text: Any, limit: int = _LOG_BODY_LIMIT) -> str:
     text = str(text or "")
@@ -52,6 +60,7 @@ class AIPlanner:
     def __init__(self, cfg):
         self.cfg = cfg
         self.key = os.environ.get("GEMINI_API_KEY")
+        self.groq_key = os.environ.get("GROQ_API_KEY")
         self.provider = (getattr(cfg.ai, "provider", "gemini")
                          or "gemini").lower()
         # precedence: explicit ai.ollama.host block > OLLAMA_HOST
@@ -68,7 +77,11 @@ class AIPlanner:
         if self.provider == "ollama":
             return self._ollama_ready()
         if self.provider == "gemini":
-            return bool(self.key)
+            # The Groq credential enables the automatic fallback even when
+            # Gemini credentials are absent or Gemini is temporarily down.
+            return bool(self.key or self.groq_key)
+        if self.provider == "groq":
+            return bool(self.groq_key)
         return False
 
     def validate_config(self) -> List[str]:
@@ -77,13 +90,30 @@ class AIPlanner:
         problems: List[str] = []
         if not self.cfg.ai.enabled:
             return ["ai.enabled is false"]
-        if self.provider not in ("gemini", "ollama"):
+        if self.provider not in ("gemini", "groq", "ollama"):
             return [f"unknown ai.provider '{self.provider}' "
-                    f"(want gemini|ollama)"]
-        if self.provider == "gemini" and not self.key:
+                    f"(want gemini|groq|ollama)"]
+        if self.provider == "gemini" and not (self.key or self.groq_key):
             problems.append(
-                "GEMINI_API_KEY is empty — export it or switch to "
+                "GEMINI_API_KEY and GROQ_API_KEY are empty — configure "
+                "Gemini or Groq for hosted AI, or switch to "
                 "ai.provider: ollama")
+        if self.provider == "groq" and not self.groq_key:
+            problems.append(
+                "GROQ_API_KEY is empty — export it or use "
+                "ai.provider: gemini with GEMINI_API_KEY")
+        if self.provider in ("gemini", "groq"):
+            gemini_model = self.cfg.ai.effective_gemini().get("model")
+            groq_model = self.cfg.ai.effective_groq().get("model")
+            if self.provider == "gemini" and gemini_model not in \
+                    FREE_GEMINI_MODELS:
+                problems.append(
+                    f"Gemini model '{gemini_model}' is not in the "
+                    "free-tier allowlist")
+            if groq_model not in FREE_GROQ_MODELS:
+                problems.append(
+                    f"Groq model '{groq_model}' is not in the "
+                    "free-tier allowlist")
         if self.provider == "ollama":
             ok, reason = self._ollama_status()
             if not ok:
@@ -124,7 +154,8 @@ class AIPlanner:
         return ok
 
     def _post_json(self, url: str, payload: dict,
-                   timeout: int) -> Tuple[bool, dict, str]:
+                   timeout: int, headers: dict | None = None
+                   ) -> Tuple[bool, dict, str]:
         """POST with raise_for_status, bounded logs, and retries for
         transient statuses only (429/502/503/504). Returns
         (ok, data, error_class). Never raises; never retries timeouts
@@ -134,7 +165,8 @@ class AIPlanner:
         last_kind = ERR_UNKNOWN
         for attempt in range(1, _MAX_ATTEMPTS + 1):
             try:
-                r = requests.post(url, json=payload, timeout=timeout)
+                r = requests.post(url, json=payload, timeout=timeout,
+                                  headers=headers)
                 r.raise_for_status()
             except requests.exceptions.HTTPError as e:
                 status = getattr(getattr(e, "response", None),
@@ -168,18 +200,37 @@ class AIPlanner:
     def _call(self, prompt: str, timeout: int = 30) -> str:
         if self.provider == "ollama":
             return self._call_ollama(prompt, timeout)
-        return self._call_gemini(prompt, timeout)
+        if self.provider == "groq":
+            return self._call_groq(prompt, timeout)
+        if self.key:
+            result = self._call_gemini(prompt, timeout)
+            if result:
+                return result
+            log.info("Gemini unavailable or returned no content; trying "
+                     "free-tier Groq fallback")
+        elif self.groq_key:
+            log.info("GEMINI_API_KEY is unset; using free-tier Groq fallback")
+        else:
+            return ""
+        return self._call_groq(prompt, timeout)
 
     def _call_gemini(self, prompt: str, timeout: int = 30) -> str:
         eff = self.cfg.ai.effective_gemini()
+        model = eff.get("model")
+        if model not in FREE_GEMINI_MODELS:
+            log.warning("Refusing non-free Gemini model '%s'", model)
+            return ""
+        if not self.key:
+            return ""
         ok, data, kind = self._post_json(
             f"https://generativelanguage.googleapis.com/v1beta/"
-            f"models/{eff.get('model')}:generateContent?key={self.key}",
+            f"models/{model}:generateContent",
             {"contents": [{"parts": [{"text": prompt}]}],
              "generationConfig": {
                  "maxOutputTokens": eff.get("max_output_tokens", 8192),
                  "responseMimeType": "application/json"}},
-            timeout=timeout)
+            timeout=timeout,
+            headers={"x-goog-api-key": self.key})
         if not ok:
             return ""
         if "error" in data:
@@ -196,6 +247,46 @@ class AIPlanner:
         except (KeyError, IndexError, TypeError):
             log.warning("AI response missing candidates content")
             return ""
+
+    def _call_groq(self, prompt: str, timeout: int = 30) -> str:
+        """Free-tier Groq fallback using its OpenAI-compatible API."""
+        if not self.groq_key:
+            return ""
+        eff = self.cfg.ai.effective_groq()
+        preferred = eff.get("model", FREE_GROQ_MODELS[0])
+        if preferred not in FREE_GROQ_MODELS:
+            log.warning("Refusing non-free Groq model '%s'", preferred)
+            return ""
+        # If a free model is not enabled for this account, try the next
+        # documented free model before giving up.
+        models = (preferred,) + tuple(m for m in FREE_GROQ_MODELS
+                                      if m != preferred)
+        for model in models:
+            ok, data, kind = self._post_json(
+                "https://api.groq.com/openai/v1/chat/completions",
+                {"model": model,
+                 "messages": [{"role": "user", "content": prompt}],
+                 "max_tokens": eff.get("max_output_tokens", 8192),
+                 "response_format": {"type": "json_object"}},
+                timeout=max(timeout, int(eff.get("timeout", 60) or 60)),
+                headers={"Authorization": f"Bearer {self.groq_key}"})
+            if ok:
+                try:
+                    text = data["choices"][0]["message"]["content"]
+                except (KeyError, IndexError, TypeError):
+                    log.warning("Groq response missing chat content")
+                    return ""
+                if text:
+                    return text
+                log.warning("Groq returned an empty response for '%s'",
+                            model)
+                return ""
+            log.warning("Groq model '%s' unavailable (%s); trying next "
+                        "free model", model, kind)
+            if kind in (ERR_AUTH, ERR_CONNECTION, ERR_TIMEOUT,
+                        ERR_UNKNOWN):
+                break
+        return ""
 
     def _call_ollama(self, prompt: str, timeout: int = 30) -> str:
         """Local inference via Ollama. `format: json` constrains the

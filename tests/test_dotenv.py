@@ -33,6 +33,6 @@ def test_load_dotenv_missing_file(tmp_path):
 
 def test_env_example_documents_used_vars():
     example = open(".env.example").read()
-    for var in ("GEMINI_API_KEY", "GITHUB_TOKEN", "HEROKU_USERNAME",
+    for var in ("GEMINI_API_KEY", "GROQ_API_KEY", "GITHUB_TOKEN", "HEROKU_USERNAME",
                 "HEROKU_API_KEY", "HEROKU_APP_NAME"):
         assert var in example

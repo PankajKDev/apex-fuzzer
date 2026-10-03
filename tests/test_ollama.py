@@ -121,12 +121,14 @@ def test_gemini_call_shape(monkeypatch):
 
     def fake_post(url, **kw):
         seen["url"] = url
+        seen["headers"] = kw.get("headers")
         return _Resp({"candidates": [{"content": {"parts": [
             {"text": json.dumps(_hyps())}]}}]})
     monkeypatch.setattr("requests.post", fake_post)
     cfg = _cfg("gemini")
     out = AIPlanner(cfg)._call("hi")
-    assert "key=K" in seen["url"] and "gemini-1.5-flash" in seen["url"]
+    assert "gemini-3.5-flash-lite" in seen["url"]
+    assert seen["headers"]["x-goog-api-key"] == "K"
     assert AIPlanner(cfg)._parse(out)[0].endpoint == "/export"
 
 
@@ -134,6 +136,8 @@ def test_gemini_call_shape(monkeypatch):
 def test_ai_config_defaults():
     cfg = Config()
     assert cfg.ai.provider == "gemini"
+    assert cfg.ai.model == "gemini-3.5-flash-lite"
+    assert cfg.ai.effective_groq()["model"] == "openai/gpt-oss-20b"
     assert cfg.ai.ollama_host == "http://localhost:11434"
     assert cfg.ai.ollama_model == "llama3.1"
     assert cfg.ai.ollama_timeout == 180
@@ -226,7 +230,7 @@ def test_bounded_log_bodies():
 def test_effective_settings_precedence():
     cfg = Config()
     assert cfg.ai.effective_ollama()["model"] == "llama3.1"
-    assert cfg.ai.effective_gemini()["model"] == "gemini-1.5-flash"
+    assert cfg.ai.effective_gemini()["model"] == "gemini-3.5-flash-lite"
     cfg.ai.ollama = {"model": "qwen2.5:14b", "host": "http://g:11434"}
     cfg.ai.ollama_model = "should-lose"
     eff = cfg.ai.effective_ollama()
@@ -249,6 +253,72 @@ def test_validate_config_cases(monkeypatch):
                for p in AIPlanner(cfg).validate_config())
     monkeypatch.setenv("GEMINI_API_KEY", "K")
     assert AIPlanner(_cfg("gemini")).validate_config() == []
+
+
+def test_groq_fallback_without_gemini_key(monkeypatch):
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    monkeypatch.setenv("GROQ_API_KEY", "groq-secret")
+    seen = {}
+
+    def fake_post(url, **kw):
+        seen["url"] = url
+        seen["payload"] = kw["json"]
+        seen["headers"] = kw["headers"]
+        return _Resp({"choices": [{"message": {
+            "content": json.dumps(_hyps())}}]})
+
+    monkeypatch.setattr("requests.post", fake_post)
+    planner = AIPlanner(_cfg("gemini"))
+    assert planner.available()
+    assert planner.validate_config() == []
+    out = planner._call("analyze")
+    assert "api.groq.com/openai/v1/chat/completions" in seen["url"]
+    assert seen["payload"]["model"] == "openai/gpt-oss-20b"
+    assert seen["headers"]["Authorization"] == "Bearer groq-secret"
+    assert len(planner._parse(out)) == 1
+
+
+def test_groq_fallback_when_gemini_model_missing(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "gemini-secret")
+    monkeypatch.setenv("GROQ_API_KEY", "groq-secret")
+    calls = []
+
+    def fake_post(url, **kw):
+        calls.append(url)
+        if "generativelanguage.googleapis.com" in url:
+            return _Resp({"error": {"message": "model not found"}},
+                         status=404)
+        return _Resp({"choices": [{"message": {
+            "content": json.dumps(_hyps())}}]})
+
+    monkeypatch.setattr("requests.post", fake_post)
+    monkeypatch.setattr("time.sleep", lambda _: None)
+    out = AIPlanner(_cfg("gemini"))._call("analyze")
+    assert len(calls) == 2
+    assert len(AIPlanner(_cfg("gemini"))._parse(out)) == 1
+
+
+def test_hosted_provider_rejects_non_free_models(monkeypatch):
+    monkeypatch.setenv("GEMINI_API_KEY", "K")
+    cfg = _cfg("gemini")
+    cfg.ai.model = "gemini-1.5-flash"
+    assert any("free-tier allowlist" in p
+               for p in AIPlanner(cfg).validate_config())
+    assert AIPlanner(cfg)._call("hello") == ""
+
+    monkeypatch.setenv("GROQ_API_KEY", "K")
+    cfg = _cfg("groq")
+    cfg.ai.groq = {"model": "paid/model"}
+    assert any("free-tier allowlist" in p
+               for p in AIPlanner(cfg).validate_config())
+
+
+def test_cli_groq_provider_flag():
+    from apex_fuzzer.cli import build_parser
+    args = build_parser().parse_args(["-d", "x.com", "--ai",
+                                      "--ai-provider", "groq"])
+    cfg = apply_cli_overrides(Config(), args)
+    assert cfg.ai.enabled and cfg.ai.provider == "groq"
 
 
 def test_ollama_host_precedence(monkeypatch):

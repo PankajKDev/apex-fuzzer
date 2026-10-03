@@ -37,7 +37,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--ai", action="store_true",
                    help="Enable AI hypothesis planning")
     p.add_argument("--ai-provider", default=None,
-                   choices=["gemini", "ollama"],
+                   choices=["gemini", "groq", "ollama"],
                    help="AI backend (default: config ai.provider)")
     p.add_argument("--oast", action="store_true",
                    help="Enable Interactsh OAST blind-SSRF confirmation")
@@ -130,11 +130,16 @@ def doctor_config(cfg=None) -> list:
     except Exception as e:
         return [f"config.yaml unreadable: {e}"]
     if cfg.ai.enabled:
-        if cfg.ai.provider == "gemini" and \
-                not os.environ.get("GEMINI_API_KEY"):
-            problems.append("ai.enabled with provider gemini but "
-                            "GEMINI_API_KEY is empty")
-        if cfg.ai.provider not in ("gemini", "ollama"):
+        if cfg.ai.provider == "gemini" and not (
+                os.environ.get("GEMINI_API_KEY") or
+                os.environ.get("GROQ_API_KEY")):
+            problems.append("ai.enabled with provider gemini but both "
+                            "GEMINI_API_KEY and GROQ_API_KEY are empty")
+        if cfg.ai.provider == "groq" and \
+                not os.environ.get("GROQ_API_KEY"):
+            problems.append("ai.enabled with provider groq but "
+                            "GROQ_API_KEY is empty")
+        if cfg.ai.provider not in ("gemini", "groq", "ollama"):
             problems.append(f"unknown ai.provider "
                             f"'{cfg.ai.provider}'")
     if (cfg.race.enabled or cfg.business.enabled
