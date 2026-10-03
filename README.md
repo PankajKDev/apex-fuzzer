@@ -461,11 +461,12 @@ DNS/HTTP/SMTP interactions (`validation/oast.py`).
 - **Self-hosted:** point `server` at your Interactsh callback domain and set
   `api_base` to its REST endpoint.
 
-Callbacks are unique per scan; correlation matches the token hostname inside
-interaction payloads. When cloud tech is fingerprinted (AWS/GCS/Azure), the
-corresponding metadata-endpoint payload (`169.254.169.254…`,
-`metadata.google.internal…`) is queued alongside the callback on each probe.
-The provider is deregistered (`DELETE /deregister/{uuid}`) after the scan.
+Every parameter probe gets a fresh callback host and is tried over both HTTP
+and HTTPS. The scanner correlates the exact nonce hostname, retains the
+request method and shape, and records status/length differences as
+inconclusive signals when no callback arrives. It does not request cloud
+metadata or credential endpoints. The provider is deregistered
+(`DELETE /deregister/{uuid}`) after the scan.
 
 ---
 
@@ -1220,8 +1221,9 @@ self-DoS and the false negatives that timeouts masquerade as.
 make ci                                  # lint + types + tests + security + build
 ```
 
-Last full local run: 355 passed, 4 skipped (359 collected) after the
-application-aware stored-SSRF expansion. The tests cover OpenAPI operation
+Last full local run: 357 passed, 4 skipped (361 collected) after the
+first-order OAST hardening. Tests cover per-probe HTTP/HTTPS canaries,
+stale-callback rejection, response-difference notes, OpenAPI operation
 metadata and request locations, nested-schema sink scoring, related trigger
 selection and response-ID substitution, URL normalization, endpoint
 classification, parameter extraction

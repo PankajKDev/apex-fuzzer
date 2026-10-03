@@ -51,8 +51,8 @@ from .validation.sqli import SqliValidator
 from .validation.xss import XssValidator
 from .validation.ssrf import endpoint_from_url
 from .validation.oast import (InteractshProvider, probe_endpoint,
-                               ssrf_candidates, matching_interactions,
-                               CLOUD_METADATA_PAYLOADS)
+                               ssrf_candidates, ssrf_candidate_score,
+                               matching_interactions)
 from .validation.differential import (DifferentialTester,
                                        has_idor_params,
                                        PRIVILEGED_TYPES)
@@ -74,9 +74,9 @@ log = get_logger("orchestrator")
 
 LIVE_CODES = "200,204,301,302,401,403,405,500,502,503,504"
 
-# endpoint types worth differential / OAST probing
-_OAST_TYPES = ("proxy", "webhook", "callback", "import", "export",
-               "download", "api")
+# Endpoint types that give OAST sink candidates extra priority.
+_OAST_PRIORITY_TYPES = ("proxy", "webhook", "callback", "import",
+                        "export", "download", "api")
 
 # invariant check → finding-tag classes that already cover the same
 # verdict space (a violation there corroborates, never duplicates)
@@ -3160,26 +3160,29 @@ class Orchestrator:
                     client, out_dir: Path,
                     budgets: BudgetTracker,
                     coverage: CoverageTracker) -> List[Finding]:
-        techs = read_jsonl(out_dir / "technologies.jsonl")
-        cloud_payloads = [
-            CLOUD_METADATA_PAYLOADS[t["name"]]
-            for t in techs
-            if t.get("category") == "cloud"
-            and t.get("name") in CLOUD_METADATA_PAYLOADS]
-        cloud_payloads = list(dict.fromkeys(cloud_payloads))[:2]
-
-        targets = [e for e in endpoints
-                   if e.endpoint_type in _OAST_TYPES
-                   and ssrf_candidates(list(e.query_parameters) +
-                                       list(e.body_parameters))]
-        targets = [e for e in targets
-                   if self.scope.active_test_allowed(e.url)][:
-                    self.cfg.oast.max_endpoints]
+        ranked_targets = []
+        for endpoint in endpoints:
+            if (endpoint.endpoint_type == "static" or
+                    not self.scope.active_test_allowed(endpoint.url)):
+                continue
+            parameters = (list(endpoint.query_parameters) +
+                          list(endpoint.body_parameters) +
+                          list(endpoint.header_parameters))
+            candidates = ssrf_candidates(parameters, endpoint)
+            if not candidates:
+                continue
+            field_score = max(ssrf_candidate_score(p, endpoint)[0]
+                              for p in candidates)
+            route_bonus = int(endpoint.endpoint_type in
+                              _OAST_PRIORITY_TYPES)
+            ranked_targets.append((field_score + route_bonus, endpoint))
+        ranked_targets.sort(key=lambda row: (-row[0], row[1].url))
+        targets = [endpoint for _, endpoint in ranked_targets][:
+                   self.cfg.oast.max_endpoints]
         if not targets:
             return []
-        log.info("oast: sweeping %d SSRF-suspect endpoints "
-                 "(cloud payloads: %s)", len(targets),
-                 cloud_payloads or "none")
+        log.info("oast: sweeping %d SSRF-suspect endpoints",
+                 len(targets))
         if not self._reserve_or_block(
                 budgets, coverage, "ssrf",
                 plan_oast(len(targets),
@@ -3202,16 +3205,17 @@ class Orchestrator:
                     client, ep, provider,
                     poll_timeout=self.cfg.oast.poll_timeout,
                     poll_interval=self.cfg.oast.poll_interval,
-                    max_params=self.cfg.oast.max_params_per_endpoint,
-                    cloud_payloads=cloud_payloads)
+                    max_params=self.cfg.oast.max_params_per_endpoint)
             except BudgetExceeded:
                 coverage.record("ssrf", "blocked",
                                 f"budget: {ep.normalized_url}")
                 continue
             metrics.oast_endpoints_probed += 1
             if res is None or not res.confirmed:
-                coverage.record("ssrf", "tested_negative",
-                                f"{ep.normalized_url}: no callback")
+                detail = (res.notes if res else "no probe was sent")
+                coverage.record(
+                    "ssrf", "inconclusive",
+                    f"{ep.normalized_url}: no correlated callback; {detail}")
                 continue
             metrics.oast_confirmed += 1
             self._note_candidate()
@@ -3222,7 +3226,7 @@ class Orchestrator:
                 source="oast-sweep",
                 name=(f"Blind SSRF confirmed via OAST on "
                       f"'{res.parameter}' ({ep.path})"),
-                severity="high",
+                severity="medium",
                 confidence=Confidence.CONFIRMED.value,
                 validation_status=ValidationStatus.CONFIRMED.value,
                 host=ep.host,
@@ -3231,25 +3235,31 @@ class Orchestrator:
                 method=ep.method,
                 parameter=res.parameter,
                 description=(
-                    "The server fetched our out-of-band Interactsh "
+                    "The server fetched our unique out-of-band Interactsh "
                     f"callback on parameter '{res.parameter}' "
-                    f"(payload: {res.payload})."
-                    + (" Cloud metadata payload also queued." if
-                       cloud_payloads else "")),
+                    f"using {res.payload}."),
                 tags=["ssrf", "oast", ep.endpoint_type],
                 raw={"interactions": res.interactions[:10],
-                     "callback_host": provider.create_token()},
+                     "callback_host": res.callback_host,
+                     "request_method": res.request_method,
+                     "request_url": res.request_url,
+                     "parameter_location": res.parameter_location,
+                     "response_status": res.response_status,
+                     "response_length": res.response_length,
+                     "response_time_ms": res.response_time_ms},
                 false_positive_notes=(
                     "Confirmed via unique out-of-band Interactsh "
                     "callback (DNS/HTTP/SMTP), not response shape. "
-                    "Unique token per scan eliminates replay FPs."),
+                    "Unique callback host per request eliminates cross-probe "
+                    "correlation."),
                 identity="anonymous",
             )
             evidence.allocate(f)
             evidence.record(
                 f,
-                request_text=f"GET {ep.url}?{res.parameter}="
-                             f"{res.payload or provider.create_token()}",
+                request_text=(f"{res.request_method} {res.request_url}\n"
+                              f"{res.parameter_location}::{res.parameter}="
+                              f"{res.payload or ''}"),
                 response_text="\n".join(
                     _interaction_line(i) for i in res.interactions[:10]))
             findings.append(f)
@@ -3451,13 +3461,17 @@ class Orchestrator:
             if res and res.confirmed:
                 promote("validated",
                         f"OAST callback on '{res.parameter}'",
-                        "high", ValidationStatus.CONFIRMED.value,
+                        "medium", ValidationStatus.CONFIRMED.value,
                         "ai+oast",
                         f"AI-hypothesized SSRF confirmed via OAST "
                         f"({h.hypothesis[:80]})",
                         {"interactions": res.interactions[:10],
                          "parameter": res.parameter,
-                         "payload": res.payload})
+                         "payload": res.payload,
+                         "callback_host": res.callback_host,
+                         "request_method": res.request_method,
+                         "request_url": res.request_url,
+                         "parameter_location": res.parameter_location})
             else:
                 h.status = "rejected"
                 h.notes = "no OAST callback received"

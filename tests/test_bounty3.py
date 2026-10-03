@@ -12,6 +12,7 @@ from apex_fuzzer.authorization.access_tests import (
 from apex_fuzzer.validation.second_order import (
     make_canary, classify_context, inject_canary, find_renders,
     make_ssrf_canary, second_order_ssrf_fields, INERT_TAG)
+from apex_fuzzer.validation.oast import probe_endpoint
 from apex_fuzzer.budgets import BudgetExceeded
 from apex_fuzzer.models import Identity, Endpoint, Parameter, Finding
 from apex_fuzzer.config import Config
@@ -550,6 +551,81 @@ def test_second_order_ssrf_candidate_scoring_uses_operation_context():
     endpoint.summary = "Fetch remote avatar preview"
     assert ssrf_candidate_score(file_param, endpoint)[0] > 0
     assert ssrf_candidate_score(Parameter("webhookUrl", "body"), endpoint)[0] > 0
+
+
+def test_first_order_oast_uses_protocol_specific_json_canaries():
+    from types import SimpleNamespace
+    from urllib.parse import urlparse
+
+    class Provider:
+        interactions = []
+
+        def available(self):
+            return True
+
+        def create_token(self):
+            return "registered.oast.pro"
+
+        def poll(self, **kwargs):
+            return self.interactions
+
+    provider = Provider()
+
+    class Http:
+        calls = []
+
+        def request(self, method, url, **kwargs):
+            self.calls.append((method, url, kwargs))
+            callback = kwargs["json"]["config"]["callbackUrl"]
+            host = urlparse(callback).hostname
+            provider.interactions = ([{"full-id": host}]
+                                     if urlparse(callback).scheme == "https"
+                                     else [])
+            return SimpleNamespace(status_code=202, text="accepted")
+
+    endpoint = _ep("https://t.com/api/import", ["config.callbackUrl"],
+                   "import")
+    endpoint.method = "PATCH"
+    endpoint.request_content_types = ["application/json"]
+    http = Http()
+    result = probe_endpoint(http, endpoint, provider, max_params=1)
+    assert result and result.confirmed
+    assert result.callback_host == provider.interactions[0]["full-id"]
+    assert all(call[0] == "PATCH" for call in http.calls)
+    assert [urlparse(call[2]["json"]["config"]["callbackUrl"]).scheme
+            for call in http.calls] == ["http", "https"]
+
+
+def test_first_order_oast_stale_callback_is_inconclusive_with_response_signals():
+    from types import SimpleNamespace
+
+    class Provider:
+        def available(self):
+            return True
+
+        def create_token(self):
+            return "registered.oast.pro"
+
+        def poll(self, **kwargs):
+            # A callback for the scan root is not proof for a nonce-specific
+            # probe and must not confirm this parameter.
+            return [{"full-id": "registered.oast.pro"}]
+
+    class Http:
+        def request(self, method, url, **kwargs):
+            return SimpleNamespace(status_code=422, text="x" * 200)
+
+    endpoint = _ep("https://t.com/api/preview?url=existing", [], "api")
+    endpoint.query_parameters.append(
+        Parameter(name="url", location="query"))
+    endpoint.status_code = 200
+    endpoint.response_size = 10
+    result = probe_endpoint(Http(), endpoint, Provider(), max_params=1)
+    assert result and not result.confirmed
+    assert result.response_status == 422
+    assert result.response_length == 200
+    assert "status 200->422" in result.notes
+    assert "response length 10->200" in result.notes
 
 
 def test_openapi_ssrf_metadata_preserves_locations_and_nested_schema():

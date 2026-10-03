@@ -61,9 +61,11 @@ def second_order_ssrf_fields(endpoint, max_fields: int = 3):
             second_order_ssrf_candidates(endpoint, max_fields)]
 
 
-def make_ssrf_canary(callback_host: str) -> str:
+def make_ssrf_canary(callback_host: str, scheme: str = "http") -> str:
     """Build a unique callback URL under the registered OAST hostname."""
     from urllib.parse import urlsplit
+    if scheme not in ("http", "https"):
+        raise ValueError("SSRF canary scheme must be http or https")
     parsed = urlsplit("//" + (callback_host or ""))
     host = parsed.hostname or ""
     parts = host.split(".", 1)
@@ -74,7 +76,7 @@ def make_ssrf_canary(callback_host: str) -> str:
     # Keep the provider's registered correlation label first; Interactsh
     # supports a per-interaction nonce as the following DNS label.
     unique_host = f"{parts[0]}.so{rand}.{parts[1]}"
-    return f"http://{unique_host}/stored/{rand}"
+    return f"{scheme}://{unique_host}/stored/{rand}"
 
 
 def classify_context(html: str, canary: str) -> Dict[str, Any]:

@@ -84,29 +84,25 @@ def ssrf_candidate_score(param, endpoint=None):
         return 2, "ambiguous parameter supported by fetch-like operation"
     return 0, "field and operation do not establish a server-fetch sink"
 
-# cloud metadata endpoints — only used when a cloud provider is detected
-CLOUD_METADATA_PAYLOADS = {
-    "Amazon S3": "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
-    "AWS ELB": "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
-    "CloudFront": "http://169.254.169.254/latest/meta-data/iam/security-credentials/",
-    "GCS": "http://metadata.google.internal/computeMetadata/v1/?recursive=true",
-    "Azure": "http://169.254.169.254/metadata/instance?api-version=2021-02-01",
-}
+def ssrf_candidates(params, endpoint=None) -> List[Any]:
+    """Select SSRF inputs, using endpoint context when supplied.
 
-
-def ssrf_candidates(params) -> List[Any]:
-    """Legacy context-free first-order SSRF parameter filter.
-
-    Stateful stored-SSRF uses :func:`ssrf_candidate_score` with operation
-    metadata so ambiguous names do not qualify on their own.
+    Context-free calls preserve the old name list for compatibility.
+    Endpoint-aware calls require semantic evidence from the field name and
+    operation metadata, so ambiguous names do not qualify on their own.
     """
+    if endpoint is not None:
+        return [p for p in params
+                if getattr(p, "name", "") and
+                ssrf_candidate_score(p, endpoint)[0] > 0]
     return [p for p in params if getattr(p, "name", "") and
             p.name.lower() in SSRF_PARAM_NAMES]
 
 
 def _with_param(url: str, name: str, value: str) -> str:
     parts = urlsplit(url)
-    q = parse_qsl(parts.query, keep_blank_values=True)
+    q = [(key, val) for key, val in
+         parse_qsl(parts.query, keep_blank_values=True) if key != name]
     q.append((name, value))
     return urlunsplit((parts.scheme, parts.netloc, parts.path,
                        urlencode(q, doseq=True), ""))
@@ -116,6 +112,38 @@ def _with_body_param(params: List[Any], name: str, value: str) -> Dict[str, str]
     out = {p.name: (p.sample_value or "test") for p in params}
     out[name] = value
     return out
+
+
+def _nested_json(values: Dict[str, str]) -> Dict:
+    """Convert dotted and bracketed OpenAPI property names to JSON."""
+    import re
+    result: Dict = {}
+    for name, value in values.items():
+        parts = re.findall(r"[^.\[\]]+|\[\d*\]", name)
+        current = result
+        for index, raw in enumerate(parts):
+            last = index == len(parts) - 1
+            if raw.startswith("["):
+                if not isinstance(current, list):
+                    break
+                number = raw[1:-1]
+                slot = int(number) if number.isdigit() else 0
+                while len(current) <= slot:
+                    current.append({})
+                if last:
+                    current[slot] = value
+                current = current[slot]
+                continue
+            if not isinstance(current, dict):
+                break
+            if last:
+                current[raw] = value
+                break
+            wants_list = parts[index + 1].startswith("[")
+            if not isinstance(current.get(raw), (dict, list)):
+                current[raw] = [] if wants_list else {}
+            current = current[raw]
+    return result
 
 
 class InteractshProvider:
@@ -249,6 +277,13 @@ class OastResult:
     url: str = ""
     parameter: Optional[str] = None
     payload: Optional[str] = None
+    callback_host: Optional[str] = None
+    response_status: Optional[int] = None
+    response_length: Optional[int] = None
+    response_time_ms: Optional[float] = None
+    request_method: str = "GET"
+    request_url: str = ""
+    parameter_location: str = "query"
     interactions: List[Dict] = field(default_factory=list)
     notes: str = ""
 
@@ -256,51 +291,134 @@ class OastResult:
 def probe_endpoint(http, endpoint, provider: InteractshProvider,
                    poll_timeout: int = 15, poll_interval: int = 2,
                    max_params: int = 3,
-                   cloud_payloads: Optional[List[str]] = None,
                    scope_ok=None) -> Optional[OastResult]:
     """Fire SSRF candidates at one endpoint and correlate callbacks.
 
-    ``http`` needs ``.get(url, **kw)`` and ``.post(url, **kw)``.
-    ``endpoint`` needs ``.url`` plus ``query_parameters`` /
-    ``body_parameters`` lists of Parameter objects.
+    Each parameter gets independent HTTP and HTTPS callback hosts so stale
+    interactions from another parameter cannot confirm this probe. Requests
+    follow the endpoint's documented method and JSON/form content type.
     """
     if not provider.available():
         return None
-    cands = ssrf_candidates(
-        list(getattr(endpoint, "query_parameters", []) or []) +
-        list(getattr(endpoint, "body_parameters", []) or []))[:max_params]
+    params = (list(getattr(endpoint, "query_parameters", []) or []) +
+              list(getattr(endpoint, "body_parameters", []) or []) +
+              list(getattr(endpoint, "header_parameters", []) or []))
+    cands = [p for p in params if ssrf_candidate_score(p, endpoint)[0] > 0
+             or "validation" in (getattr(p, "source", []) or [])]
+    cands = cands[:max_params]
     if not cands:
         return None
 
     fired = 0
+    last_response = None
+    last_request = ("GET", endpoint.url, "query", "")
     for p in cands:
-        for payload in [provider.create_token()] + (cloud_payloads or []):
+        pending = []
+        for scheme in ("http", "https"):
+            from .second_order import make_ssrf_canary
+            payload = make_ssrf_canary(provider.create_token(), scheme)
+            callback_host = urlsplit(payload).hostname or ""
             try:
-                if p.location in ("body",):
-                    http.post(endpoint.url,
-                              data=_with_body_param(
-                                  list(getattr(endpoint, "body_parameters", [])
-                                       or []), p.name, payload),
-                              timeout=10)
+                method = (getattr(endpoint, "method", "GET") or
+                          "GET").upper()
+                if method not in {"GET", "POST", "PUT", "PATCH"}:
+                    continue
+                if p.location == "body" and method not in {
+                        "POST", "PUT", "PATCH"}:
+                    continue
+                request_url = endpoint.url
+                headers = {}
+                request_kwargs = {"timeout": 10}
+                if p.location == "body":
+                    params = list(getattr(endpoint, "body_parameters", [])
+                                  or [])
+                    values = _with_body_param(params, p.name, payload)
+                    content_types = list(getattr(
+                        endpoint, "request_content_types", []) or [])
+                    content_type = (getattr(endpoint, "content_type", "")
+                                    or "").lower()
+                    is_json = ("json" in content_type or any(
+                        "json" in str(value).lower()
+                        for value in content_types))
+                    if is_json:
+                        request_kwargs["json"] = _nested_json(values)
+                    else:
+                        request_kwargs["data"] = values
+                elif p.location == "header":
+                    headers[p.name] = payload
                 else:
-                    http.get(_with_param(endpoint.url, p.name, payload),
-                             timeout=10)
+                    request_url = _with_param(endpoint.url, p.name, payload)
+                if headers:
+                    request_kwargs["headers"] = headers
+                request_fn = getattr(http, "request", None)
+                if callable(request_fn):
+                    response = request_fn(method, request_url,
+                                          **request_kwargs)
+                else:
+                    response = getattr(http, method.lower())(
+                        request_url, **request_kwargs)
                 fired += 1
+                last_response = response
+                last_request = (method, request_url, p.location, payload)
+                pending.append((payload, callback_host, response, method,
+                                request_url, p.location))
             except BudgetExceeded:
                 raise
             except Exception as e:
                 log.debug("oast fire failed (%s): %s", p.name, e)
                 continue
-            interactions = provider.poll(timeout=poll_timeout,
-                                         interval=poll_interval)
-            if provider.correlate(interactions):
+        if not pending:
+            continue
+        interactions = provider.poll(timeout=poll_timeout,
+                                     interval=poll_interval)
+        for payload, callback_host, response, method, request_url, location \
+                in pending:
+            matched = matching_interactions(interactions, callback_host)
+            if matched:
                 log.info("OAST HIT: param=%s on %s (%d interactions)",
-                         p.name, endpoint.url, len(interactions))
+                         p.name, endpoint.url, len(matched))
                 return OastResult(
                     confirmed=True, url=endpoint.url, parameter=p.name,
-                    payload=payload, interactions=interactions[:20],
+                    payload=payload, callback_host=callback_host,
+                    response_status=getattr(response, "status_code", None),
+                    response_length=len(getattr(response, "content", b"")
+                                        or getattr(response, "text", "")
+                                        or ""),
+                    response_time_ms=_response_time_ms(response),
+                    request_method=method, request_url=request_url,
+                    parameter_location=location,
+                    interactions=matched[:20],
                     notes=f"out-of-band callback on parameter '{p.name}'")
     if fired:
+        method, request_url, location, payload = last_request
+        status = getattr(last_response, "status_code", None)
+        body = getattr(last_response, "content", b"") or \
+            getattr(last_response, "text", "") or ""
+        response_length = len(body)
+        signals = []
+        baseline_status = getattr(endpoint, "status_code", None)
+        baseline_length = getattr(endpoint, "response_size", None)
+        if baseline_status is not None and status != baseline_status:
+            signals.append(f"status {baseline_status}->{status}")
+        if baseline_length is not None and abs(response_length -
+                                               baseline_length) >= max(
+                                                   64, baseline_length // 4):
+            signals.append(f"response length {baseline_length}->"
+                           f"{response_length}")
+        note = f"{fired} probes sent; no correlated callback"
+        if signals:
+            note += "; response differences: " + ", ".join(signals)
         return OastResult(confirmed=False, url=endpoint.url,
-                          notes=f"{fired} OAST probes fired, no callback")
+                          payload=payload,
+                          response_status=status,
+                          response_length=response_length,
+                          response_time_ms=_response_time_ms(last_response),
+                          request_method=method, request_url=request_url,
+                          parameter_location=location, notes=note)
     return None
+
+
+def _response_time_ms(response) -> Optional[float]:
+    elapsed = getattr(response, "elapsed", None)
+    seconds = getattr(elapsed, "total_seconds", None)
+    return round(seconds() * 1000, 1) if callable(seconds) else None
