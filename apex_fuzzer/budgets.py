@@ -26,12 +26,16 @@ class BudgetUsage:
     per_host: Dict[str, int] = field(default_factory=dict)
     per_endpoint: Dict[str, int] = field(default_factory=dict)
     per_class: Dict[str, int] = field(default_factory=dict)
+    total_requests: int = 0
+    mutating_requests: int = 0
     blocked: int = 0
 
     def to_dict(self) -> Dict:
         return {"per_host": dict(self.per_host),
                 "per_endpoint": dict(self.per_endpoint),
                 "per_class": dict(self.per_class),
+                "total_requests": self.total_requests,
+                "mutating_requests": self.mutating_requests,
                 "blocked": self.blocked}
 
     @classmethod
@@ -39,17 +43,28 @@ class BudgetUsage:
         return cls(per_host=dict(d.get("per_host") or {}),
                    per_endpoint=dict(d.get("per_endpoint") or {}),
                    per_class=dict(d.get("per_class") or {}),
+                   total_requests=int(d.get("total_requests") or 0),
+                   mutating_requests=int(
+                       d.get("mutating_requests") or 0),
                    blocked=int(d.get("blocked") or 0))
 
 
 class BudgetTracker:
     def __init__(self, cfg):
-        self.cfg = cfg.budgets
+        # cfg is normally the full Config (budgets + safety sections);
+        # a bare BudgetConfig still works (safety caps read as unset).
+        self.cfg = getattr(cfg, "budgets", cfg)
+        self.safety = getattr(cfg, "safety", None)
         self.usage = BudgetUsage()
         self._lock = threading.Lock()
 
     def _limits(self):
         return self.cfg
+
+    def _safety_cap(self, name: str):
+        if self.safety is None:
+            return None
+        return getattr(self.safety, name, None)
 
     def check_request(self, host: str, endpoint: str) -> bool:
         """True if one more plain HTTP request fits the budgets."""
@@ -66,6 +81,13 @@ class BudgetTracker:
         """Record one request; False (and counted as blocked) if over."""
         with self._lock:
             lim = self._limits()
+            max_req = self._safety_cap("max_requests")
+            if max_req is not None and \
+                    self.usage.total_requests + 1 > max_req:
+                self.usage.blocked += 1
+                log.warning("budget: over global max_requests=%d",
+                            max_req)
+                return False
             if (self.usage.per_host.get(host, 0) + 1 >
                     lim.requests_per_host):
                 self.usage.blocked += 1
@@ -82,6 +104,35 @@ class BudgetTracker:
                 self.usage.per_host.get(host, 0) + 1
             self.usage.per_endpoint[endpoint] = \
                 self.usage.per_endpoint.get(endpoint, 0) + 1
+            self.usage.total_requests += 1
+            return True
+
+    def consume_mutation(self, host: str, endpoint: str) -> bool:
+        """Record one potentially state-changing request (POST/PUT/
+        PATCH/DELETE). False when over max_state_changes (None =
+        unlimited). Always also counts as a plain request."""
+        with self._lock:
+            max_mut = self._safety_cap("max_state_changes")
+            if max_mut is not None and \
+                    self.usage.mutating_requests + 1 > max_mut:
+                self.usage.blocked += 1
+                log.warning("budget: over max_state_changes=%d", max_mut)
+                return False
+            self.usage.mutating_requests += 1
+        return self.consume_request(host, endpoint)
+
+    def reserve(self, n: int, host: str = "") -> bool:
+        """Pre-check that n more requests fit the global + host caps
+        (used by pre-sweep cost reservation). Does not consume."""
+        with self._lock:
+            lim = self._limits()
+            max_req = self._safety_cap("max_requests")
+            if max_req is not None and self.usage.total_requests + n \
+                    > max_req:
+                return False
+            if host and self.usage.per_host.get(host, 0) + n > \
+                    lim.requests_per_host:
+                return False
             return True
 
     def consume_test(self, test_class: str, endpoint: str = "",

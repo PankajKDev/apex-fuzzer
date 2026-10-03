@@ -75,6 +75,23 @@ budgets:
   browser_actions: 500
   ai_experiments: 50
 
+# Safety gates + execution controls (Milestone 1). Everything here
+# defaults to today's behavior. Strict mode fails closed for
+# stateful/burst/claiming modules BEFORE any network activity.
+safety:
+  strict: false                # or --strict
+  authorization_ref: ""        # or --auth-ref (e.g. ENG-SEC-2026-041)
+  approved_domains: []         # allowlist: exact + subdomains
+  approved_cidrs: []           # allowlist for literal-IP targets
+  valid_from: ""               # ISO-8601 UTC, empty = unbounded
+  valid_until: ""              # ISO-8601 UTC, empty = unbounded
+  allowed_modules: []          # e.g. [business_logic, race]
+  allow_state_change: false    # or --ack-state-change
+  max_requests: null           # global request cap (or --max-requests)
+  max_state_changes: null      # mutating-request cap
+  stop_on_candidate: false     # or --stop-on-candidate
+  cooldown_ms: 0               # delay between stateful probes
+
 # Interactsh out-of-band verification (spec §3)
 oast:
   enabled: true

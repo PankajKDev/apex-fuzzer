@@ -58,6 +58,16 @@ from .validation.mutate import MutationEngine, fingerprint_waf
 from .ai.planner import AIPlanner
 from .reporting.metrics import Metrics
 from .reporting.html import render_html
+from .safety.preflight import (StopFlag, Pacer, get_interrupt_flag,
+                               resolve_modules, dry_run_plan,
+                               render_plan_text, plan_differential,
+                               plan_authz_matrix, plan_race,
+                               plan_business, plan_second_order,
+                               plan_oast)
+from .safety.impact import max_level
+from .safety.authorization import (
+    Authorization, AuthorizationRefused, GATED_MODULES,
+    EXIT_OK, EXIT_FAIL, EXIT_REFUSED)
 
 log = get_logger("orchestrator")
 
@@ -76,12 +86,18 @@ class Orchestrator:
         self.scope = Scope(cfg.scope)
         self.profile = profile or get_profile("standard")
         self._active_waf: Optional[str] = None
+        self._stop_flag = StopFlag()
+        self._pacer = Pacer(0)
+        self._safety_info: Optional[dict] = None
 
     # =====================================================================
     def run(self, targets: List[str], resume: bool = False):
+        from .safety.authorization import AuthorizationRefused
         for i, t in enumerate(targets):
             try:
                 self._run_one(t, resume)
+            except AuthorizationRefused:
+                raise  # fail closed: never continue past a refusal
             except Exception as e:
                 log.error("target %s failed: %s", t, e, exc_info=True)
             if i < len(targets) - 1:
@@ -113,6 +129,15 @@ class Orchestrator:
         client = _HTTPClient(limiter=limiter, budgets=budgets)
         app_graph = ApplicationGraph()
         application: Optional[Application] = None
+        stop = StopFlag()
+        pacer = Pacer(getattr(self.cfg.safety, "cooldown_ms", 0))
+        self._stop_flag = stop
+        self._pacer = pacer
+
+        # ── 0. PREFLIGHT (Milestone 1): strict gates fail closed here,
+        # before any network activity. Non-strict scans only log.
+        self._safety_info = self._preflight_or_refuse(
+            target, out_dir, stop)
 
         # ── 1. RECON ────────────────────────────────────────────────────
         if resume and ck.is_complete("recon"):
@@ -274,9 +299,106 @@ class Orchestrator:
                     metrics.to_dict(),
                     min_severity=self.cfg.reporting.min_severity,
                     output_dir=out_dir,
-                    coverage=coverage.to_dict())
+                    coverage=coverage.to_dict(),
+                    safety_info=getattr(self, "_safety_info", None))
         ck.mark("report")
         log.info("done: %s (%.1fs)", host, metrics.scan_duration_seconds)
+
+    # =====================================================================
+    # PREFLIGHT + DRY-RUN (Milestone 1)
+    # =====================================================================
+    @staticmethod
+    def _reserve_or_block(budgets, coverage, test_class: str, plan,
+                          host: str = "") -> bool:
+        """Reserve a sweep's worst-case cost up front. Failure records
+        blocked coverage and skips the sweep — never a negative."""
+        if budgets.reserve(plan.total, host):
+            log.info("%s: reserved %d requests (base=%d mut=%d "
+                     "burst=%d verify=%d)", plan.module, plan.total,
+                     plan.baseline_requests, plan.mutation_requests,
+                     plan.concurrency_requests,
+                     plan.verification_requests)
+            return True
+        log.warning("%s: cannot reserve %d requests — skipping sweep "
+                    "(budget)", plan.module, plan.total)
+        coverage.record(test_class, "blocked",
+                        f"could not reserve {plan.total} requests")
+        return False
+    def _halted(self) -> bool:
+        """True when sweeps must stop: stop-on-candidate fired, or the
+        operator interrupted (SIGINT/SIGTERM). Untested work keeps its
+        not_tested status — halting never manufactures negatives."""
+        local = getattr(self, "_stop_flag", None)
+        if local is not None and local.is_set():
+            return True
+        try:
+            return get_interrupt_flag().is_set()
+        except Exception:
+            return False
+
+    def _paced(self):
+        """Cooldown between stateful probes (no-op unless configured,
+        and safe when _run_one never ran, e.g. direct unit calls)."""
+        pacer = getattr(self, "_pacer", None)
+        if pacer is not None:
+            pacer.wait()
+
+    def _note_candidate(self):
+        if bool(getattr(self.cfg.safety, "stop_on_candidate", False)):
+            flag = getattr(self, "_stop_flag", None)
+            if flag is not None and not flag.is_set():
+                flag.set()
+                log.info("stop-on-candidate: halting remaining sweeps "
+                         "(started findings are kept)")
+
+    def _preflight_or_refuse(self, target: str, out_dir: Path,
+                             stop: StopFlag) -> dict:
+        """Resolve modules, check strict gates pre-network. Returns the
+        safety-info block for the report. Raises AuthorizationRefused."""
+        states = resolve_modules(self.cfg, self.profile)
+        strict = bool(getattr(self.cfg.safety, "strict", False))
+        level = max_level(states)
+        auth = Authorization.from_safety_cfg(self.cfg)
+        gated = [s.name for s in states
+                 if s.enabled and s.name in GATED_MODULES]
+        info = {"strict": strict, "max_impact": level,
+                "modules": [{"name": s.name, "level": s.level,
+                             "enabled": s.enabled} for s in states],
+                "gated_modules": gated,
+                "authorization": auth.describe(), "refusal": []}
+        if strict:
+            reasons = auth.check(target, gated)
+            info["refusal"] = reasons
+            if reasons:
+                for r in reasons:
+                    log.error("preflight refused: %s", r)
+                raise AuthorizationRefused(reasons)
+            log.info("preflight strict OK (impact=%s, gated=%s)",
+                     level, ",".join(gated) or "none")
+        else:
+            if gated:
+                log.warning("preflight: stateful modules %s run WITHOUT "
+                            "authorization metadata (strict mode off) — "
+                            "consider --strict for controlled targets",
+                            ",".join(gated))
+            log.info("preflight impact=%s (non-strict, gates advisory)",
+                     level)
+        return info
+
+    def dry_run(self, target: str) -> dict:
+        """Zero-network plan: modules, authorization, costs, exclusions."""
+        host = (target.replace("http://", "")
+                .replace("https://", "").split("/")[0])
+        out_dir = self.base_output / host
+        plan = dry_run_plan(target, self.cfg, self.profile, out_dir)
+        try:
+            out_dir.mkdir(parents=True, exist_ok=True)
+            import json as _json
+            (out_dir / "preflight.json").write_text(
+                _json.dumps(plan, indent=2))
+        except Exception as e:
+            log.debug("preflight save failed: %s", e)
+        return plan
 
     # =====================================================================
     # STAGES
@@ -1095,6 +1217,9 @@ class Orchestrator:
                     metrics.validation_candidates += 1
                     if f.validation_status == "confirmed":
                         metrics.validated_confirmed += 1
+                        self._note_candidate()
+                    elif f.validation_status == "strong_candidate":
+                        self._note_candidate()
                     elif f.validation_status == "false_positive":
                         metrics.false_positives += 1
                 out.append(f)
@@ -1312,10 +1437,18 @@ class Orchestrator:
         log.info("differential: probing %d endpoints "
                  "(contexts=%s)", len(targets),
                  [c["name"] for c in diff.contexts])
+        if not self._reserve_or_block(
+                budgets, coverage, "authz",
+                plan_differential(len(targets), len(diff.contexts))):
+            return []
         tenant_of = {c.name: (getattr(c, "tenant", "") or "")
                      for c in self.cfg.auth.contexts}
         findings: List[Finding] = []
         for ep in targets:
+            if self._halted():
+                log.info("differential: halted by stop control; "
+                         "remaining targets stay untested")
+                break
             if not self.scope.active_test_allowed(ep.url):
                 continue
             if not budgets.consume_test("authz", ep.normalized_url):
@@ -1343,6 +1476,7 @@ class Orchestrator:
                 continue
             metrics.differential_candidates += 1
             metrics.authorization_confirmed += 1
+            self._note_candidate()
             is_bola = "BOLA" in res.notes
             coverage.record("bola" if is_bola else "authz", "candidate",
                             res.notes)
@@ -1414,6 +1548,12 @@ class Orchestrator:
         log.info("authz-matrix: %d endpoints × %s as %d identities",
                  len(targets), cfg_a.methods,
                  len(identities))
+        if not self._reserve_or_block(
+                budgets, coverage, "authz",
+                plan_authz_matrix(len(targets), len(identities),
+                                  len(cfg_a.methods),
+                                  cfg_a.max_ids_per_endpoint)):
+            return []
         matrix = AuthorizationMatrix()
         findings: List[Finding] = []
         seen_cells = set()
@@ -1429,6 +1569,10 @@ class Orchestrator:
         # enables cross-endpoint replay, not just same-endpoint swap) —
         pool = []
         for ep in targets:
+            if self._halted():
+                log.info("authz-harvest: halted by stop control; "
+                         "remaining targets stay untested")
+                break
             if not self.scope.active_test_allowed(ep.url):
                 continue
             if not budgets.consume_test("authz", ep.normalized_url):
@@ -1463,6 +1607,7 @@ class Orchestrator:
                             f"{sw.tester}→{sw.status}")
                     continue
                 metrics.authorization_confirmed += 1
+                self._note_candidate()
                 cls = ("tenant_isolation" if cross_tenant else "bola")
                 coverage.record(cls, "candidate", sw.notes)
                 coverage.record("idor", "candidate", sw.notes)
@@ -1513,6 +1658,11 @@ class Orchestrator:
                 log.info("authz-matrix: %s", sw.notes)
 
         for ep in targets:
+            if self._halted():
+                log.info("authz-swap: halted by stop control; "
+                         "remaining targets stay untested")
+                break
+            self._paced()
             if not self.scope.active_test_allowed(ep.url):
                 continue
             ep_params = {p.name for p in
@@ -1587,6 +1737,7 @@ class Orchestrator:
                                         f"{describe_cell(obs)}")
                     continue
                 metrics.authorization_confirmed += 1
+                self._note_candidate()
                 coverage.record(kind or "authz", "candidate", notes)
                 names = [o.identity for o in obs if o.status == 200]
                 tenants = sorted({o.tenant for o in obs
@@ -1684,8 +1835,17 @@ class Orchestrator:
         log.info("second-order: %d forms × %d renders as %s",
                  len(forms), len(renders),
                  [i.name for i in injectors[:1]])
+        if not self._reserve_or_block(
+                budgets, coverage, "second_order",
+                plan_second_order(len(forms), len(renders))):
+            return []
         findings: List[Finding] = []
         for ep in forms:
+            if self._halted():
+                log.info("second-order: halted by stop control; "
+                         "remaining targets stay untested")
+                break
+            self._paced()
             inj = injectors[0]
             iname = getattr(inj, "name", "anonymous")
             iheaders = dict(getattr(inj, "auth_headers", None) or {})
@@ -1717,6 +1877,7 @@ class Orchestrator:
             if dangerous:
                 h = dangerous[0]
                 metrics.second_order_candidates += 1
+                self._note_candidate()
                 coverage.record("second_order", "candidate",
                                 f"{h.context} at {h.render_url}")
                 f = Finding(
@@ -1789,6 +1950,10 @@ class Orchestrator:
         tester = BusinessLogicTester(self.cfg, client)
         log.info("business-logic: %d endpoints as %s",
                  len(scored), aname)
+        if not self._reserve_or_block(
+                budgets, coverage, "business_logic",
+                plan_business(len(scored), cfg_b.max_params)):
+            return []
         findings: List[Finding] = []
         for ep, cands in scored:
             if not budgets.consume_test("business_logic",
@@ -1797,6 +1962,11 @@ class Orchestrator:
                                 f"budget: {ep.normalized_url}")
                 continue
             for cand in cands:
+                if self._halted():
+                    log.info("business-logic: halted by stop control; "
+                             "remaining targets stay untested")
+                    break
+                self._paced()
                 try:
                     results = tester.probe(
                         ep, cand, actor,
@@ -1809,6 +1979,7 @@ class Orchestrator:
                     metrics.business_logic_tests += 1
                     if res.verdict == "strong_candidate":
                         metrics.business_logic_candidates += 1
+                        self._note_candidate()
                         metrics.invariants_violated += len(res.violations)
                         coverage.record("business_logic", "candidate",
                                         res.notes)
@@ -1884,8 +2055,18 @@ class Orchestrator:
         aheaders = dict(getattr(actor, "auth_headers", None) or {})
         log.info("race: %d endpoints ×%d/%d as %s", len(targets),
                  cfg_r.concurrency, cfg_r.rounds, aname)
+        if not self._reserve_or_block(
+                budgets, coverage, "race",
+                plan_race(len(targets), cfg_r.concurrency,
+                          cfg_r.rounds)):
+            return []
         findings: List[Finding] = []
         for ep in targets:
+            if self._halted():
+                log.info("race: halted by stop control; "
+                         "remaining targets stay untested")
+                break
+            self._paced()
             if not budgets.consume_test("race", ep.normalized_url):
                 coverage.record("race", "blocked",
                                 f"budget: {ep.normalized_url}")
@@ -1904,6 +2085,7 @@ class Orchestrator:
             metrics.race_tests += 1
             if res.verdict == "strong_candidate":
                 metrics.race_candidates += 1
+                self._note_candidate()
                 metrics.invariants_tested += 1
                 metrics.invariants_violated += len(res.violations)
                 coverage.record("race", "candidate", res.notes)
@@ -1986,8 +2168,17 @@ class Orchestrator:
         log.info("oast: sweeping %d SSRF-suspect endpoints "
                  "(cloud payloads: %s)", len(targets),
                  cloud_payloads or "none")
+        if not self._reserve_or_block(
+                budgets, coverage, "ssrf",
+                plan_oast(len(targets),
+                          self.cfg.oast.max_params_per_endpoint)):
+            return []
         findings: List[Finding] = []
         for ep in targets:
+            if self._halted():
+                log.info("oast: halted by stop control; "
+                         "remaining targets stay untested")
+                break
             if not budgets.consume_test(
                     "ssrf", ep.normalized_url,
                     limit=self.cfg.oast.max_endpoints):
@@ -2011,6 +2202,7 @@ class Orchestrator:
                                 f"{ep.normalized_url}: no callback")
                 continue
             metrics.oast_confirmed += 1
+            self._note_candidate()
             coverage.record("ssrf", "confirmed",
                             f"OAST callback on '{res.parameter}'")
             f = Finding(
@@ -2394,7 +2586,7 @@ class _HTTPClient:
         self.limiter = limiter
         self.budgets = budgets
 
-    def _budget_ok(self, url: str):
+    def _budget_ok(self, url: str, mutating: bool = False):
         if not self.budgets:
             return
         from urllib.parse import urlparse as _up
@@ -2402,6 +2594,10 @@ class _HTTPClient:
             host = _up(url).hostname or ""
         except Exception:
             host = ""
+        if mutating:
+            if not self.budgets.consume_mutation(host, url):
+                raise BudgetExceeded(f"mutation budget exceeded for {host}")
+            return
         if not self.budgets.consume_request(host, url):
             raise BudgetExceeded(f"budget exceeded for {host}")
 
@@ -2417,7 +2613,7 @@ class _HTTPClient:
     def post(self, url, **kw):
         if self.limiter:
             self.limiter.before_request()
-        self._budget_ok(url)
+        self._budget_ok(url, mutating=True)
         r = self.session.post(url, allow_redirects=False, **kw)
         if self.limiter:
             self.limiter.after_response(r.status_code)
@@ -2427,7 +2623,7 @@ class _HTTPClient:
         """Generic verb (PUT/PATCH/DELETE…) with limiter + budget gates."""
         if self.limiter:
             self.limiter.before_request()
-        self._budget_ok(url)
+        self._budget_ok(url, mutating=method.upper() != "GET")
         r = self.session.request(method.upper(), url,
                                  allow_redirects=False, **kw)
         if self.limiter:

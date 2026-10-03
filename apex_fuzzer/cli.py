@@ -53,6 +53,22 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Enable browser-driven discovery (needs playwright)")
     p.add_argument("--no-browser", action="store_true",
                    help="Disable browser-driven discovery")
+    p.add_argument("--strict", action="store_true",
+                   help="Fail closed: stateful modules need authorization")
+    p.add_argument("--auth-ref", default=None,
+                   help="Authorization reference (strict mode)")
+    p.add_argument("--ack-state-change", action="store_true",
+                   help="Acknowledge state-changing tests (strict mode)")
+    p.add_argument("--dry-run", action="store_true",
+                   help="Print the preflight plan; send zero requests")
+    p.add_argument("--max-requests", type=int, default=None,
+                   help="Global request cap (budget)")
+    p.add_argument("--max-state-changes", type=int, default=None,
+                   help="Cap for mutating requests (budget)")
+    p.add_argument("--stop-on-candidate", action="store_true",
+                   help="Halt sweeps after the first strong candidate")
+    p.add_argument("--cooldown-ms", type=int, default=None,
+                   help="Delay between stateful probes")
     p.add_argument("--no-js", action="store_true")
     p.add_argument("--min-sev", default=None,
                    choices=["info", "low", "medium", "high", "critical"])
@@ -188,9 +204,29 @@ def main():
     if not targets:
         parser.print_help()
         sys.exit(1)
-    Orchestrator(cfg, Path(args.output),
-                 profile=get_profile(args.profile)
-                 ).run(targets, resume=args.resume)
+    orch = Orchestrator(cfg, Path(args.output),
+                        profile=get_profile(args.profile))
+    if args.dry_run:
+        # zero network: plan only, one summary per target
+        from .safety.preflight import render_plan_text
+        for t in targets:
+            plan = orch.dry_run(t)
+            print(render_plan_text(plan))
+            if plan["refusal"]:
+                log.error("dry-run refusal for %s: %s", t,
+                          "; ".join(plan["refusal"]))
+        sys.exit(0)
+    from .safety.preflight import install_signal_handlers
+    install_signal_handlers()
+    from .safety.authorization import AuthorizationRefused, EXIT_REFUSED
+    try:
+        orch.run(targets, resume=args.resume)
+    except AuthorizationRefused as e:
+        log.error("refused: %s", "; ".join(e.reasons))
+        log.error("refusals exit code %d: provide --auth-ref, "
+                  "--ack-state-change, approved domains/modules and a "
+                  "valid window, or drop --strict", EXIT_REFUSED)
+        sys.exit(EXIT_REFUSED)
 
 
 if __name__ == "__main__":
