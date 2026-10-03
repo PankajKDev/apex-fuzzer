@@ -20,7 +20,7 @@ from .scope import Scope
 from .profiles import Profile, get as get_profile
 from .models import (Endpoint, Parameter, Finding, Hypothesis,
                       write_jsonl, read_jsonl, Confidence,
-                      ValidationStatus)
+                      ValidationStatus, stable_finding_id)
 from .logging_setup import get_logger, attach_file_handler
 from .shell import run, which, AdaptiveRateLimiter
 from .budgets import BudgetTracker, BudgetExceeded
@@ -1348,7 +1348,7 @@ class Orchestrator:
                             res.notes)
             coverage.record("idor", "candidate", res.notes)
             f = Finding(
-                id=f"diff-{abs(hash(ep.normalized_url)) % 10**10}",
+                id=stable_finding_id("diff", ep.normalized_url),
                 source="differential",
                 name=("BOLA/IDOR: identical access for two users "
                       f"({ep.path})" if is_bola
@@ -1476,7 +1476,7 @@ class Orchestrator:
                 metrics.invariants_violated += sum(
                     1 for r in inv_results if r.violated)
                 f = Finding(
-                    id=f"swap-{abs(hash(sw.endpoint_url + sw.param + sw.victim_value)) % 10**10}",
+                    id=stable_finding_id("swap", sw.endpoint_url, sw.param, sw.victim_value),
                     source="idor-swap",
                     name=(f"{'Cross-tenant read' if cross_tenant else 'BOLA'}: "
                           f"'{sw.tester}' reads '{sw.owner}''s "
@@ -1592,7 +1592,7 @@ class Orchestrator:
                 tenants = sorted({o.tenant for o in obs
                                   if o.status == 200 and o.tenant})
                 f = Finding(
-                    id=f"bfla-{abs(hash(cell_key)) % 10**10}",
+                    id=stable_finding_id("bfla", cell_key),
                     source="authz-matrix",
                     name=(f"BFLA/{kind.upper()}: {method} {ep.path} "
                           f"treats identities identically"),
@@ -1720,7 +1720,7 @@ class Orchestrator:
                 coverage.record("second_order", "candidate",
                                 f"{h.context} at {h.render_url}")
                 f = Finding(
-                    id=f"so-{abs(hash(ep.normalized_url + h.render_url)) % 10**10}",
+                    id=stable_finding_id("so", ep.normalized_url, h.render_url),
                     source="second-order",
                     name=(f"Stored XSS candidate: canary from "
                           f"{ep.path} renders {h.context} at "
@@ -1815,7 +1815,7 @@ class Orchestrator:
                         inv = res.violations[0]["invariant_id"] \
                             if res.violations else "invariant"
                         f = Finding(
-                            id=f"bl-{abs(hash(ep.normalized_url + cand.param + str(res.mutated))) % 10**10}",
+                            id=stable_finding_id("bl", ep.normalized_url, cand.param, str(res.mutated)),
                             source="business-logic",
                             name=(f"Business logic: {cand.param}="
                                   f"{res.mutated} accepted, violates "
@@ -1908,7 +1908,7 @@ class Orchestrator:
                 metrics.invariants_violated += len(res.violations)
                 coverage.record("race", "candidate", res.notes)
                 f = Finding(
-                    id=f"race-{abs(hash(ep.normalized_url)) % 10**10}",
+                    id=stable_finding_id("race", ep.normalized_url),
                     source="race",
                     name=(f"Race condition: {cfg_r.concurrency}× POST "
                           f"{ep.path} processed concurrently with "
@@ -2014,7 +2014,7 @@ class Orchestrator:
             coverage.record("ssrf", "confirmed",
                             f"OAST callback on '{res.parameter}'")
             f = Finding(
-                id=f"oast-{abs(hash(ep.normalized_url)) % 10**10}",
+                id=stable_finding_id("oast", ep.normalized_url),
                 source="oast-sweep",
                 name=(f"Blind SSRF confirmed via OAST on "
                       f"'{res.parameter}' ({ep.path})"),
@@ -2210,7 +2210,7 @@ class Orchestrator:
             if status != "validated":
                 return
             f = Finding(
-                id=f"ai-{cls}-{abs(hash(url or h.hypothesis)) % 10**10}",
+                id=stable_finding_id(f"ai-{cls}", url or h.hypothesis),
                 source=source, name=name, severity=severity,
                 confidence=Confidence.PROBABLE.value,
                 validation_status=validation_status,

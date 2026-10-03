@@ -255,6 +255,65 @@ def test_race_consistent_is_negative():
     assert res.verdict == "negative"
 
 
+def test_race_identical_hashes_are_consistent():
+    # regression: {tuple(hashes)} made EVERY round look consistent
+    body = json.dumps({"ok": True, "ts": "fixed"})
+    calls = []
+
+    class H:
+        def post(self, url, **kw):
+            calls.append(1)
+            return FakeResp(200, body)
+
+    res = run_race(H(), "POST", "https://t.com/ping", {}, {},
+                   concurrency=3, rounds=2)
+    assert res.verdict == "negative"
+    assert len(calls) == 6
+
+
+def test_race_different_hashes_are_not_consistent():
+    # regression: all-200 with DIVERGENT bodies and no IDs must NOT
+    # be called consistent — the old code counted every round clean
+    n = [0]
+
+    class H:
+        def post(self, url, **kw):
+            n[0] += 1
+            return FakeResp(200, json.dumps({"echo": n[0]}))
+
+    res = run_race(H(), "POST", "https://t.com/echo", {}, {},
+                   concurrency=3, rounds=1)
+    assert res.verdict == "inconclusive"
+    assert res.verdict != "negative"
+
+
+def test_race_no_ids_and_different_responses_is_inconclusive():
+    class H:
+        def post(self, url, **kw):
+            import random
+            return FakeResp(200, json.dumps({"nonce": random.random()}))
+
+    res = run_race(H(), "POST", "https://t.com/rand", {}, {},
+                   concurrency=4, rounds=2)
+    assert res.verdict in ("inconclusive", "strong_candidate")
+    assert res.verdict != "negative"
+
+
+def test_stable_finding_id_deterministic():
+    import hashlib
+    from apex_fuzzer.models import stable_finding_id
+    got = stable_finding_id("swap", "https://t.com/api/u", "id", "1")
+    # pinned to an independently computed digest: immune to
+    # PYTHONHASHSEED randomization, unlike the old abs(hash(...))
+    expect = "swap-" + hashlib.sha256(
+        "https://t.com/api/u\x1fid\x1f1".encode()).hexdigest()[:16]
+    assert got == expect
+    assert stable_finding_id("swap", "https://t.com/api/u", "id", "1") \
+        == got  # repeatable within the process
+    assert stable_finding_id("swap", "https://t.com/api/u", "id", "2") \
+        != got  # sensitive to inputs
+
+
 def test_race_errors_are_inconclusive():
     class H:
         def post(self, url, **kw):

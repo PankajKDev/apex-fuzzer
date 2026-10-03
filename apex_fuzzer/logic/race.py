@@ -118,8 +118,11 @@ def run_race(http, method: str, url: str, body: Dict, headers: Dict,
                         if s}
             if len(distinct) > 1:
                 candidate_round = i
-            elif len({tuple(rr.hashes)}) == 1 and rr.errors == 0:
+            elif len(set(rr.hashes)) == 1 and rr.errors == 0:
                 clean_rounds += 1
+            # else: all-200 but bodies differ with no comparable IDs —
+            # genuinely ambiguous, deliberately NOT counted clean
+            # (Rule 7: never read ambiguity as a negative)
     if candidate_round is not None:
         res.verdict = "strong_candidate"
         rr = res.round_results[candidate_round]
