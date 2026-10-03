@@ -19,6 +19,7 @@ inject request and the render snippet attached.
 """
 import random
 import re
+import secrets
 import string
 from dataclasses import dataclass, field
 from typing import Any, Dict, List
@@ -62,21 +63,28 @@ def second_order_ssrf_fields(endpoint, max_fields: int = 3):
 
 
 def make_ssrf_canary(callback_host: str, scheme: str = "http") -> str:
-    """Build a unique callback URL under the registered OAST hostname."""
-    from urllib.parse import urlsplit
+    """Build a unique, per-request callback URL under the OAST provider."""
+    from urllib.parse import urlsplit, urlunsplit
     if scheme not in ("http", "https"):
         raise ValueError("SSRF canary scheme must be http or https")
+    # Static local collectors use path tokens and only speak HTTP; preserve
+    # their configured scheme/port instead of treating them as DNS names.
+    configured = urlsplit(callback_host or "")
+    if configured.scheme in ("http", "https") and configured.netloc:
+        nonce = secrets.token_hex(6)
+        path = f"{configured.path.rstrip('/')}/stored/{nonce}"
+        return urlunsplit((configured.scheme, configured.netloc,
+                           path, "", ""))
     parsed = urlsplit("//" + (callback_host or ""))
     host = parsed.hostname or ""
     parts = host.split(".", 1)
     if len(parts) != 2 or not all(parts):
         raise ValueError("callback host is empty")
-    rand = "".join(random.choice(string.ascii_lowercase + string.digits)
-                   for _ in range(10))
-    # Keep the provider's registered correlation label first; Interactsh
-    # supports a per-interaction nonce as the following DNS label.
-    unique_host = f"{parts[0]}.so{rand}.{parts[1]}"
-    return f"{scheme}://{unique_host}/stored/{rand}"
+    nonce = secrets.token_hex(6)
+    # Interactsh correlates the registered ID and a per-interaction nonce in
+    # the first DNS label. Keep the complete label intact for exact matching.
+    unique_host = f"{parts[0]}{nonce}.{parts[1]}"
+    return f"{scheme}://{unique_host}/stored/{nonce}"
 
 
 def classify_context(html: str, canary: str) -> Dict[str, Any]:

@@ -184,6 +184,7 @@ Results land in `output/<host>/`: `report.html`, `findings.jsonl`,
 --validate              validation.enabled → true
 --ai                    ai.enabled → true
 --oast                  OAST blind-SSRF confirmation on
+--oast-callback-url URL Use a static HTTP callback collector (local labs)
 --differential          differential auth-context tests on
 --second-order          stored-XSS correlation on (persists canaries)
 --second-order-ssrf     stored-SSRF OAST correlation (persists callback URLs)
@@ -284,6 +285,7 @@ oast:
   enabled: true
   server: "oast.pro"      # callback domain; oast.live is the failover
   api_base: null          # null → https://api.<server>; set for self-hosted
+  callback_url: ""        # local collector base, e.g. http://localhost:9001
   poll_timeout: 15
   poll_interval: 2
   max_endpoints: 10
@@ -453,7 +455,7 @@ Playwright → logged skip. No login automation runs unless you opt in.
 ## OAST setup (Interactsh)
 
 Blind SSRF/RCE/XXE produce no in-band signal, so candidates are fired with a
-unique Interactsh callback hostname and the provider is polled for
+unique, per-request Interactsh callback hostname and the provider is polled for
 DNS/HTTP/SMTP interactions (`validation/oast.py`).
 
 - **Public (default):** `server: "oast.pro"`, `api_base: null` → registers at
@@ -461,9 +463,17 @@ DNS/HTTP/SMTP interactions (`validation/oast.py`).
   failure it fails over to `oast.live` automatically.
 - **Self-hosted:** point `server` at your Interactsh callback domain and set
   `api_base` to its REST endpoint.
+- **Local static collector:** pass `--oast-callback-url
+  http://localhost:9001` for a simple HTTP collector exposing a JSON `/_log`
+  endpoint (such as the SSRF lab). This uses unique path tokens and avoids
+  Interactsh registration. The target scan should include an endpoint URL with
+  a URL-like parameter; a root page with route names shown only as text is not
+  enough for endpoint discovery.
 
-Every parameter probe gets a fresh callback host and is tried over both HTTP
-and HTTPS. The scanner correlates the exact nonce hostname, retains the
+Interactsh probes use fresh HTTP and HTTPS callback hosts. Each uses a
+provider-compatible nonce in the registered correlation label; static
+collectors use a unique path nonce and their configured scheme (the lab's
+collector is HTTP). The scanner matches that per-request nonce, retains the
 request method and shape, and records status/length differences as
 inconclusive signals when no callback arrives. It does not request cloud
 metadata or credential endpoints. The provider is deregistered

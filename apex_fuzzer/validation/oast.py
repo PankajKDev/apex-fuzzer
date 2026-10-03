@@ -155,9 +155,10 @@ class InteractshProvider:
     """
 
     def __init__(self, server: str = "oast.pro", api_base: Optional[str] = None,
-                 timeout: int = 15):
+                 timeout: int = 15, callback_url: str = ""):
         self.server = (server or "oast.pro").strip().rstrip(".")
         self.timeout = timeout
+        self.callback_url = (callback_url or "").strip().rstrip("/")
         if api_base:
             self.api_base = api_base.rstrip("/")
         elif self.server in DEFAULT_SERVERS:
@@ -170,6 +171,15 @@ class InteractshProvider:
 
     # ── lifecycle ──────────────────────────────────────────────────────
     def register(self) -> bool:
+        if self.callback_url:
+            # The lab collector has no registration protocol: a random path
+            # is the correlation token and GET /_log returns its hit list.
+            import uuid
+            self.token = uuid.uuid4().hex
+            self.uuid = self.token
+            log.info("using static OAST callback collector %s",
+                     self.callback_url)
+            return True
         import requests
         try:
             r = requests.post(f"{self.api_base}/register",
@@ -210,7 +220,25 @@ class InteractshProvider:
 
     def create_token(self) -> str:
         """Unique callback hostname for this scan."""
+        if self.callback_url:
+            return f"{self.callback_url}/{self.token}"
         return f"{self.token}.{self.server}"
+
+    def correlation_key(self, callback: str) -> str:
+        """Return the per-request value to match in OAST interactions.
+
+        Interactsh places a nonce after the registered correlation ID in the
+        first DNS label. Static collectors carry their nonce in the final URL
+        path segment. Matching only the scan ID would let delayed callbacks
+        from one parameter be attributed to a later parameter.
+        """
+        if self.callback_url:
+            path = urlsplit(callback).path.rstrip("/")
+            nonce = path.rsplit("/", 1)[-1]
+            return nonce or self.token or ""
+        hostname = urlsplit(callback).hostname or ""
+        # The first label is the registered ID plus this probe's nonce.
+        return hostname.split(".", 1)[0]
 
     def poll(self, timeout: Optional[int] = None,
              interval: Optional[int] = None) -> List[Dict]:
@@ -221,14 +249,19 @@ class InteractshProvider:
         deadline = time.time() + timeout
         while time.time() < deadline:
             try:
-                r = requests.get(f"{self.api_base}/data/{self.uuid}",
-                                 timeout=self.timeout)
+                url = (f"{self.callback_url}/_log" if self.callback_url
+                       else f"{self.api_base}/data/{self.uuid}")
+                r = requests.get(url, timeout=self.timeout)
                 data = r.json()
             except Exception:
                 time.sleep(interval)
                 continue
-            interactions = (data.get("data") if isinstance(data, dict)
-                            else None) or []
+            interactions = (data if isinstance(data, list) else
+                            (data.get("data") or data.get("hits") or [])
+                            if isinstance(data, dict) else [])
+            if self.callback_url:
+                interactions = matching_interactions(
+                    interactions, self.token or "")
             if interactions:
                 return interactions
             time.sleep(interval)
@@ -238,13 +271,14 @@ class InteractshProvider:
                   ) -> bool:
         """True if any interaction reached our callback hostname."""
         return bool(matching_interactions(
-            interactions, token or self.create_token()))
+            interactions, token or self.correlation_key(
+                self.create_token())))
 
     def close(self):
         if self._closed:
             return
         self._closed = True
-        if not self.uuid:
+        if not self.uuid or self.callback_url:
             return
         import requests
         try:
@@ -318,6 +352,9 @@ def probe_endpoint(http, endpoint, provider: InteractshProvider,
             from .second_order import make_ssrf_canary
             payload = make_ssrf_canary(provider.create_token(), scheme)
             callback_host = urlsplit(payload).hostname or ""
+            key_builder = getattr(provider, "correlation_key", None)
+            callback_key = (key_builder(payload) if callable(key_builder)
+                            else callback_host)
             try:
                 method = (getattr(endpoint, "method", "GET") or
                           "GET").upper()
@@ -360,8 +397,8 @@ def probe_endpoint(http, endpoint, provider: InteractshProvider,
                 fired += 1
                 last_response = response
                 last_request = (method, request_url, p.location, payload)
-                pending.append((payload, callback_host, response, method,
-                                request_url, p.location))
+                pending.append((payload, callback_host, callback_key,
+                                response, method, request_url, p.location))
             except BudgetExceeded:
                 raise
             except Exception as e:
@@ -371,9 +408,9 @@ def probe_endpoint(http, endpoint, provider: InteractshProvider,
             continue
         interactions = provider.poll(timeout=poll_timeout,
                                      interval=poll_interval)
-        for payload, callback_host, response, method, request_url, location \
-                in pending:
-            matched = matching_interactions(interactions, callback_host)
+        for (payload, callback_host, callback_key, response, method,
+             request_url, location) in pending:
+            matched = matching_interactions(interactions, callback_key)
             if matched:
                 log.info("OAST HIT: param=%s on %s (%d interactions)",
                          p.name, endpoint.url, len(matched))

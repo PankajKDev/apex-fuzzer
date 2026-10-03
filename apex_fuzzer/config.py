@@ -157,6 +157,9 @@ class OastConfig:
     enabled: bool = True
     server: str = "oast.pro"
     api_base: Optional[str] = None
+    # Optional static HTTP callback collector, e.g. a local SSRF lab's
+    # /_log-compatible server. When set, registration/polling use this URL.
+    callback_url: str = ""
     poll_timeout: int = 15
     poll_interval: int = 2
     max_endpoints: int = 10
@@ -409,6 +412,10 @@ def apply_cli_overrides(cfg: Config, args) -> Config:
     if getattr(args, "no_js", False):
         cfg.discovery.javascript = False
     if getattr(args, "oast", False):
+        cfg.oast.enabled = True
+        cfg.validation.ssrf = True
+    if getattr(args, "oast_callback_url", None):
+        cfg.oast.callback_url = args.oast_callback_url
         cfg.oast.enabled = True
         cfg.validation.ssrf = True
     if getattr(args, "differential", False):

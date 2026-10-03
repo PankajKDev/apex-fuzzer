@@ -126,6 +126,7 @@ oast:
   enabled: true
   server: "oast.pro"
   api_base: null
+  callback_url: ""       # optional static collector, e.g. local lab
   poll_timeout: 15
   poll_interval: 2
   max_endpoints: 10

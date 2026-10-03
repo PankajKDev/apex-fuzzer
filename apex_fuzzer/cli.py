@@ -41,6 +41,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="AI backend (default: config ai.provider)")
     p.add_argument("--oast", action="store_true",
                    help="Enable Interactsh OAST blind-SSRF confirmation")
+    p.add_argument("--oast-callback-url", default=None,
+                   help="Static HTTP callback collector base URL (local labs)")
     p.add_argument("--differential", action="store_true",
                    help="Enable differential auth-context (BOLA/IDOR) tests")
     p.add_argument("--second-order", action="store_true",

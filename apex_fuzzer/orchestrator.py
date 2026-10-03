@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import List, Dict, Set, Optional
 from .config import Config
-from .scope import Scope
+from .scope import Scope, target_hostname
 from .profiles import Profile, get as get_profile
 from .models import (Endpoint, Parameter, Finding, Hypothesis,
                       write_jsonl, read_jsonl, Confidence,
@@ -140,7 +140,11 @@ class Orchestrator:
         started = time.time()
 
         if not self.cfg.scope.allowed_domains:
-            self.cfg.scope.allowed_domains.append(host)
+            # Scope matches URL hostnames, which never include ports.
+            # Keep the port in the output directory but not in the scope
+            # allowlist (e.g. localhost:8000 → localhost).
+            self.cfg.scope.allowed_domains.append(
+                target_hostname(target) or host)
             self.scope = Scope(self.cfg.scope)
 
         base_url = target if target.startswith("http") else f"https://{host}"
@@ -2426,6 +2430,9 @@ class Orchestrator:
                 continue
             callback_url = make_ssrf_canary(provider.create_token())
             callback_host = urlsplit(callback_url).hostname or ""
+            key_builder = getattr(provider, "correlation_key", None)
+            callback_key = (key_builder(callback_url)
+                            if callable(key_builder) else callback_host)
             headers_for_request = dict(headers)
             data = {p.name: (p.sample_value or "test")
                     for p in ep.body_parameters if p.name}
@@ -2481,6 +2488,7 @@ class Orchestrator:
                 "method": method,
                 "callback_url": callback_url,
                 "callback_host": callback_host,
+                "callback_key": callback_key,
                 "status": response.status_code,
                 "trigger_urls": trigger_urls,
             })
@@ -2525,7 +2533,7 @@ class Orchestrator:
         for item in submitted:
             ep = item["endpoint"]
             matched = matching_interactions(
-                interactions, item["callback_host"])
+                interactions, item["callback_key"])
             if matched:
                 metrics.second_order_ssrf_confirmed += 1
                 self._note_candidate()
@@ -3147,7 +3155,8 @@ class Orchestrator:
         provider = InteractshProvider(
             server=self.cfg.oast.server,
             api_base=self.cfg.oast.api_base,
-            timeout=self.cfg.scan.http_timeout)
+            timeout=self.cfg.scan.http_timeout,
+            callback_url=self.cfg.oast.callback_url)
         if provider.register():
             return provider
         log.info("OAST unavailable — SSRF blind probes will not be "
@@ -3555,7 +3564,8 @@ class Orchestrator:
             return None
         provider = InteractshProvider(
             server=self.cfg.oast.server, api_base=self.cfg.oast.api_base,
-            timeout=self.cfg.scan.http_timeout)
+            timeout=self.cfg.scan.http_timeout,
+            callback_url=self.cfg.oast.callback_url)
         return provider if provider.register() else None
 
     def _waf_hint(self) -> Optional[str]:

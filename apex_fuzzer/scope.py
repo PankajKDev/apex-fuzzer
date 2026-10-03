@@ -7,6 +7,16 @@ from .logging_setup import get_logger
 log = get_logger("scope")
 
 
+def target_hostname(target: str) -> str:
+    """Return the hostname from a target URL, excluding its port."""
+    value = (target if "://" in (target or "")
+             else f"http://{target or ''}")
+    try:
+        return (urlparse(value).hostname or "").lower()
+    except ValueError:
+        return ""
+
+
 class Scope:
     def __init__(self, cfg: ScopeConfig):
         self.cfg = cfg

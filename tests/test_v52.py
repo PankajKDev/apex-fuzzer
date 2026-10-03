@@ -5,7 +5,7 @@ import time
 
 from apex_fuzzer.discovery import param_miner, technologies as tech_mod
 from apex_fuzzer.discovery.javascript import chunk_js, parse_source_map
-from apex_fuzzer.models import Parameter, Hypothesis
+from apex_fuzzer.models import Parameter, Hypothesis, Endpoint
 from apex_fuzzer.validation import differential as diff_mod
 from apex_fuzzer.validation import mutate as mut_mod
 from apex_fuzzer.validation import oast as oast_mod
@@ -191,6 +191,77 @@ def test_interactsh_create_token():
     assert not p.available()
     fresh = oast_mod.InteractshProvider()
     assert not fresh.available()
+
+
+def test_static_callback_collector_tokens_and_poll(monkeypatch):
+    p = oast_mod.InteractshProvider(
+        callback_url="http://localhost:9001")
+    assert p.register()
+    assert p.create_token().startswith("http://localhost:9001/")
+    assert p.correlation_key(p.create_token()) == p.token
+
+    class Response:
+        def json(self):
+            return [{"path": f"/{p.token}/stored/abc"}]
+
+    seen = {}
+    def fake_get(url, **kwargs):
+        seen["url"] = url
+        return Response()
+
+    monkeypatch.setattr("requests.get", fake_get)
+    assert p.poll(timeout=1, interval=0) == [
+        {"path": f"/{p.token}/stored/abc"}]
+    assert seen["url"] == "http://localhost:9001/_log"
+
+
+def test_static_callback_collector_confirms_probe(monkeypatch):
+    from types import SimpleNamespace
+    from apex_fuzzer.validation.oast import probe_endpoint
+
+    provider = oast_mod.InteractshProvider(
+        callback_url="http://localhost:9001")
+    assert provider.register()
+
+    class CollectorResponse:
+        def json(self):
+            return [{"path": f"/{provider.token}/stored/canary"}]
+
+    monkeypatch.setattr("requests.get",
+                        lambda *args, **kwargs: CollectorResponse())
+
+    class Http:
+        def request(self, method, url, **kwargs):
+            return SimpleNamespace(status_code=202, text="queued")
+
+    endpoint = Endpoint(
+        url="http://localhost:8000/fetch-blind",
+        normalized_url="http://localhost:8000/fetch-blind",
+        host="localhost", path="/fetch-blind", endpoint_type="api",
+        query_parameters=[Parameter(name="url", location="query")])
+    result = probe_endpoint(Http(), endpoint, provider,
+                            poll_timeout=1, poll_interval=0.01,
+                            max_params=1)
+    assert result and result.confirmed
+    assert result.callback_host == "localhost"
+
+
+def test_static_callback_canary_preserves_local_port():
+    from apex_fuzzer.validation.second_order import make_ssrf_canary
+    payload = make_ssrf_canary(
+        "http://localhost:9001/abc123", scheme="https")
+    assert payload.startswith("http://localhost:9001/abc123/stored/")
+
+
+def test_oast_callback_cli_override():
+    from apex_fuzzer.cli import build_parser
+    from apex_fuzzer.config import Config, apply_cli_overrides
+    args = build_parser().parse_args([
+        "-d", "http://localhost:8000", "--oast-callback-url",
+        "http://localhost:9001"])
+    cfg = apply_cli_overrides(Config(), args)
+    assert cfg.oast.enabled and cfg.validation.ssrf
+    assert cfg.oast.callback_url == "http://localhost:9001"
 
 
 def test_correlate_dns_and_http():
