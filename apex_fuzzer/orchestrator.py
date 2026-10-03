@@ -856,6 +856,12 @@ class Orchestrator:
             out += self._differential_probe(endpoints, diff, evidence,
                                             metrics, budgets, coverage)
 
+        # 1b) authz matrix: harvest → swap → per-method sweep (#1–2)
+        if (self.profile.authz_matrix or self.cfg.authorization.enabled):
+            out += self._authz_matrix_probe(endpoints, evidence,
+                                            metrics, budgets, coverage,
+                                            client, out_dir, identities)
+
         # 2) OAST sweep for blind SSRF (spec §3)
         oast_provider = self._maybe_register_oast()
         try:
@@ -895,6 +901,14 @@ class Orchestrator:
                     elif f.validation_status == "false_positive":
                         metrics.false_positives += 1
                 out.append(f)
+
+            # 4) stored-XSS correlation (bounty item #3, opt-in: persists
+            # canaries server-side)
+            if (self.profile.second_order or
+                    self.cfg.validation.second_order):
+                out += self._second_order_probe(
+                    endpoints, evidence, metrics, budgets, coverage,
+                    client, identities)
         finally:
             if oast_provider is not None:
                 oast_provider.close()
@@ -1037,6 +1051,285 @@ class Orchestrator:
             findings.append(f)
             log.info("differential: STRONG candidate on %s — %s",
                      ep.url, res.notes)
+        return findings
+
+    # ── AUTHZ MATRIX: harvest → swap → per-method sweep (#1–2) ──────
+    def _authz_matrix_probe(self, endpoints: List[Endpoint],
+                            evidence: EvidenceStore, metrics: Metrics,
+                            budgets: BudgetTracker,
+                            coverage: CoverageTracker, client,
+                            out_dir: Path, identities) -> List[Finding]:
+        from .authorization.harvest import harvest_ids
+        from .authorization.matrix import (AuthorizationMatrix,
+                                           describe_cell, evaluate_cell)
+        from .authorization.access_tests import swap_ids, sweep_methods
+        cfg_a = self.cfg.authorization
+        if len(identities) < 2:
+            coverage.record("authz", "untestable",
+                            "fewer than 2 identities configured")
+            return []
+        targets = [e for e in endpoints
+                   if e.endpoint_type in PRIVILEGED_TYPES
+                   or (has_idor_params(e)
+                       and e.endpoint_type != "static")]
+        targets.sort(key=lambda e: 0 if has_idor_params(e) else 1)
+        targets = targets[:cfg_a.max_endpoints]
+        if not targets:
+            return []
+        log.info("authz-matrix: %d endpoints × %s as %d identities",
+                 len(targets), cfg_a.methods,
+                 len(identities))
+        matrix = AuthorizationMatrix()
+        findings: List[Finding] = []
+        seen_cells = set()
+
+        for ep in targets:
+            if not self.scope.active_test_allowed(ep.url):
+                continue
+            if not budgets.consume_test("authz", ep.normalized_url):
+                coverage.record("authz", "blocked",
+                                f"budget: {ep.normalized_url}")
+                continue
+            # — harvest object IDs as every identity —
+            try:
+                harvested = harvest_ids(
+                    client, ep, identities,
+                    timeout=self.cfg.scan.http_timeout,
+                    max_ids_per_param=cfg_a.max_ids_per_endpoint)
+            except BudgetExceeded:
+                coverage.record("authz", "blocked",
+                                f"budget: {ep.normalized_url}")
+                continue
+            # — swap each victim object as every other identity —
+            for tester in identities:
+                tname = getattr(tester, "name", "anonymous")
+                try:
+                    swaps = swap_ids(client, harvested, tester,
+                                     timeout=self.cfg.scan.http_timeout,
+                                     matrix=matrix)
+                except BudgetExceeded:
+                    coverage.record("authz", "blocked",
+                                    f"budget: {ep.normalized_url}")
+                    break
+                for sw in swaps:
+                    metrics.authorization_tests += 1
+                    if sw.verdict != "strong_candidate":
+                        continue
+                    metrics.authorization_confirmed += 1
+                    cross_tenant = bool(
+                        sw.tester_tenant and sw.owner_tenant and
+                        sw.tester_tenant != sw.owner_tenant)
+                    cls = ("tenant_isolation" if cross_tenant else "bola")
+                    coverage.record(cls, "candidate", sw.notes)
+                    coverage.record("idor", "candidate", sw.notes)
+                    f = Finding(
+                        id=f"swap-{abs(hash(sw.endpoint_url + sw.param + sw.victim_value)) % 10**10}",
+                        source="idor-swap",
+                        name=(f"{'Cross-tenant read' if cross_tenant else 'BOLA'}: "
+                              f"'{sw.tester}' reads '{sw.owner}''s "
+                              f"'{sw.param}={sw.victim_value}' ({ep.path})"),
+                        severity="high",
+                        confidence=Confidence.PROBABLE.value,
+                        validation_status=ValidationStatus.STRONG_CANDIDATE.value,
+                        host=ep.host, matched_at=sw.endpoint_url,
+                        endpoint_url=sw.endpoint_url, method="GET",
+                        parameter=sw.param,
+                        description=sw.notes,
+                        tags=["bola", "idor", "authz",
+                              "tenant-isolation" if cross_tenant else
+                              "cross-user", ep.endpoint_type],
+                        raw={"swap": sw.to_dict()},
+                        false_positive_notes=(
+                            "Victim object harvested from the owner's own "
+                            "session; replayed verbatim as a different "
+                            "identity; response shape compared excluding "
+                            "volatile keys."),
+                        identity=sw.tester, tenant=sw.tester_tenant,
+                        resource_key=(f"{ep.normalized_url}::{sw.param}"
+                                      f"={sw.victim_value}"),
+                    )
+                    evidence.allocate(f)
+                    evidence.record(
+                        f,
+                        request_text=(f"GET {sw.endpoint_url}\n(as "
+                                      f"{sw.tester}; owner: {sw.owner})"),
+                        response_text=sw.notes)
+                    findings.append(f)
+                    log.info("authz-matrix: %s", sw.notes)
+            # — per-method sweep (BFLA coverage beyond GET) —
+            # sweep-only observations (resource == "") — swap observations
+            # are evaluated by the swap verdicts above, not re-judged here
+            try:
+                sweep_methods(client, ep, identities, cfg_a.methods,
+                              timeout=self.cfg.scan.http_timeout,
+                              matrix=matrix)
+            except BudgetExceeded:
+                coverage.record("authz", "blocked",
+                                f"budget: {ep.normalized_url}")
+                continue
+            for cell_key, obs in matrix.cells().items():
+                method, _, url = cell_key.partition("::")
+                if url != ep.normalized_url or len(obs) < 2:
+                    continue
+                if cell_key in seen_cells:
+                    continue
+                seen_cells.add(cell_key)
+                obs = [o for o in obs if not o.resource]
+                if len(obs) < 2:
+                    coverage.record("bfla", "inconclusive",
+                                    f"{method} {url}: single-identity cell")
+                    continue
+                metrics.authorization_tests += 1
+                verdict, notes, kind = evaluate_cell(
+                    obs, ep.endpoint_type)
+                if verdict != "strong_candidate":
+                    if kind == "" and verdict == "inconclusive":
+                        coverage.record("bfla", "tested_negative",
+                                        f"{method} {url}: "
+                                        f"{describe_cell(obs)}")
+                    continue
+                metrics.authorization_confirmed += 1
+                coverage.record(kind or "authz", "candidate", notes)
+                names = [o.identity for o in obs if o.status == 200]
+                tenants = sorted({o.tenant for o in obs
+                                  if o.status == 200 and o.tenant})
+                f = Finding(
+                    id=f"bfla-{abs(hash(cell_key)) % 10**10}",
+                    source="authz-matrix",
+                    name=(f"BFLA/{kind.upper()}: {method} {ep.path} "
+                          f"treats identities identically"),
+                    severity="high",
+                    confidence=Confidence.PROBABLE.value,
+                    validation_status=ValidationStatus.STRONG_CANDIDATE.value,
+                    host=ep.host, matched_at=ep.url,
+                    endpoint_url=ep.url, method=method,
+                    description=f"{notes} [{describe_cell(obs)}]",
+                    tags=["bfla", kind, "authz", ep.endpoint_type],
+                    raw={"observations": [o.to_dict() for o in obs]},
+                    false_positive_notes=(
+                        "Same method compared across identities with "
+                        "semantic shape matching; verify the 200s are "
+                        "not error pages sharing a template before "
+                        "reporting."),
+                    identity="+".join(names[:2]),
+                    tenant="+".join(tenants),
+                )
+                evidence.allocate(f)
+                evidence.record(
+                    f,
+                    request_text=(f"{method} {ep.url}\n--- matrix ---\n" +
+                                  describe_cell(obs)),
+                    response_text=notes)
+                findings.append(f)
+                log.info("authz-matrix: %s", notes)
+        matrix.save(out_dir / "authorization_matrix.json")
+        return findings
+
+    # ── STORED-XSS CORRELATION (bounty item #3) ────────────────────────
+    def _second_order_probe(self, endpoints: List[Endpoint],
+                            evidence: EvidenceStore, metrics: Metrics,
+                            budgets: BudgetTracker,
+                            coverage: CoverageTracker, client,
+                            identities) -> List[Finding]:
+        from .validation.second_order import (inject_canary, find_renders)
+        cfg_v = self.cfg.validation
+        forms = [e for e in endpoints
+                 if e.body_parameters
+                 and self.scope.active_test_allowed(e.url)]
+        forms = forms[:cfg_v.second_order_max_endpoints]
+        renders = []
+        for e in endpoints:
+            if e.endpoint_type == "page" and \
+                    self.scope.is_in_scope(e.url) and \
+                    e.url not in renders:
+                renders.append(e.url)
+        renders = renders[:cfg_v.second_order_max_renders]
+        if not forms or not renders:
+            coverage.record("second_order", "untestable",
+                            "no HTML forms or render candidates")
+            return []
+        injectors = [i for i in identities if i.name != "anonymous"] or \
+            identities[:1]
+        log.info("second-order: %d forms × %d renders as %s",
+                 len(forms), len(renders),
+                 [i.name for i in injectors[:1]])
+        findings: List[Finding] = []
+        for ep in forms:
+            inj = injectors[0]
+            iname = getattr(inj, "name", "anonymous")
+            iheaders = dict(getattr(inj, "auth_headers", None) or {})
+            if not budgets.consume_test("second_order",
+                                        ep.normalized_url):
+                coverage.record("second_order", "blocked",
+                                f"budget: {ep.normalized_url}")
+                continue
+            try:
+                inj_res = inject_canary(client, ep, iheaders, iname,
+                                        timeout=self.cfg.scan.http_timeout)
+            except BudgetExceeded:
+                coverage.record("second_order", "blocked",
+                                f"budget: {ep.normalized_url}")
+                continue
+            metrics.second_order_tests += 1
+            if not inj_res.fields:
+                continue
+            try:
+                hits = find_renders(client, renders + [ep.url],
+                                    inj_res.canary, ep.url,
+                                    timeout=self.cfg.scan.http_timeout)
+            except BudgetExceeded:
+                coverage.record("second_order", "blocked",
+                                f"budget: {ep.normalized_url}")
+                continue
+            dangerous = [h for h in hits
+                         if h.context.startswith("dangerous:")]
+            if dangerous:
+                h = dangerous[0]
+                metrics.second_order_candidates += 1
+                coverage.record("second_order", "candidate",
+                                f"{h.context} at {h.render_url}")
+                f = Finding(
+                    id=f"so-{abs(hash(ep.normalized_url + h.render_url)) % 10**10}",
+                    source="second-order",
+                    name=(f"Stored XSS candidate: canary from "
+                          f"{ep.path} renders {h.context} at "
+                          f"{h.render_url}"),
+                    severity="high",
+                    confidence=Confidence.PROBABLE.value,
+                    validation_status=ValidationStatus.STRONG_CANDIDATE.value,
+                    host=ep.host, matched_at=h.render_url,
+                    endpoint_url=h.render_url, method="GET",
+                    description=(
+                        f"Canary {inj_res.canary} injected via POST "
+                        f"{ep.url} (fields: "
+                        f"{', '.join(inj_res.fields)}) renders "
+                        f"{h.detail} at {h.render_url}."),
+                    tags=["stored-xss", "second-order", "xss"],
+                    raw={"inject": inj_res.to_dict(),
+                         "render": h.to_dict()},
+                    false_positive_notes=(
+                        "Inert unknown tag proves unescaped persistence; "
+                        "confirm script execution with a benign payload "
+                        "in a private session before reporting."),
+                    identity=iname,
+                )
+                evidence.allocate(f)
+                evidence.record(
+                    f,
+                    request_text=(f"POST {ep.url} "
+                                  f"(fields: {inj_res.fields})\n"
+                                  f"canary: {inj_res.canary}"),
+                    response_text=(f"{h.detail}\n--- snippet ---\n"
+                                   f"{h.snippet[:1500]}"))
+                findings.append(f)
+                log.info("second-order: STORED XSS at %s (%s)",
+                         h.render_url, h.context)
+            elif hits:
+                coverage.record("second_order", "tested_negative",
+                                f"{ep.normalized_url}: canary encoded")
+            else:
+                coverage.record("second_order", "inconclusive",
+                                f"{ep.normalized_url}: no render observed")
         return findings
 
     def _maybe_register_oast(self) -> Optional[InteractshProvider]:
@@ -1513,6 +1806,17 @@ class _HTTPClient:
             self.limiter.before_request()
         self._budget_ok(url)
         r = self.session.post(url, allow_redirects=False, **kw)
+        if self.limiter:
+            self.limiter.after_response(r.status_code)
+        return r
+
+    def request(self, method, url, **kw):
+        """Generic verb (PUT/PATCH/DELETE…) with limiter + budget gates."""
+        if self.limiter:
+            self.limiter.before_request()
+        self._budget_ok(url)
+        r = self.session.request(method.upper(), url,
+                                 allow_redirects=False, **kw)
         if self.limiter:
             self.limiter.after_response(r.status_code)
         return r

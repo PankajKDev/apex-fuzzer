@@ -38,6 +38,8 @@ class Metrics:
     tenants_tested: int = 0
     authorization_tests: int = 0
     authorization_confirmed: int = 0
+    second_order_tests: int = 0
+    second_order_candidates: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

@@ -77,7 +77,8 @@ target
   ▼
 8. VALIDATION ......... differential auth (BOLA/broken-access) · OAST sweep
   │                    plugins (mutation → sqlmap / dalfox / OAST-SSRF)
-  │                    budgets enforced · coverage recorded per class
+  │                    authz-matrix (swap + BFLA) · stored-XSS · budgets
+  │                    coverage recorded per class
   ▼
 9. AI ................. hypotheses → fed BACK into deterministic tests
   │                    → hypotheses.jsonl (validated / rejected / hypothesized)
@@ -169,6 +170,7 @@ Results land in `output/<host>/`: `report.html`, `findings.jsonl`,
 --ai                    ai.enabled → true
 --oast                  OAST blind-SSRF confirmation on
 --differential          differential auth-context tests on
+--second-order          stored-XSS correlation on (persists canaries)
 --no-js                 disable JavaScript analysis
 --min-sev {info,low,medium,high,critical}
                         minimum severity rendered in the report
@@ -184,18 +186,19 @@ Results land in `output/<host>/`: `report.html`, `findings.jsonl`,
 
 ## Testing profiles
 
-| profile         | nuclei | validation | AI | JS | api_specs | robots | differential | arjun | oast | tko-subs |
-|-----------------|--------|------------|----|----|-----------|--------|--------------|-------|------|----------|
-| `passive`       | –      | –          | –  | ✓  | ✓         | ✓      | –            | –     | –    | ✓ (subzy)|
-| `standard`      | ✓      | –          | –  | ✓  | ✓         | ✓      | –            | ✓     | –    | ✓ (subzy)|
-| `deep`          | ✓      | –          | –  | ✓  | ✓         | ✓      | ✓            | ✓     | ✓    | ✓ (tko)  |
-| `api`           | ✓      | –          | –  | ✓  | ✓         | –      | ✓            | ✓     | ✓    | ✓ (subzy)|
-| `authenticated` | ✓      | –          | –  | ✓  | ✓         | ✓      | ✓            | ✓     | ✓    | ✓ (subzy)|
-| `validation`    | ✓      | ✓          | –  | ✓  | ✓         | ✓      | –            | ✓     | ✓    | ✓ (subzy)|
+| profile         | nuclei | validation | AI | JS | api_specs | robots | differential | arjun | oast | tko-subs | authz-matrix | 2nd-order |
+|-----------------|--------|------------|----|----|-----------|--------|--------------|-------|------|----------|--------------|-----------|
+| `passive`       | –      | –          | –  | ✓  | ✓         | ✓      | –            | –     | –    | ✓ (subzy)| –            | –         |
+| `standard`      | ✓      | –          | –  | ✓  | ✓         | ✓      | –            | ✓     | –    | ✓ (subzy)| –            | –         |
+| `deep`          | ✓      | –          | –  | ✓  | ✓         | ✓      | ✓            | ✓     | ✓    | ✓ (tko)  | ✓            | ✓         |
+| `api`           | ✓      | –          | –  | ✓  | ✓         | –      | ✓            | ✓     | ✓    | ✓ (subzy)| ✓            | –         |
+| `authenticated` | ✓      | –          | –  | ✓  | ✓         | ✓      | ✓            | ✓     | ✓    | ✓ (subzy)| ✓            | –         |
+| `validation`    | ✓      | ✓          | –  | ✓  | ✓         | ✓      | –            | ✓     | ✓    | ✓ (subzy)| –            | ✓         |
 
-Combine profiles with flags: `--validate`, `--ai`, `--oast`, `--differential`
-force-enable the matching stage regardless of profile. Config-file keys
-(`validation.enabled/differential/ssrf`, `ai.enabled`) do the same.
+Combine profiles with flags: `--validate`, `--ai`, `--oast`, `--differential`,
+`--second-order` force-enable the matching stage regardless of profile.
+Config-file keys (`validation.enabled/differential/ssrf/second_order`,
+`authorization.enabled`, `ai.enabled`) do the same.
 
 ---
 
@@ -236,6 +239,10 @@ validation:
   mutation_payloads: 8    # ladder depth per class
   differential_max_endpoints: 30
   min_severity: medium     # reserved
+  # Stored-XSS correlation persists canary data server-side: opt-in only.
+  second_order: false       # or --second-order / validation profile
+  second_order_max_endpoints: 10
+  second_order_max_renders: 40
 
 budgets:                  # backstop against runaway testing (§50)
   requests_per_host: 10000
@@ -252,6 +259,14 @@ oast:
   poll_interval: 2
   max_endpoints: 10
   max_params_per_endpoint: 3
+
+# Cross-user swap + per-method authz matrix (BOLA/BFLA/tenant isolation).
+# NOTE: the method sweep sends state-changing verbs with empty bodies.
+authorization:
+  enabled: false           # or deep/api/authenticated profiles
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE"]
+  max_endpoints: 20
+  max_ids_per_endpoint: 3
 
 nuclei:
   bb_templates_dir: "~/nuclei-bb-templates"
@@ -441,8 +456,37 @@ Four layers, in order:
    feed the coverage tracker per test class.
 4. Metrics (`validation_candidates`, `validated_confirmed`,
    `false_positives`, `differential_*`, `oast_*`,
-   `authorization_tests/confirmed`) and checkpoint blobs
-   (`coverage`, `budgets`) updated throughout.
+   `authorization_tests/confirmed`, `second_order_tests/candidates`)
+   and checkpoint blobs (`coverage`, `budgets`) updated throughout.
+
+### 8b. Authorization matrix → `authorization_matrix.json`
+
+With `authorization.enabled` (or the deep/api/authenticated profiles) and
+≥2 configured identities, each privileged/resource endpoint goes through
+harvest → swap → method sweep (`authorization/harvest.py`,
+`access_tests.py`, `matrix.py`):
+
+1. **Harvest**: GET the endpoint as every identity, parse JSON responses
+   for identifier-like keys — one `(endpoint, param, value, owner)` record
+   per object, with the owner's response shape as baseline.
+2. **Swap**: replay each victim object as every *other* identity; a shape
+   match is a `strong_candidate` (`source: idor-swap`) — tagged
+   `tenant-isolation` when the two identities sit in different tenants.
+3. **Method sweep**: request the endpoint with every configured verb as
+   every identity into an `AuthorizationMatrix`; per-cell verdicts flag
+   BOLA (same object, two users), BFLA (role/method gaps, anonymous denied
+   but a user succeeds on privileged endpoints), and cross-tenant reads
+   (`source: authz-matrix`). Clean cells record `tested_negative`.
+
+### 8c. Stored-XSS correlation (opt-in: persists canaries)
+
+With `validation.second_order` (`--second-order`, deep/validation
+profiles), HTML-form endpoints are POSTed a canary carrying an *inert*
+unknown tag, then render candidates are fetched and classified
+(`validation/second_order.py`): inside `<script>` / event-handler /
+`javascript:` URI / raw HTML → `strong_candidate` (`source:
+second-order`) with inject request + render snippet as evidence;
+entity-encoded → `tested_negative`; never rendered → `inconclusive`.
 
 ### 9. AI → `hypotheses.jsonl`
 
@@ -549,6 +593,7 @@ Per target, `output/<host>/`:
 | `application.json` | incremental application model (Phase 1) |
 | `application_graph.json` | persisted application graph (Phase 1) |
 | `coverage.json` | per-class test coverage (Phase 1) |
+| `authorization_matrix.json` | authz observations per identity×method |
 | `attack_chains.jsonl` | attack chains (schema only until Phase 9) |
 | `state/` | checkpoint blobs (application, graph, coverage, budgets) |
 | `proofs/finding-NNN/` | `request.txt`, `response.txt`, `metadata.json` |
@@ -565,6 +610,7 @@ differential_candidates, oast_endpoints_probed, oast_confirmed,
 takeover_confirmed, hypotheses_generated, hypotheses_validated,
 waf_detected, resources_discovered, identities_tested, roles_tested,
 tenants_tested, authorization_tests, authorization_confirmed,
+second_order_tests, second_order_candidates,
 scan_duration_seconds`.
 
 (`stage_durations` exists in the schema but is currently unpopulated —
@@ -656,7 +702,7 @@ exhaustion records `blocked` — never a negative. Persisted to
 `coverage.json`, resumable via checkpoint blobs, and rendered as a
 Coverage section in the report that names untested classes explicitly
 instead of implying they are secure. Known classes cover the §61
-detection list (sqli … takeover).
+detection list (sqli … takeover, plus tenant_isolation).
 
 ## Budgets (Phase 1)
 

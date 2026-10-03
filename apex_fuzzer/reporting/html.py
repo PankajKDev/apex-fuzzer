@@ -88,6 +88,8 @@ def _metrics_block(m: Dict) -> str:
             ("Validated", m.get("validated_confirmed")),
             ("OAST confirmed", m.get("oast_confirmed")),
             ("BOLA/IDOR", m.get("differential_candidates")),
+            ("Authz matrix", m.get("authorization_confirmed")),
+            ("Stored XSS", m.get("second_order_candidates")),
             ("Hypotheses", m.get("hypotheses_generated")),
             ("Hyp. validated", m.get("hypotheses_validated")),
             ("Takeovers", m.get("takeover_confirmed")),

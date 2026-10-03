@@ -27,6 +27,18 @@ validation:
   mutation_payloads: 8
   differential_max_endpoints: 30
   min_severity: medium
+  # Stored-XSS correlation persists canary data server-side: opt-in only.
+  second_order: false
+  second_order_max_endpoints: 10
+  second_order_max_renders: 40
+
+# Cross-user swap + per-method authz matrix (BOLA/BFLA/tenant isolation).
+# NOTE: the method sweep sends state-changing verbs with empty bodies.
+authorization:
+  enabled: false
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE"]
+  max_endpoints: 20
+  max_ids_per_endpoint: 3
 
 # Request budgets (§50) — backstop against runaway testing.
 # Normal scans stay far below every cap.

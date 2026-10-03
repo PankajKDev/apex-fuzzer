@@ -39,6 +39,8 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Enable Interactsh OAST blind-SSRF confirmation")
     p.add_argument("--differential", action="store_true",
                    help="Enable differential auth-context (BOLA/IDOR) tests")
+    p.add_argument("--second-order", action="store_true",
+                   help="Enable stored-XSS correlation (persists canaries)")
     p.add_argument("--no-js", action="store_true")
     p.add_argument("--min-sev", default=None,
                    choices=["info", "low", "medium", "high", "critical"])

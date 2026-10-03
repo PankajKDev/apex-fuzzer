@@ -50,7 +50,21 @@ class ValidationConfig:
     mutation: bool = True
     mutation_payloads: int = 8
     differential_max_endpoints: int = 30
+    # stored-XSS correlation writes canary data: opt-in only
+    second_order: bool = False
+    second_order_max_endpoints: int = 10
+    second_order_max_renders: int = 40
     min_severity: str = "medium"
+
+
+@dataclass
+class AuthorizationConfig:
+    """Cross-user swap + per-method BFLA matrix (bounty items #1–2)."""
+    enabled: bool = False
+    methods: List[str] = field(
+        default_factory=lambda: ["GET", "POST", "PUT", "PATCH", "DELETE"])
+    max_endpoints: int = 20
+    max_ids_per_endpoint: int = 3
 
 
 @dataclass
@@ -162,6 +176,8 @@ class Config:
     scan: ScanConfig = field(default_factory=ScanConfig)
     discovery: DiscoveryConfig = field(default_factory=DiscoveryConfig)
     validation: ValidationConfig = field(default_factory=ValidationConfig)
+    authorization: AuthorizationConfig = field(
+        default_factory=AuthorizationConfig)
     budgets: BudgetConfig = field(default_factory=BudgetConfig)
     oast: OastConfig = field(default_factory=OastConfig)
     nuclei: NucleiConfig = field(default_factory=NucleiConfig)
@@ -237,4 +253,6 @@ def apply_cli_overrides(cfg: Config, args) -> Config:
         cfg.validation.ssrf = True
     if getattr(args, "differential", False):
         cfg.validation.differential = True
+    if getattr(args, "second_order", False):
+        cfg.validation.second_order = True
     return cfg

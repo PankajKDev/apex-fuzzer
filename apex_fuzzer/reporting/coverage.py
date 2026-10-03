@@ -32,6 +32,7 @@ KNOWN_CLASSES = [
     "parameter_pollution", "method_override", "second_order",
     "business_logic", "race", "idor", "authz", "ssti", "xxe", "cmdi",
     "path_traversal", "open_redirect", "info_disclosure", "takeover",
+    "tenant_isolation",
 ]
 
 _PRECEDENCE = [CONFIRMED, CANDIDATE, INCONCLUSIVE, BLOCKED,

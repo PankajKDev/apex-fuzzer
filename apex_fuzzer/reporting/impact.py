@@ -31,6 +31,18 @@ _IMPACT = {
     "authz": ("Unauthenticated or low-privileged requests can reach "
               "privileged endpoints, exposing sensitive data or "
               "destructive actions to anyone who finds the URL."),
+    "bfla": ("A low-privileged identity can invoke functionality "
+             "reserved for higher roles (state-changing methods, admin "
+             "operations) — vertical privilege escalation without "
+             "needing the victim's credentials."),
+    "tenant_isolation": ("An identity in one tenant/organization can "
+                         "read another tenant's objects — cross-customer "
+                         "data exposure, typically a critical-severity "
+                         "finding."),
+    "second_order": ("Attacker-supplied data persists server-side and "
+                     "renders unescaped in another user's session — "
+                     "stored XSS with session-hijacking and admin-panel "
+                     "takeover potential."),
     "broken_auth": ("Unauthenticated or low-privileged requests can "
                     "reach privileged endpoints, exposing sensitive "
                     "data or destructive actions to anyone who finds "
@@ -65,6 +77,12 @@ def _classify(f: Finding) -> str:
     name = ((f.name or "") + " " + (f.template_id or "")).lower()
     if "takeover" in name or "subdomain" in name:
         return "takeover"
+    if "tenant" in name and ("isolation" in name or "cross-tenant" in name):
+        return "tenant_isolation"
+    if "bfla" in name:
+        return "bfla"
+    if "stored" in name or "second-order" in name:
+        return "second_order"
     if "bola" in name or "idor" in name:
         return "idor"
     if "auth" in name or "access" in name or "403" in name or "401" in name:
@@ -129,6 +147,35 @@ def build_repro_steps(f: Finding) -> List[str]:
             "repeat to demonstrate cross-user data access.",
         ]
         return steps
+    if f.source in ("authz-matrix", "idor-swap"):
+        raw = f.raw or {}
+        obs = raw.get("observations") or raw.get("contexts") or []
+        obs_txt = ", ".join(
+            f"{o.get('identity')}:{o.get('method', 'GET')}→"
+            f"HTTP {o.get('status')}" for o in obs[:6]
+        ) or "see evidence"
+        return [
+            f"Replay the recorded requests against {url} as each "
+            f"identity (headers in request.txt).",
+            f"Compare semantic responses: {obs_txt}.",
+            "Identical 200 object bodies across users/tenants — or a "
+            "low-priv identity succeeding where others are denied — "
+            "is the finding.",
+            "For swap findings, substitute the victim's object ID from "
+            "the evidence into your own session and confirm the data.",
+        ]
+    if f.source == "second-order":
+        raw = f.raw or {}
+        return [
+            f"POST the recorded form to {raw.get('inject_url', url)} "
+            f"with the canary payload (fields in evidence).",
+            f"GET {raw.get('render_url', url)} in a separate session.",
+            f"Observe the canary rendered {raw.get('context', 'unescaped')} "
+            f"— see the snippet in response.txt.",
+            "Replace the inert tag with a benign alert payload in a "
+            "private session to confirm script execution before "
+            "reporting.",
+        ]
     steps.append(f"Send {f.method or 'GET'} to {url}.")
     if f.request_headers:
         steps.append("Include the captured request headers "
@@ -151,11 +198,12 @@ def build_fp_notes(f: Finding) -> str:
                 "(unique token per scan), not response-shape heuristics. "
                 "Baseline vs. mutated responses differ only in the "
                 "callback interaction; no WAF block observed.")
-    if "differential" in src or f.source == "ai+differential":
-        return ("Compared responses across authentication contexts with "
+    if "differential" in src or f.source == "ai+differential" or \
+            f.source in ("authz-matrix", "idor-swap"):
+        return ("Compared semantic responses across identities with "
                 "volatile keys (csrf, token, timestamp, nonce, "
-                "request-id) excluded from the shape comparison; "
-                "length compared in 1KB buckets to avoid encoding noise.")
+                "request-id) excluded; length bucketed to 1KB. Status "
+                "codes alone never decide — identical 200 shapes do.")
     if "sqlmap" in src or cls == "sqli":
         return ("Validated with sqlmap --level 1 --risk 1 in batch mode; "
                 "mutation pre-screen ran the WAF-specific payload ladder "
@@ -170,6 +218,12 @@ def build_fp_notes(f: Finding) -> str:
                 "template::path::param root-cause key; template-specific "
                 "matchers applied (status/word/regex), not raw string "
                 "matching.")
+    if f.source == "second-order":
+        return ("Canary used an inert unknown tag — persistence plus "
+                "unescaped rendering proves HTML injection without ever "
+                "storing a working payload. Context (script / event "
+                "handler / raw HTML vs encoded) recorded in evidence; "
+                "confirm script execution manually before reporting.")
     return ("Detection based on fingerprint/heuristic signals; verify "
             "manually before reporting. See evidence directory for the "
             "raw request/response pair.")
