@@ -25,6 +25,10 @@ class HarvestedId:
     shape: str = ""
     body_hash: str = ""
     source: str = "response"
+    # all identifiers in the owner's response (ownership evidence)
+    markers: Dict[str, str] = field(default_factory=dict)
+    # redacted snippet of the owner's response (evidence, no secrets)
+    snippet: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {"endpoint_url": self.endpoint_url,
@@ -32,7 +36,8 @@ class HarvestedId:
                 "param": self.param, "value": self.value,
                 "owner": self.owner, "owner_tenant": self.owner_tenant,
                 "shape": self.shape, "body_hash": self.body_hash,
-                "source": self.source}
+                "source": self.source, "markers": dict(self.markers),
+                "snippet": self.snippet}
 
 
 def _walk_json(value: Any, out: Dict[str, str], depth: int = 0):
@@ -101,12 +106,15 @@ def harvest_ids(http, endpoint, identities, timeout: int = 10,
                    and h.param == param and h.owner == name) \
                     >= max_ids_per_param:
                 continue
+            from ..shell import redact
             out.append(HarvestedId(
                 endpoint_url=endpoint.url,
                 normalized_url=endpoint.normalized_url,
                 param=param, value=value, owner=name,
                 owner_tenant=tenant, shape=norm.get("key_shape", ""),
-                body_hash=norm.get("body_hash", "")))
+                body_hash=norm.get("body_hash", ""),
+                markers=dict(extract_ids_from_body(r.text or "")),
+                snippet=redact((r.text or "")[:500])))
     if out:
         log.info("harvest: %d ids from %s", len(out), endpoint.url)
     return out

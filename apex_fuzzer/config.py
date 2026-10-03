@@ -65,6 +65,12 @@ class AuthorizationConfig:
         default_factory=lambda: ["GET", "POST", "PUT", "PATCH", "DELETE"])
     max_endpoints: int = 20
     max_ids_per_endpoint: int = 3
+    # identifier fields that prove object ownership when equal in
+    # owner and tester responses (Terra M2.5)
+    ownership_fields: List[str] = field(
+        default_factory=lambda: ["owner_id", "user_id", "account_id",
+                                  "tenant_id", "created_by", "owner",
+                                  "email"])
 
 
 @dataclass

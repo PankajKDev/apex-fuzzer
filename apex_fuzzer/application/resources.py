@@ -22,6 +22,7 @@ IDENTIFIER_NAMES = {
     "tenant_id", "tenantid", "workspace_id", "project_id",
     "order_id", "invoice_id", "document_id", "doc_id", "file_id",
     "customer_id", "card_id", "transaction_id", "txn_id",
+    "owner_id", "owner", "created_by", "creator_id", "member_id",
     "email", "username", "slug", "ref", "ref_id",
 }
 

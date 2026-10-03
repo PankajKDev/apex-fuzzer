@@ -582,13 +582,22 @@ harvest → swap → method sweep (`authorization/harvest.py`,
    per object, with the owner's response shape as baseline. All records
    join a global pool keyed by parameter name.
 2. **Swap**: replay each victim object as every *other* identity; a shape
-   match is a `strong_candidate` (`source: idor-swap`) — tagged
-   `tenant-isolation` when the two identities sit in different tenants.
-   Same-endpoint victims reuse the harvest baseline; cross-endpoint
-   candidates (pool IDs whose parameter exists on another endpoint)
-   establish the owner's baseline on the target first. Completed denials
-   record `tested_negative` — the owner baseline was 200 and the tester
-   request finished, so the negative is genuine.
+   match is graded by ownership comparison (`authz/compare.py`) before
+   it can become a verdict (`source: idor-swap`) — tagged
+   `tenant-isolation` when the two identities sit in different tenants:
+   - **high**: an `ownership_fields` value (`owner_id`, `user_id`, …,
+     configurable) agrees in both responses;
+   - **medium**: identifiers agree but ownership can't be confirmed
+     (reflection explicitly not ruled out — the finding says so);
+   - **voided**: generic tester body (`{"ok": true}`, empty
+     arrays/pagination shells) or contradictory markers (different
+     object, same template) — never a finding.
+   The swapped parameter itself is excluded from proof (the tester
+   supplied it). Same-endpoint victims reuse the harvest baseline;
+   cross-endpoint candidates establish the owner's baseline on the
+   target first. Completed denials record `tested_negative` — the
+   owner baseline was 200 and the tester request finished, so the
+   negative is genuine.
 3. **Method sweep**: request the endpoint with every configured verb as
    every identity into an `AuthorizationMatrix`; per-cell verdicts flag
    BOLA (same object, two users), BFLA (role/method gaps, anonymous denied
@@ -597,7 +606,35 @@ harvest → swap → method sweep (`authorization/harvest.py`,
 
 Swap findings carry their invariant evaluation (`no_cross_user_read`)
 as corroboration in evidence — the swap verdict stays primary, so
-nothing is double-reported.
+nothing is double-reported. Both baselines ship redacted
+(owner/ tester snippets in `raw.swap`). Method-level BFLA cells keep
+shape comparison (observations carry no bodies by design) with the
+shared-template warning in every FP note.
+
+### Phase 7 views (same stage, no new requests)
+
+`apex_fuzzer/authz/` replays the recorded data four ways into
+`authorization_matrix.json` (`extended` + `views` keys, additive —
+old artifacts still load):
+
+- **Extended matrix** (`authz/matrix.py`): every tested cell with an
+  explicit identity × role × tenant × resource × endpoint × method
+  status in coverage vocabulary (`negative` renders as
+  `tested_negative` — one status language, no second taxonomy).
+- **Roles** (`authz/roles.py`): per-role endpoint×method access map
+  plus vertical-escalation analysis (non-privileged role receiving
+  the same 200 object as an admin role).
+- **Tenants** (`authz/tenants.py`): owned resources per tenant from
+  harvest ownership (never tester-biased cells) plus the
+  cross-tenant access list.
+- **Resources** (`authz/resources.py`): per-object owner, values,
+  exposing endpoints, and accessing identities.
+- **Actions** (`authz/actions.py`): tested methods per endpoint and
+  the configured-but-never-probed remainder.
+- **Graph** (`authz/graph.py`): ownership/tenancy/exposure edges
+  (`OWNS`, `CONTAINS`, `EXPOSED_BY`) for the chain engine and AI
+  loop. Per-endpoint `ownership_fields` override the default
+  identifier list (`owner_id`, `user_id`, `account_id`, …).
 
 ### 8c. Stored-XSS correlation (opt-in: persists canaries)
 
@@ -1058,7 +1095,7 @@ self-DoS and the false negatives that timeouts masquerade as.
 .venv/bin/python -m pytest tests/ -q
 ```
 
-283 tests: URL normalization, endpoint classification, parameter extraction
+297 tests: URL normalization, endpoint classification, parameter extraction
 (URL/HTML/JS), scope rules, secret redaction, plus v5.2 coverage — Arjun JSON
 parsing, WAF fingerprinting, JS-bundle tech gating, structural JS chunking,
 source-map parsing, differential verdicts (BOLA / broken-access / healthy /
@@ -1120,6 +1157,8 @@ apex_fuzzer/
                          states · lifecycles · behavioral graph (P3)
   browser/               Chromium lifecycle · network/storage/actions ·
                          sessions · recordable workflows (agent Phase 1)
+  authz/                 ownership compare · extended matrix · role/
+                         tenant/resource/action views · graph sync (P7)
   plugins/
     base.py              SecurityTest interface, registry, run_plugins (Phase 1)
     adapters.py          sqli/xss/ssrf adapters over existing validators
@@ -1152,6 +1191,7 @@ apex_fuzzer/
 config.yaml              annotated defaults (copy per engagement, add secrets)
 tests/                   pytest suite (test_v52.py: 5.2 additions, test_phase1.py: foundation)
                          (test_bounty3.py: authz/second-order, test_stateful.py: stateful slice)
+                         (test_authz.py: 14 ownership/generic-guard/views/graph tests)
                          (test_verify.py: 18 readback/idempotency/token/JSONPath/wiring tests)
                          (test_browser.py: 18 unit + 2 live-Chromium integration, test_ollama.py, test_dotenv.py)
                          (test_auth.py: 34 auth-workflow/JWT/OAuth/OIDC tests + 2 live-browser login tests)

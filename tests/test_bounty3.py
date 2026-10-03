@@ -74,8 +74,11 @@ def test_harvest_ids_per_identity():
     ids = harvest_ids(H(), ep, [_ident("user_a", headers={"Cookie": "s=A"}),
                                 _ident("user_b", headers={"Cookie": "s=B"}),
                                 _ident("anonymous")], max_ids_per_param=5)
-    by_owner = {h.owner: h.value for h in ids}
-    assert by_owner == {"user_a": "1", "user_b": "2"}
+    by_owner = {(h.owner, h.param): h.value for h in ids}
+    assert by_owner == {("user_a", "id"): "1",
+                        ("user_a", "owner"): "a",
+                        ("user_b", "id"): "2",
+                        ("user_b", "owner"): "b"}
     assert all(h.shape and h.body_hash for h in ids)
 
 

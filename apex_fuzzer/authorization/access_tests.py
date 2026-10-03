@@ -34,6 +34,10 @@ class SwapResult:
     match: bool = False
     verdict: str = "inconclusive"
     notes: str = ""
+    markers_matched: List[str] = field(default_factory=list)
+    generic_response: bool = False
+    owner_snippet: str = ""
+    tester_snippet: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {"endpoint_url": self.endpoint_url, "param": self.param,
@@ -41,7 +45,11 @@ class SwapResult:
                 "owner_tenant": self.owner_tenant, "tester": self.tester,
                 "tester_tenant": self.tester_tenant, "status": self.status,
                 "match": self.match, "verdict": self.verdict,
-                "notes": self.notes}
+                "notes": self.notes,
+                "markers_matched": list(self.markers_matched),
+                "generic_response": self.generic_response,
+                "owner_snippet": self.owner_snippet,
+                "tester_snippet": self.tester_snippet}
 
 
 def _with_param(url: str, name: str, value: str) -> str:
@@ -54,7 +62,8 @@ def _with_param(url: str, name: str, value: str) -> str:
 
 def swap_ids(http, harvested, tester, timeout: int = 10,
              matrix: AuthorizationMatrix | None = None,
-             owner_headers: Dict[str, Dict[str, str]] | None = None
+             owner_headers: Dict[str, Dict[str, str]] | None = None,
+             ownership_fields: List[str] | None = None
              ) -> List[SwapResult]:
     """Replay victim IDs as ``tester`` (an Identity). ``harvested`` are
     HarvestedId records owned by *other* identities.
@@ -63,8 +72,14 @@ def swap_ids(http, harvested, tester, timeout: int = 10,
     with an empty baseline (cross-endpoint candidates) trigger a
     baseline fetch as the owner first — via ``owner_headers`` — so the
     comparison stays owner-vs-tester on the *target* endpoint.
+
+    A shape match is then graded by ownership comparison
+    (authz/compare.py): generic tester bodies and contradictory
+    markers void the match instead of becoming findings.
     """
     from ..validation.differential import normalize_response
+    from ..authz.compare import compare_access
+    from ..shell import redact
     out: List[SwapResult] = []
     tester_name = getattr(tester, "name", "anonymous")
     tester_tenant = getattr(tester, "tenant", "") or ""
@@ -112,11 +127,30 @@ def swap_ids(http, harvested, tester, timeout: int = 10,
             (norm.get("body_hash") and
              norm["body_hash"] == body_hash) or
             (norm.get("key_shape") and norm["key_shape"] == shape))
+        # M2.5: grade the shape match before it can become a verdict
+        comparison = {"level": "medium", "matched": [],
+                      "detail": "shape match stands alone"}
+        tester_snippet = ""
+        if match:
+            comparison = compare_access(
+                getattr(h, "markers", None) or {}, r.text or "",
+                ownership_fields, exclude=h.param)
+            try:
+                tester_snippet = redact((r.text or "")[:500])
+            except Exception:
+                tester_snippet = ""
+            if comparison["level"] == "none":
+                match = False
         res = SwapResult(
             endpoint_url=url, param=h.param, victim_value=h.value,
             owner=h.owner, owner_tenant=h.owner_tenant,
             tester=tester_name, tester_tenant=tester_tenant,
-            status=norm.get("status", 0), match=bool(match))
+            status=norm.get("status", 0), match=bool(match),
+            markers_matched=comparison.get("matched", []),
+            generic_response=comparison["level"] == "none" and
+            "generic" in comparison.get("detail", ""),
+            owner_snippet=getattr(h, "snippet", "") or "",
+            tester_snippet=tester_snippet)
         if match:
             if tester_tenant and h.owner_tenant and \
                     tester_tenant != h.owner_tenant:
@@ -124,12 +158,17 @@ def swap_ids(http, harvested, tester, timeout: int = 10,
                 res.notes = (f"cross-tenant read: '{tester_name}' "
                              f"(tenant {tester_tenant}) reads object "
                              f"'{h.value}' owned by '{h.owner}' "
-                             f"(tenant {h.owner_tenant})")
+                             f"(tenant {h.owner_tenant}). "
+                             f"{comparison['detail']}")
             else:
                 res.verdict = "strong_candidate"
                 res.notes = (f"BOLA: '{tester_name}' reads object "
                              f"'{h.value}' owned by '{h.owner}' via "
-                             f"parameter '{h.param}'")
+                             f"parameter '{h.param}'. "
+                             f"{comparison['detail']}")
+        elif comparison["level"] == "none" and norm.get("status") == 200:
+            res.notes = (f"shape matched but voided: "
+                         f"{comparison['detail']}")
         else:
             res.notes = (f"no cross-access ({tester_name}→"
                          f"{norm.get('status')})")

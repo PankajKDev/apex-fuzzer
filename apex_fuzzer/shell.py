@@ -68,7 +68,8 @@ _SECRET_HEADER_RE = re.compile(
     r"\s*:\s*(.+)$"
 )
 _TOKEN_RE = re.compile(
-    r"(?i)\b(api[_-]?key|token|secret|password|bearer)\b\s*[:=]\s*"
+    r"(?i)\b(api[_-]?key|token|secret|password|bearer)\b[\"']?"
+    r"\s*[:=]\s*"
     r"(['\"]?)([A-Za-z0-9_\-\.]{8,})\2"
 )
 

@@ -1561,6 +1561,7 @@ class Orchestrator:
         matrix = AuthorizationMatrix()
         findings: List[Finding] = []
         seen_cells = set()
+        all_swaps: list = []
         owner_headers = {getattr(i, "name", "anonymous"):
                          dict(getattr(i, "auth_headers", None) or {})
                          for i in identities}
@@ -1695,11 +1696,13 @@ class Orchestrator:
                     if not batch:
                         continue
                     try:
-                        handle_swaps(swap_ids(
+                        swaps = swap_ids(
                             client, batch, tester,
                             timeout=self.cfg.scan.http_timeout,
-                            matrix=matrix, owner_headers=owner_headers),
-                            ep)
+                            matrix=matrix, owner_headers=owner_headers,
+                            ownership_fields=cfg_a.ownership_fields)
+                        all_swaps.extend(swaps)
+                        handle_swaps(swaps, ep)
                     except BudgetExceeded:
                         coverage.record("authz", "blocked",
                                         f"budget: {ep.normalized_url}")
@@ -1771,7 +1774,42 @@ class Orchestrator:
                     response_text=notes)
                 findings.append(f)
                 log.info("authz-matrix: %s", notes)
-        matrix.save(out_dir / "authorization_matrix.json")
+        # ── Phase 7 views: extended matrix + role/tenant/resource/
+        # action analytics over everything the sweeps observed ──────
+        from .authz.matrix import build_extended
+        from .authz.roles import (role_access_map,
+                                  check_vertical_escalation)
+        from .authz.tenants import tenant_view
+        from .authz.resources import resource_access_map
+        from .authz.actions import action_coverage
+        extended = build_extended(matrix.observations, all_swaps)
+        views = {
+            "roles": role_access_map(extended.cells.values()),
+            "vertical_escalations": check_vertical_escalation(
+                matrix.observations),
+            "tenants": tenant_view(pool, all_swaps),
+            "resources": resource_access_map(
+                pool, all_swaps, matrix.observations),
+            "actions": action_coverage(
+                extended.cells.values(), endpoints,
+                cfg_a.methods),
+        }
+        for esc in views["vertical_escalations"]:
+            coverage.record("authz", "candidate",
+                            f"role gap: {esc['other_identity']} "
+                            f"({esc['other_role']}) matches "
+                            f"{esc['privileged_identity']} "
+                            f"({esc['privileged_role']}) on "
+                            f"{esc['method']} {esc['endpoint']}")
+        artifact = matrix.to_dict()
+        artifact["extended"] = extended.to_dict()
+        artifact["views"] = views
+        import json as _json
+        (out_dir / "authorization_matrix.json").write_text(
+            _json.dumps(artifact, indent=2))
+        if app_graph is not None:
+            from .authz.graph import sync_extended
+            sync_extended(app_graph, pool)
         # ── behavioral state (agent Phase 3): observations → graph
         # edges, snapshots, and cross-run transitions ───────────────
         if app_graph is not None:

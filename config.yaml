@@ -39,6 +39,10 @@ authorization:
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE"]
   max_endpoints: 20
   max_ids_per_endpoint: 3
+  # identifier fields proving ownership when equal in owner and
+  # tester responses (Phase 7 comparison)
+  # ownership_fields: ["owner_id", "user_id", "account_id",
+  #                    "tenant_id", "created_by", "owner", "email"]
 
 # Business-logic mutations (quantity/price/refund/token-reuse).
 business:
