@@ -24,6 +24,10 @@ class Profile:
     authz_matrix: bool = False
     # stored-XSS correlation — persists canary data (bounty item #3)
     second_order: bool = False
+    # business-logic mutations — submits abuse values (stateful slice)
+    business_logic: bool = False
+    # race engine — synchronized bursts; never on by default
+    race: bool = False
 
 
 PROFILES = {
@@ -36,6 +40,7 @@ PROFILES = {
     "deep": Profile(
         name="deep", differential=True, js_analysis=True,
         oast=True, run_tko=True, authz_matrix=True, second_order=True,
+        business_logic=True,
     ),
     "api": Profile(
         name="api", robots=False, differential=True, oast=True,
@@ -47,7 +52,7 @@ PROFILES = {
     ),
     "validation": Profile(
         name="validation", run_validation=True, oast=True,
-        second_order=True,
+        second_order=True, business_logic=True,
     ),
 }
 

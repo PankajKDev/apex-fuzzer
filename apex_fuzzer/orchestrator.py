@@ -909,6 +909,18 @@ class Orchestrator:
                 out += self._second_order_probe(
                     endpoints, evidence, metrics, budgets, coverage,
                     client, identities)
+            # 5) business-logic mutations (opt-in: submits abuse values)
+            if (self.profile.business_logic or
+                    self.cfg.business.enabled):
+                out += self._business_logic_probe(
+                    endpoints, evidence, metrics, budgets, coverage,
+                    client, identities)
+            # 6) race engine (opt-in: synchronized bursts of
+            # state-changing requests)
+            if (self.profile.race or self.cfg.race.enabled):
+                out += self._race_probe(
+                    endpoints, evidence, metrics, budgets, coverage,
+                    client, identities)
         finally:
             if oast_provider is not None:
                 oast_provider.close()
@@ -1083,6 +1095,16 @@ class Orchestrator:
         findings: List[Finding] = []
         seen_cells = set()
 
+        matrix = AuthorizationMatrix()
+        findings: List[Finding] = []
+        seen_cells = set()
+        owner_headers = {getattr(i, "name", "anonymous"):
+                         dict(getattr(i, "auth_headers", None) or {})
+                         for i in identities}
+
+        # — pass 1: harvest object IDs from every target (global pool
+        # enables cross-endpoint replay, not just same-endpoint swap) —
+        pool = []
         for ep in targets:
             if not self.scope.active_test_allowed(ep.url):
                 continue
@@ -1090,72 +1112,125 @@ class Orchestrator:
                 coverage.record("authz", "blocked",
                                 f"budget: {ep.normalized_url}")
                 continue
-            # — harvest object IDs as every identity —
             try:
-                harvested = harvest_ids(
+                pool.extend(harvest_ids(
                     client, ep, identities,
                     timeout=self.cfg.scan.http_timeout,
-                    max_ids_per_param=cfg_a.max_ids_per_endpoint)
+                    max_ids_per_param=cfg_a.max_ids_per_endpoint))
             except BudgetExceeded:
                 coverage.record("authz", "blocked",
                                 f"budget: {ep.normalized_url}")
                 continue
-            # — swap each victim object as every other identity —
+
+        def handle_swaps(swaps, ep):
+            for sw in swaps:
+                metrics.authorization_tests += 1
+                cross_tenant = bool(
+                    sw.tester_tenant and sw.owner_tenant and
+                    sw.tester_tenant != sw.owner_tenant)
+                if sw.verdict != "strong_candidate":
+                    # precondition rule (§20): owner baseline was 200 by
+                    # construction and the tester request completed —
+                    # a denial/difference is a genuine negative
+                    if 400 <= sw.status < 500 or sw.status == 200:
+                        coverage.record(
+                            "tenant_isolation" if cross_tenant else "bola",
+                            "tested_negative",
+                            f"{ep.normalized_url}::{sw.param}: "
+                            f"{sw.tester}→{sw.status}")
+                    continue
+                metrics.authorization_confirmed += 1
+                cls = ("tenant_isolation" if cross_tenant else "bola")
+                coverage.record(cls, "candidate", sw.notes)
+                coverage.record("idor", "candidate", sw.notes)
+                # invariant corroboration (provenance in evidence, never
+                # a duplicate finding — the swap verdict stays primary)
+                from .logic.observations import (
+                    observation_from_swap, evaluate_observation)
+                inv_results = evaluate_observation(
+                    observation_from_swap(sw))
+                metrics.invariants_tested += len(inv_results)
+                metrics.invariants_violated += sum(
+                    1 for r in inv_results if r.violated)
+                f = Finding(
+                    id=f"swap-{abs(hash(sw.endpoint_url + sw.param + sw.victim_value)) % 10**10}",
+                    source="idor-swap",
+                    name=(f"{'Cross-tenant read' if cross_tenant else 'BOLA'}: "
+                          f"'{sw.tester}' reads '{sw.owner}''s "
+                          f"'{sw.param}={sw.victim_value}' ({ep.path})"),
+                    severity="high",
+                    confidence=Confidence.PROBABLE.value,
+                    validation_status=ValidationStatus.STRONG_CANDIDATE.value,
+                    host=ep.host, matched_at=sw.endpoint_url,
+                    endpoint_url=sw.endpoint_url, method="GET",
+                    parameter=sw.param,
+                    description=sw.notes,
+                    tags=["bola", "idor", "authz",
+                          "tenant-isolation" if cross_tenant else
+                          "cross-user", ep.endpoint_type],
+                    raw={"swap": sw.to_dict(),
+                         "invariants": [r.to_dict()
+                                        for r in inv_results]},
+                    false_positive_notes=(
+                        "Victim object harvested from the owner's own "
+                        "session; replayed verbatim as a different "
+                        "identity; response shape compared excluding "
+                        "volatile keys."),
+                    identity=sw.tester, tenant=sw.tester_tenant,
+                    resource_key=(f"{ep.normalized_url}::{sw.param}"
+                                  f"={sw.victim_value}"),
+                )
+                evidence.allocate(f)
+                evidence.record(
+                    f,
+                    request_text=(f"GET {sw.endpoint_url}\n(as "
+                                  f"{sw.tester}; owner: {sw.owner})"),
+                    response_text=sw.notes)
+                findings.append(f)
+                log.info("authz-matrix: %s", sw.notes)
+
+        for ep in targets:
+            if not self.scope.active_test_allowed(ep.url):
+                continue
+            ep_params = {p.name for p in
+                         list(ep.query_parameters or []) +
+                         list(ep.body_parameters or [])}
+            same = [h for h in pool
+                    if h.normalized_url == ep.normalized_url]
+            # — cross-endpoint candidates: pool IDs whose param exists here,
+            # retargeted at this endpoint with an empty baseline (the swap
+            # engine fetches the owner's baseline on the target first) —
+            from .authorization.harvest import HarvestedId
+            seen_x, cross = set(), []
+            for h in pool:
+                if h.normalized_url == ep.normalized_url:
+                    continue
+                if h.param not in ep_params:
+                    continue
+                key = (h.param, h.value, h.owner)
+                if key in seen_x:
+                    continue
+                seen_x.add(key)
+                cross.append(HarvestedId(
+                    endpoint_url=ep.url, normalized_url=ep.normalized_url,
+                    param=h.param, value=h.value, owner=h.owner,
+                    owner_tenant=h.owner_tenant, shape="", body_hash=""))
+            cross = cross[:cfg_a.max_ids_per_endpoint]
+            # — swap same-endpoint victims, then cross-endpoint ones —
             for tester in identities:
-                tname = getattr(tester, "name", "anonymous")
-                try:
-                    swaps = swap_ids(client, harvested, tester,
-                                     timeout=self.cfg.scan.http_timeout,
-                                     matrix=matrix)
-                except BudgetExceeded:
-                    coverage.record("authz", "blocked",
-                                    f"budget: {ep.normalized_url}")
-                    break
-                for sw in swaps:
-                    metrics.authorization_tests += 1
-                    if sw.verdict != "strong_candidate":
+                for batch in (same, cross):
+                    if not batch:
                         continue
-                    metrics.authorization_confirmed += 1
-                    cross_tenant = bool(
-                        sw.tester_tenant and sw.owner_tenant and
-                        sw.tester_tenant != sw.owner_tenant)
-                    cls = ("tenant_isolation" if cross_tenant else "bola")
-                    coverage.record(cls, "candidate", sw.notes)
-                    coverage.record("idor", "candidate", sw.notes)
-                    f = Finding(
-                        id=f"swap-{abs(hash(sw.endpoint_url + sw.param + sw.victim_value)) % 10**10}",
-                        source="idor-swap",
-                        name=(f"{'Cross-tenant read' if cross_tenant else 'BOLA'}: "
-                              f"'{sw.tester}' reads '{sw.owner}''s "
-                              f"'{sw.param}={sw.victim_value}' ({ep.path})"),
-                        severity="high",
-                        confidence=Confidence.PROBABLE.value,
-                        validation_status=ValidationStatus.STRONG_CANDIDATE.value,
-                        host=ep.host, matched_at=sw.endpoint_url,
-                        endpoint_url=sw.endpoint_url, method="GET",
-                        parameter=sw.param,
-                        description=sw.notes,
-                        tags=["bola", "idor", "authz",
-                              "tenant-isolation" if cross_tenant else
-                              "cross-user", ep.endpoint_type],
-                        raw={"swap": sw.to_dict()},
-                        false_positive_notes=(
-                            "Victim object harvested from the owner's own "
-                            "session; replayed verbatim as a different "
-                            "identity; response shape compared excluding "
-                            "volatile keys."),
-                        identity=sw.tester, tenant=sw.tester_tenant,
-                        resource_key=(f"{ep.normalized_url}::{sw.param}"
-                                      f"={sw.victim_value}"),
-                    )
-                    evidence.allocate(f)
-                    evidence.record(
-                        f,
-                        request_text=(f"GET {sw.endpoint_url}\n(as "
-                                      f"{sw.tester}; owner: {sw.owner})"),
-                        response_text=sw.notes)
-                    findings.append(f)
-                    log.info("authz-matrix: %s", sw.notes)
+                    try:
+                        handle_swaps(swap_ids(
+                            client, batch, tester,
+                            timeout=self.cfg.scan.http_timeout,
+                            matrix=matrix, owner_headers=owner_headers),
+                            ep)
+                    except BudgetExceeded:
+                        coverage.record("authz", "blocked",
+                                        f"budget: {ep.normalized_url}")
+                        break
             # — per-method sweep (BFLA coverage beyond GET) —
             # sweep-only observations (resource == "") — swap observations
             # are evaluated by the swap verdicts above, not re-judged here
@@ -1330,6 +1405,188 @@ class Orchestrator:
             else:
                 coverage.record("second_order", "inconclusive",
                                 f"{ep.normalized_url}: no render observed")
+        return findings
+
+    # ── BUSINESS-LOGIC MUTATIONS (stateful slice) ──────────────────────
+    def _business_logic_probe(self, endpoints: List[Endpoint],
+                              evidence: EvidenceStore, metrics: Metrics,
+                              budgets: BudgetTracker,
+                              coverage: CoverageTracker, client,
+                              identities) -> List[Finding]:
+        from .logic.business_logic import (BusinessLogicTester,
+                                           candidate_params)
+        cfg_b = self.cfg.business
+        scored = [(e, candidate_params(e, cfg_b.max_params))
+                  for e in endpoints
+                  if e.endpoint_type != "static"
+                  and self.scope.active_test_allowed(e.url)]
+        scored = [(e, c) for e, c in scored if c][:cfg_b.max_endpoints]
+        if not scored:
+            coverage.record("business_logic", "untestable",
+                            "no transactional parameters")
+            return []
+        actors = [i for i in identities if i.name != "anonymous"] or \
+            identities[:1]
+        actor = actors[0]
+        aname = getattr(actor, "name", "anonymous")
+        atenant = getattr(actor, "tenant", "") or ""
+        tester = BusinessLogicTester(self.cfg, client)
+        log.info("business-logic: %d endpoints as %s",
+                 len(scored), aname)
+        findings: List[Finding] = []
+        for ep, cands in scored:
+            if not budgets.consume_test("business_logic",
+                                        ep.normalized_url):
+                coverage.record("business_logic", "blocked",
+                                f"budget: {ep.normalized_url}")
+                continue
+            for cand in cands:
+                try:
+                    results = tester.probe(
+                        ep, cand, actor,
+                        timeout=self.cfg.scan.http_timeout)
+                except BudgetExceeded:
+                    coverage.record("business_logic", "blocked",
+                                    f"budget: {ep.normalized_url}")
+                    break
+                for res in results:
+                    metrics.business_logic_tests += 1
+                    if res.verdict == "strong_candidate":
+                        metrics.business_logic_candidates += 1
+                        metrics.invariants_violated += len(res.violations)
+                        coverage.record("business_logic", "candidate",
+                                        res.notes)
+                        inv = res.violations[0]["invariant_id"] \
+                            if res.violations else "invariant"
+                        f = Finding(
+                            id=f"bl-{abs(hash(ep.normalized_url + cand.param + str(res.mutated))) % 10**10}",
+                            source="business-logic",
+                            name=(f"Business logic: {cand.param}="
+                                  f"{res.mutated} accepted, violates "
+                                  f"{inv} ({ep.path})"),
+                            severity="high",
+                            confidence=Confidence.PROBABLE.value,
+                            validation_status=ValidationStatus.STRONG_CANDIDATE.value,
+                            host=ep.host, matched_at=ep.url,
+                            endpoint_url=ep.url, method=ep.method,
+                            parameter=cand.param,
+                            description=res.notes,
+                            tags=["business-logic", cand.kind,
+                                  ep.endpoint_type],
+                            raw={"business": res.to_dict()},
+                            false_positive_notes=(
+                                "Acceptance is echo-based (mutated value "
+                                "reflected with HTTP 200) — a proxy for "
+                                "server-side effect, not proof of it. "
+                                "Confirm the persisted state before "
+                                "reporting."),
+                            identity=aname, tenant=atenant,
+                            resource_key=(f"{ep.normalized_url}::"
+                                          f"{cand.param}"),
+                        )
+                        evidence.allocate(f)
+                        evidence.record(
+                            f,
+                            request_text=(
+                                f"{ep.method} {ep.url} "
+                                f"({cand.param}={res.mutated})"),
+                            response_text=res.notes)
+                        findings.append(f)
+                        log.info("business-logic: %s", res.notes)
+                    elif res.baseline_status != 200:
+                        coverage.record("business_logic", "inconclusive",
+                                        f"{ep.normalized_url}: "
+                                        f"{res.notes}")
+                    else:
+                        coverage.record("business_logic", "tested_negative",
+                                        f"{ep.normalized_url}::"
+                                        f"{cand.param}: {res.notes}")
+        metrics.invariants_tested += tester.evaluations
+        return findings
+
+    # ── RACE ENGINE (stateful slice, opt-in) ───────────────────────────
+    def _race_probe(self, endpoints: List[Endpoint],
+                    evidence: EvidenceStore, metrics: Metrics,
+                    budgets: BudgetTracker,
+                    coverage: CoverageTracker, client,
+                    identities) -> List[Finding]:
+        from .logic.race import run_race
+        cfg_r = self.cfg.race
+        targets = [e for e in endpoints
+                   if e.body_parameters and e.endpoint_type != "static"
+                   and self.scope.active_test_allowed(e.url)]
+        targets = targets[:cfg_r.max_endpoints]
+        if not targets:
+            coverage.record("race", "untestable",
+                            "no POST-able endpoints")
+            return []
+        actors = [i for i in identities if i.name != "anonymous"] or \
+            identities[:1]
+        actor = actors[0]
+        aname = getattr(actor, "name", "anonymous")
+        atenant = getattr(actor, "tenant", "") or ""
+        aheaders = dict(getattr(actor, "auth_headers", None) or {})
+        log.info("race: %d endpoints ×%d/%d as %s", len(targets),
+                 cfg_r.concurrency, cfg_r.rounds, aname)
+        findings: List[Finding] = []
+        for ep in targets:
+            if not budgets.consume_test("race", ep.normalized_url):
+                coverage.record("race", "blocked",
+                                f"budget: {ep.normalized_url}")
+                continue
+            body = {p.name: (p.sample_value or "1")
+                    for p in ep.body_parameters if p.name}
+            try:
+                res = run_race(client, "POST", ep.url, body, aheaders,
+                               concurrency=cfg_r.concurrency,
+                               rounds=cfg_r.rounds,
+                               timeout=self.cfg.scan.http_timeout)
+            except BudgetExceeded:
+                coverage.record("race", "blocked",
+                                f"budget: {ep.normalized_url}")
+                continue
+            metrics.race_tests += 1
+            if res.verdict == "strong_candidate":
+                metrics.race_candidates += 1
+                metrics.invariants_tested += 1
+                metrics.invariants_violated += len(res.violations)
+                coverage.record("race", "candidate", res.notes)
+                f = Finding(
+                    id=f"race-{abs(hash(ep.normalized_url)) % 10**10}",
+                    source="race",
+                    name=(f"Race condition: {cfg_r.concurrency}× POST "
+                          f"{ep.path} processed concurrently with "
+                          f"divergent results"),
+                    severity="high",
+                    confidence=Confidence.PROBABLE.value,
+                    validation_status=ValidationStatus.STRONG_CANDIDATE.value,
+                    host=ep.host, matched_at=ep.url,
+                    endpoint_url=ep.url, method="POST",
+                    description=res.notes,
+                    tags=["race", "business-logic", ep.endpoint_type],
+                    raw={"race": res.to_dict()},
+                    false_positive_notes=(
+                        "Divergent IDs across a synchronized burst "
+                        "indicate duplicate processing; rule out "
+                        "request-specific randomness (timestamps, "
+                        "nonces) before reporting."),
+                    identity=aname, tenant=atenant,
+                )
+                evidence.allocate(f)
+                evidence.record(
+                    f,
+                    request_text=(f"{cfg_r.concurrency}× POST {ep.url} "
+                                  f"through a start barrier, "
+                                  f"{cfg_r.rounds} rounds"),
+                    response_text=res.notes)
+                findings.append(f)
+                log.info("race: %s", res.notes)
+            elif res.verdict == "negative":
+                coverage.record("race", "tested_negative",
+                                f"{ep.normalized_url}: {res.notes}")
+            else:
+                coverage.record("race", "inconclusive",
+                                f"{ep.normalized_url}: {res.notes}")
         return findings
 
     def _maybe_register_oast(self) -> Optional[InteractshProvider]:

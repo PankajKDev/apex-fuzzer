@@ -77,8 +77,8 @@ target
   ▼
 8. VALIDATION ......... differential auth (BOLA/broken-access) · OAST sweep
   │                    plugins (mutation → sqlmap / dalfox / OAST-SSRF)
-  │                    authz-matrix (swap + BFLA) · stored-XSS · budgets
-  │                    coverage recorded per class
+  │                    authz-matrix (swap + BFLA) · stored-XSS · biz-logic
+  │                    race (opt-in) · budgets · coverage per class
   ▼
 9. AI ................. hypotheses → fed BACK into deterministic tests
   │                    → hypotheses.jsonl (validated / rejected / hypothesized)
@@ -114,6 +114,12 @@ Optional extras:
   `unrandoms/nuclei-bb-templates` to `~/nuclei-bb-templates` (configurable via
   `nuclei.bb_templates_dir`).
 - **Arjun**: `pipx install arjun` (or `pip install arjun`).
+- **Ollama** (optional, local AI backend): install from
+  https://ollama.com, then `ollama pull llama3.1` and `ollama serve`.
+  Set `ai.provider: ollama` (or `--ai-provider ollama`). Larger models
+  (e.g. `qwen2.5:14b`) give better hypotheses if you have the VRAM;
+  the planner checks the model is loaded and tells you the pull
+  command when it isn't.
 
 ### Environment file (.env)
 
@@ -125,7 +131,8 @@ cp .env.example .env   # then fill in; .env is git-ignored, never commit it
 
 | variable | enables |
 |----------|---------|
-| `GEMINI_API_KEY` | AI hypothesis planning (`--ai`) |
+| `GEMINI_API_KEY` | AI hypothesis planning via Gemini (`--ai`) |
+| `OLLAMA_HOST` | (optional) Ollama server override, e.g. `http://gpu-box:11434` — no key needed for local models |
 | `GITHUB_TOKEN` | confirmed takeover claims (`tko-subs -takeover`, needs repo scope) |
 | `HEROKU_USERNAME` / `HEROKU_API_KEY` / `HEROKU_APP_NAME` | confirmed Heroku takeover claims |
 
@@ -171,6 +178,8 @@ Results land in `output/<host>/`: `report.html`, `findings.jsonl`,
 --oast                  OAST blind-SSRF confirmation on
 --differential          differential auth-context tests on
 --second-order          stored-XSS correlation on (persists canaries)
+--business-logic        business-logic mutation engine on (submits abuse values)
+--race                  race-condition engine on (synchronized bursts)
 --no-js                 disable JavaScript analysis
 --min-sev {info,low,medium,high,critical}
                         minimum severity rendered in the report
@@ -198,7 +207,9 @@ Results land in `output/<host>/`: `report.html`, `findings.jsonl`,
 Combine profiles with flags: `--validate`, `--ai`, `--oast`, `--differential`,
 `--second-order` force-enable the matching stage regardless of profile.
 Config-file keys (`validation.enabled/differential/ssrf/second_order`,
-`authorization.enabled`, `ai.enabled`) do the same.
+`authorization.enabled`, `business.enabled`, `race.enabled`,
+`ai.enabled`) do the same. Business-logic runs in deep/validation;
+race stays off in every profile (opt-in via `--race`).
 
 ---
 
@@ -268,6 +279,20 @@ authorization:
   max_endpoints: 20
   max_ids_per_endpoint: 3
 
+# Business-logic mutations (quantity/price/refund/token-reuse).
+business:
+  enabled: false           # or --business-logic / deep/validation profiles
+  max_endpoints: 10
+  max_params: 3
+
+# Race-condition engine. Off by default: synchronized bursts of
+# state-changing requests are the most aggressive test in the suite.
+race:
+  enabled: false           # or --race
+  concurrency: 10
+  rounds: 3
+  max_endpoints: 5
+
 nuclei:
   bb_templates_dir: "~/nuclei-bb-templates"
   workflows: false         # -workflow -workflow-threads 3
@@ -275,8 +300,12 @@ nuclei:
 
 ai:
   enabled: false
+  provider: gemini          # or "ollama" (local); --ai-provider overrides
   model: "gemini-1.5-flash"   # Generative Language API, GEMINI_API_KEY env
   max_output_tokens: 8192
+  ollama_host: "http://localhost:11434"  # or OLLAMA_HOST env
+  ollama_model: "llama3.1"  # must be pulled: ollama pull llama3.1
+  ollama_timeout: 180       # local inference is slower than API calls
   js_chunk_budget: 6
   max_hypothesis_tests: 5     # per test class fed back into testing
 
@@ -468,15 +497,25 @@ harvest → swap → method sweep (`authorization/harvest.py`,
 
 1. **Harvest**: GET the endpoint as every identity, parse JSON responses
    for identifier-like keys — one `(endpoint, param, value, owner)` record
-   per object, with the owner's response shape as baseline.
+   per object, with the owner's response shape as baseline. All records
+   join a global pool keyed by parameter name.
 2. **Swap**: replay each victim object as every *other* identity; a shape
    match is a `strong_candidate` (`source: idor-swap`) — tagged
    `tenant-isolation` when the two identities sit in different tenants.
+   Same-endpoint victims reuse the harvest baseline; cross-endpoint
+   candidates (pool IDs whose parameter exists on another endpoint)
+   establish the owner's baseline on the target first. Completed denials
+   record `tested_negative` — the owner baseline was 200 and the tester
+   request finished, so the negative is genuine.
 3. **Method sweep**: request the endpoint with every configured verb as
    every identity into an `AuthorizationMatrix`; per-cell verdicts flag
    BOLA (same object, two users), BFLA (role/method gaps, anonymous denied
    but a user succeeds on privileged endpoints), and cross-tenant reads
    (`source: authz-matrix`). Clean cells record `tested_negative`.
+
+Swap findings carry their invariant evaluation (`no_cross_user_read`)
+as corroboration in evidence — the swap verdict stays primary, so
+nothing is double-reported.
 
 ### 8c. Stored-XSS correlation (opt-in: persists canaries)
 
@@ -488,11 +527,37 @@ unknown tag, then render candidates are fetched and classified
 second-order`) with inject request + render snippet as evidence;
 entity-encoded → `tested_negative`; never rendered → `inconclusive`.
 
+### 8d. Business-logic mutations (opt-in: submits abuse values)
+
+With `business.enabled` (`--business-logic`, deep/validation profiles),
+transactional parameters (quantities, prices, refund pairs, single-use
+tokens) receive boundary/abuse values (`logic/business_logic.py`):
+`-1`/`0`/`999999` quantities and prices, absurd refunds, double-submits
+of token-bearing requests. A finding needs **both** server acceptance
+(HTTP 200 + mutated value echoed) **and** an invariant violation
+(`logic/observations.py` translates outcomes for the invariant engine) —
+a bare 200 is never enough. Non-200 baselines yield `inconclusive`,
+never negatives.
+
+### 8e. Race engine (opt-in: synchronized bursts)
+
+With `race.enabled` (`--race`; off in every profile), POST endpoints
+fire N identical requests through a start barrier (`logic/race.py`).
+All-200 with divergent object IDs → `strong_candidate` with round
+detail; fully consistent rounds → `tested_negative`; mixed errors →
+`inconclusive`. Budget exhaustion propagates as `blocked`, never a
+negative.
+
 ### 9. AI → `hypotheses.jsonl`
 
-`AIPlanner` (Gemini, `GEMINI_API_KEY`) emits structured hypotheses
+`AIPlanner` emits structured hypotheses
 (`hypothesis, endpoint, reason, test_class, confidence, required_context,
-status`) — never confirmed vulns. Context is prompt-budgeted per part
+status`) — never confirmed vulns. Two backends: `provider: gemini`
+(cloud, needs `GEMINI_API_KEY`) or `provider: ollama` (local,
+needs `ollama serve` plus a pulled model such as `llama3.1` — no key,
+nothing leaves the machine). Ollama requests use JSON mode
+(`format: json`) straight into the shared parser, with a longer default
+timeout for local inference. Context is prompt-budgeted per part
 (techs/endpoints/findings) and findings are grouped by host+class so one
 noisy host can't evict the rest. Large JS bundles are analyzed per
 structural chunk (`plan_js_chunk`). See
@@ -522,6 +587,11 @@ confirmed`.
 | mutation XSS prescreen | payload reflected unfiltered | — |
 | sqlmap | — | "is vulnerable" / "available databases" in output |
 | dalfox | "verified"/"PoC" in output | — |
+| idor-swap (same + cross-endpoint) | victim object served to another identity, same shape | — (swap proves access; impact confirmed by human) |
+| authz-matrix BFLA | method treats roles/tenants identically (200s match) | — |
+| business-logic | abuse value accepted (echoed, 200) **and** invariant violated | — (echo is a proxy; confirm persisted state) |
+| stored-XSS | inert canary persists and renders unescaped in active sink | — (confirm script execution manually) |
+| race | synchronized burst all-200 with divergent object IDs | — (rule out randomness first) |
 
 Healthy authorization (user A 200 / user B 401-403, or anonymous blocked while
 an authenticated user succeeds) yields `inconclusive` with an explanatory
@@ -611,6 +681,9 @@ takeover_confirmed, hypotheses_generated, hypotheses_validated,
 waf_detected, resources_discovered, identities_tested, roles_tested,
 tenants_tested, authorization_tests, authorization_confirmed,
 second_order_tests, second_order_candidates,
+business_logic_tests, business_logic_candidates,
+race_tests, race_candidates,
+invariants_tested, invariants_violated,
 scan_duration_seconds`.
 
 (`stage_durations` exists in the schema but is currently unpopulated —
@@ -687,9 +760,11 @@ cross-user read, unauthorized write, modify-deleted, self-promotion,
 negative quantity, unauthorized price change, refund-exceeds-payment,
 single-use token reuse, revert-completed. Custom checks register via
 `register_check(name, fn)`; `evaluate()` / `evaluate_all()` return
-`InvariantResult(violated, detail)`. No observation producers are wired yet
-— the Phase 3 authorization matrix and Phase 5 workflow engine will feed
-it; the registry API is frozen now so those phases only append.
+`InvariantResult(violated, detail)`. Observation producers are wired
+for swap matches (attached to findings as corroboration), business-logic
+mutations, and race outcomes (`logic/observations.py`); the Phase 3
+authorization matrix cells that lack an `authorized` signal and the
+Phase 5 workflow transitions will extend them.
 
 ## Coverage model (Phase 1)
 

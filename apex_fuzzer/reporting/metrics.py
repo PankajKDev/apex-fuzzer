@@ -40,6 +40,12 @@ class Metrics:
     authorization_confirmed: int = 0
     second_order_tests: int = 0
     second_order_candidates: int = 0
+    business_logic_tests: int = 0
+    business_logic_candidates: int = 0
+    race_tests: int = 0
+    race_candidates: int = 0
+    invariants_tested: int = 0
+    invariants_violated: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

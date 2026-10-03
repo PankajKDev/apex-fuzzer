@@ -68,6 +68,24 @@ class AuthorizationConfig:
 
 
 @dataclass
+class BusinessConfig:
+    """Business-logic mutation engine (quantity/price/refund/replay)."""
+    enabled: bool = False
+    max_endpoints: int = 10
+    max_params: int = 3
+
+
+@dataclass
+class RaceConfig:
+    """Race-condition engine. Off by default — synchronized bursts of
+    state-changing requests are the most aggressive test in the suite."""
+    enabled: bool = False
+    concurrency: int = 10
+    rounds: int = 3
+    max_endpoints: int = 5
+
+
+@dataclass
 class BudgetConfig:
     """Request budgets (§50). Generous defaults: normal scans stay far
     below every cap; the caps only bite runaway loops."""
@@ -102,8 +120,14 @@ class NucleiConfig:
 @dataclass
 class AIConfig:
     enabled: bool = False
+    # provider: "gemini" (cloud, needs GEMINI_API_KEY) or "ollama"
+    # (local, needs `ollama serve` + a pulled model, no key)
+    provider: str = "gemini"
     model: str = "gemini-1.5-flash"
     max_output_tokens: int = 8192
+    ollama_host: str = "http://localhost:11434"
+    ollama_model: str = "llama3.1"
+    ollama_timeout: int = 180
     # how many JS chunks get sent to the planner (spec §6)
     js_chunk_budget: int = 6
     # max hypotheses per test class fed back into deterministic testing
@@ -178,6 +202,8 @@ class Config:
     validation: ValidationConfig = field(default_factory=ValidationConfig)
     authorization: AuthorizationConfig = field(
         default_factory=AuthorizationConfig)
+    business: BusinessConfig = field(default_factory=BusinessConfig)
+    race: RaceConfig = field(default_factory=RaceConfig)
     budgets: BudgetConfig = field(default_factory=BudgetConfig)
     oast: OastConfig = field(default_factory=OastConfig)
     nuclei: NucleiConfig = field(default_factory=NucleiConfig)
@@ -244,6 +270,8 @@ def apply_cli_overrides(cfg: Config, args) -> Config:
         cfg.validation.enabled = True
     if getattr(args, "ai", False):
         cfg.ai.enabled = True
+    if getattr(args, "ai_provider", None):
+        cfg.ai.provider = args.ai_provider
     if getattr(args, "min_sev", None):
         cfg.reporting.min_severity = args.min_sev
     if getattr(args, "no_js", False):
@@ -255,4 +283,8 @@ def apply_cli_overrides(cfg: Config, args) -> Config:
         cfg.validation.differential = True
     if getattr(args, "second_order", False):
         cfg.validation.second_order = True
+    if getattr(args, "business_logic", False):
+        cfg.business.enabled = True
+    if getattr(args, "race", False):
+        cfg.race.enabled = True
     return cfg

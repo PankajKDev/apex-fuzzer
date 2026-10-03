@@ -12,11 +12,46 @@ class AIPlanner:
     def __init__(self, cfg):
         self.cfg = cfg
         self.key = os.environ.get("GEMINI_API_KEY")
+        self.provider = (getattr(cfg.ai, "provider", "gemini")
+                         or "gemini").lower()
+        host = (getattr(cfg.ai, "ollama_host", "") or
+                os.environ.get("OLLAMA_HOST", "") or
+                "http://localhost:11434")
+        self.ollama_host = host.rstrip("/")
 
     def available(self) -> bool:
-        return bool(self.cfg.ai.enabled and self.key)
+        if not self.cfg.ai.enabled:
+            return False
+        if self.provider == "ollama":
+            return self._ollama_ready()
+        return bool(self.key)
+
+    def _ollama_ready(self) -> bool:
+        """True when the server answers and the model is pulled."""
+        import requests
+        try:
+            r = requests.get(f"{self.ollama_host}/api/tags", timeout=5)
+            models = [m.get("name", "") for m in
+                      r.json().get("models", [])]
+        except Exception as e:
+            log.warning("Ollama not reachable at %s: %s "
+                        "(is `ollama serve` running?)",
+                        self.ollama_host, e)
+            return False
+        want = self.cfg.ai.ollama_model
+        if not any(m == want or m.startswith(want + ":") for m in models):
+            log.warning("Ollama model '%s' not loaded (have: %s). "
+                        "Run: ollama pull %s",
+                        want, ", ".join(models) or "none", want)
+            return False
+        return True
 
     def _call(self, prompt: str, timeout: int = 30) -> str:
+        if self.provider == "ollama":
+            return self._call_ollama(prompt, timeout)
+        return self._call_gemini(prompt, timeout)
+
+    def _call_gemini(self, prompt: str, timeout: int = 30) -> str:
         import requests
         try:
             r = requests.post(
@@ -38,6 +73,39 @@ class AIPlanner:
         except Exception as e:
             log.warning("AI call failed: %s", e)
             return ""
+
+    def _call_ollama(self, prompt: str, timeout: int = 30) -> str:
+        """Local inference via Ollama. `format: json` constrains the
+        model to valid JSON, which feeds straight into _parse."""
+        import requests
+        timeout = max(timeout, self.cfg.ai.ollama_timeout)
+        model = self.cfg.ai.ollama_model
+        try:
+            r = requests.post(
+                f"{self.ollama_host}/api/generate",
+                json={"model": model, "prompt": prompt,
+                      "stream": False, "format": "json",
+                      "options": {"num_predict":
+                                  self.cfg.ai.max_output_tokens}},
+                timeout=timeout)
+        except Exception as e:
+            log.warning("Ollama call failed at %s: %s",
+                        self.ollama_host, e)
+            return ""
+        try:
+            data = r.json()
+        except Exception:
+            log.warning("Ollama returned non-JSON output")
+            return ""
+        if isinstance(data, dict) and data.get("error"):
+            log.warning("Ollama error: %s", data["error"])
+            return ""
+        text = (data.get("response") or "") \
+            if isinstance(data, dict) else ""
+        if not text:
+            log.warning("Ollama returned an empty response "
+                        "(model '%s' loaded?)", model)
+        return text
 
     def generate_hypotheses(self, technologies: List[Dict],
                             endpoints: List[Dict],

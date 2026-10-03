@@ -27,9 +27,9 @@ class SwapResult:
     param: str
     victim_value: str
     owner: str
-    owner_tenant: str
     tester: str
-    tester_tenant: str
+    owner_tenant: str = ""
+    tester_tenant: str = ""
     status: int = 0
     match: bool = False
     verdict: str = "inconclusive"
@@ -53,9 +53,17 @@ def _with_param(url: str, name: str, value: str) -> str:
 
 
 def swap_ids(http, harvested, tester, timeout: int = 10,
-             matrix: AuthorizationMatrix | None = None) -> List[SwapResult]:
+             matrix: AuthorizationMatrix | None = None,
+             owner_headers: Dict[str, Dict[str, str]] | None = None
+             ) -> List[SwapResult]:
     """Replay victim IDs as ``tester`` (an Identity). ``harvested`` are
-    HarvestedId records owned by *other* identities."""
+    HarvestedId records owned by *other* identities.
+
+    Same-endpoint records carry the owner's baseline shape. Records
+    with an empty baseline (cross-endpoint candidates) trigger a
+    baseline fetch as the owner first — via ``owner_headers`` — so the
+    comparison stays owner-vs-tester on the *target* endpoint.
+    """
     from ..validation.differential import normalize_response
     out: List[SwapResult] = []
     tester_name = getattr(tester, "name", "anonymous")
@@ -64,6 +72,30 @@ def swap_ids(http, harvested, tester, timeout: int = 10,
     for h in harvested or []:
         if h.owner == tester_name:
             continue
+        shape, body_hash = h.shape or "", h.body_hash or ""
+        if (not shape or not body_hash) and owner_headers is not None \
+                and h.owner in (owner_headers or {}):
+            try:
+                b = http.get(_with_param(h.endpoint_url, h.param,
+                                         h.value),
+                             headers=owner_headers[h.owner],
+                             timeout=timeout)
+            except BudgetExceeded:
+                raise
+            except Exception as e:
+                log.debug("swap baseline %s as %s failed: %s",
+                          h.endpoint_url, h.owner, e)
+                continue
+            if b.status_code != 200:
+                continue
+            try:
+                bn = normalize_response(b)
+            except Exception:
+                continue
+            shape = bn.get("key_shape", "")
+            body_hash = bn.get("body_hash", "")
+            if not shape and not body_hash:
+                continue
         url = _with_param(h.endpoint_url, h.param, h.value)
         try:
             r = http.get(url, headers=headers, timeout=timeout)
@@ -76,12 +108,10 @@ def swap_ids(http, harvested, tester, timeout: int = 10,
             norm = normalize_response(r)
         except Exception:
             continue
-        owner_view = {"status": 200, "shape": h.shape,
-                      "body_hash": h.body_hash, "length_bucket": -1}
         match = norm.get("status") == 200 and (
             (norm.get("body_hash") and
-             norm["body_hash"] == h.body_hash) or
-            (norm.get("key_shape") and norm["key_shape"] == h.shape))
+             norm["body_hash"] == body_hash) or
+            (norm.get("key_shape") and norm["key_shape"] == shape))
         res = SwapResult(
             endpoint_url=url, param=h.param, victim_value=h.value,
             owner=h.owner, owner_tenant=h.owner_tenant,

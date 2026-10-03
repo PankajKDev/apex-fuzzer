@@ -43,6 +43,14 @@ _IMPACT = {
                      "renders unescaped in another user's session — "
                      "stored XSS with session-hijacking and admin-panel "
                      "takeover potential."),
+    "business_logic": ("Server-side business rules can be bypassed: "
+                       "negative/zero pricing or quantities accepted, "
+                       "excessive refunds, or single-use tokens honored "
+                       "twice — direct financial loss or entitlement "
+                       "abuse."),
+    "race": ("Concurrent requests are processed non-atomically, "
+             "allowing duplicate creation, double spend, or repeated "
+             "use of single-use operations under burst traffic."),
     "broken_auth": ("Unauthenticated or low-privileged requests can "
                     "reach privileged endpoints, exposing sensitive "
                     "data or destructive actions to anyone who finds "
@@ -83,6 +91,10 @@ def _classify(f: Finding) -> str:
         return "bfla"
     if "stored" in name or "second-order" in name:
         return "second_order"
+    if "business" in name:
+        return "business_logic"
+    if "race" in name:
+        return "race"
     if "bola" in name or "idor" in name:
         return "idor"
     if "auth" in name or "access" in name or "403" in name or "401" in name:
@@ -176,6 +188,18 @@ def build_repro_steps(f: Finding) -> List[str]:
             "private session to confirm script execution before "
             "reporting.",
         ]
+    if f.source in ("business-logic", "race"):
+        raw = f.raw or {}
+        detail = (raw.get("business") or raw.get("race") or {})
+        return [
+            f"Replay the recorded request against {url} as the same "
+            f"low-privilege identity (headers in request.txt).",
+            f"Observe: {detail.get('notes', f.description) if isinstance(detail, dict) else f.description}.",
+            "Confirm the effect server-side (persisted state, balance, "
+            "second record) — echo alone is not proof.",
+            "For race findings, repeat the burst and check whether "
+            "duplicate objects accumulate.",
+        ]
     steps.append(f"Send {f.method or 'GET'} to {url}.")
     if f.request_headers:
         steps.append("Include the captured request headers "
@@ -224,6 +248,11 @@ def build_fp_notes(f: Finding) -> str:
                 "storing a working payload. Context (script / event "
                 "handler / raw HTML vs encoded) recorded in evidence; "
                 "confirm script execution manually before reporting.")
+    if f.source in ("business-logic", "race"):
+        return ("Acceptance is echo-based (mutated value reflected with "
+                "HTTP 200) or burst-divergence based — a proxy for "
+                "server-side effect, paired with the invariant that "
+                "fired. Confirm persisted state before reporting.")
     return ("Detection based on fingerprint/heuristic signals; verify "
             "manually before reporting. See evidence directory for the "
             "raw request/response pair.")
