@@ -12,7 +12,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 from ..models import Identity
 from ..logging_setup import get_logger
-from .storage import (cookies_to_dict, build_cookie_header, extract_tokens,
+from .storage import (build_cookie_header, extract_tokens,
                       parse_storage_state)
 
 log = get_logger("browser-sessions")

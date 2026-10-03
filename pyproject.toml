@@ -12,6 +12,14 @@ dependencies = [
     "requests>=2.28",
     "pyyaml>=6.0",
 ]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Programming Language :: Python :: 3.13",
+    "Topic :: Security",
+]
 
 [project.optional-dependencies]
 browser = ["playwright>=1.40"]
@@ -21,3 +29,16 @@ apex-fuzzer = "apex_fuzzer.cli:main"
 
 [tool.setuptools.packages.find]
 include = ["apex_fuzzer*"]
+
+[tool.ruff]
+target-version = "py310"
+# Bug-catching subset only (F + E9). Full style/format enforcement
+# would reformat the world; ratchet upward deliberately, not here.
+select = ["F", "E9"]
+
+[tool.mypy]
+python_version = "3.10"
+ignore_missing_imports = true
+# CI gates explicit module lists (see ci.yml), ratcheting outward
+# from new code. No blanket excludes: bare `mypy apex_fuzzer`
+# still reports the legacy corpus for triage.

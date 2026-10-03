@@ -337,7 +337,6 @@ class FlowPage(FakePage):
 
 
 def test_workflow_replay_and_roundtrip():
-    from apex_fuzzer.browser.workflows import BrowserWorkflow
     wf = (BrowserWorkflow("login")
           .add("goto", "https://t.com/login")
           .add("fill", 'input[name="user"]', "bob")
@@ -355,7 +354,6 @@ def test_workflow_replay_and_roundtrip():
 
 
 def test_workflow_unknown_action_and_break():
-    from apex_fuzzer.browser.workflows import BrowserWorkflow
     wf = BrowserWorkflow("x").add("teleport", "mars").add(
         "goto", "https://t.com/")
     page = FlowPage()

@@ -5,7 +5,6 @@ and ID-token parsing via auth/jwt.py. Active claims attacks
 (audience/issuer confusion, algorithm games) belong to Phase 10.
 """
 from typing import Any, Dict, List, Optional
-from urllib.parse import urljoin
 from ..logging_setup import get_logger
 from .jwt import parse_jwt, JwtClaims
 

@@ -143,7 +143,7 @@ def verify_idempotency(http, method: str, url: str,
     caller keeps its existing verdict).
     """
     from ..authorization.harvest import extract_ids_from_body
-    seen_ids: List[str] = []
+    seen_ids: List[List[str]] = []
     bodies: List[str] = []
     for attempt in (1, 2):
         try:
@@ -196,7 +196,7 @@ def verify_token_reuse(http, method: str, url: str,
     single-use (refuted as a bug — caller keeps prior verdict).
     """
     from ..validation.differential import normalize_response
-    from urllib.parse import (urlsplit, urlunsplit, parse_qsl, urlencode)
+    from urllib.parse import (urlsplit, urlunsplit, urlencode)
 
     def _fire():
         if method.upper() == "POST":

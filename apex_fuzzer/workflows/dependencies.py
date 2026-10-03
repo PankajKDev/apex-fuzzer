@@ -6,7 +6,7 @@ endpoint B means B plausibly depends on A. Short/generic values
 ("1", "true", …) are ignored — they collide everywhere and prove
 nothing. Each dependency carries the evidence that justifies it.
 """
-from typing import Any, Dict, List, Tuple
+from typing import Any, Dict, List
 from ..logging_setup import get_logger
 
 log = get_logger("workflows-deps")

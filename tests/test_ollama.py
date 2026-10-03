@@ -13,8 +13,16 @@ def _cfg(provider="ollama", enabled=True):
 
 
 class _Resp:
-    def __init__(self, payload):
+    def __init__(self, payload, status=200):
         self._payload = payload
+        self.status_code = status
+
+    def raise_for_status(self):
+        if self.status_code >= 400:
+            import requests
+            raise requests.exceptions.HTTPError(
+                f"HTTP {self.status_code}",
+                response=type("R", (), {"status_code": self.status_code})())
 
     def json(self):
         return self._payload
@@ -147,3 +155,110 @@ def test_cli_ai_provider_flag():
                                       "--ai-provider", "ollama"])
     cfg = apply_cli_overrides(Config(), args)
     assert cfg.ai.enabled and cfg.ai.provider == "ollama"
+
+
+# ── M3.1 error classification + retry ───────────────────────────────
+def test_classify_errors():
+    import requests
+    from apex_fuzzer.ai.planner import classify_http_error as cls
+    assert cls(status=401) == "auth"
+    assert cls(status=403) == "auth"
+    assert cls(status=404) == "malformed"
+    assert cls(status=429) == "rate_limit"
+    assert cls(status=500) == "server"
+    assert cls(status=418) == "unknown"
+    assert cls(exc=requests.exceptions.Timeout()) == "timeout"
+    assert cls(exc=requests.exceptions.ConnectionError()) == \
+        "connection"
+    assert cls(exc=ValueError("x")) == "unknown"
+
+
+def test_retry_transient_then_success(monkeypatch):
+    calls = []
+
+    def fake_post(url, **kw):
+        calls.append(1)
+        if len(calls) < 3:
+            return _Resp({"error": "busy"}, status=503)
+        return _Resp({"response": json.dumps(_hyps())})
+    monkeypatch.setattr("requests.post", fake_post)
+    monkeypatch.setattr("time.sleep", lambda s: None)
+    out = AIPlanner(_cfg())._call("hi", timeout=5)
+    assert len(calls) == 3  # initial + 2 retries
+    assert len(AIPlanner(_cfg())._parse(out)) == 1
+
+
+def test_no_retry_on_timeout_or_auth(monkeypatch):
+    import requests
+    calls = []
+
+    def fake_timeout(url, **kw):
+        calls.append(1)
+        raise requests.exceptions.Timeout()
+    monkeypatch.setattr("requests.post", fake_timeout)
+    assert AIPlanner(_cfg())._call("hi", timeout=5) == ""
+    assert len(calls) == 1  # fail fast, no retry storm
+
+    def fake_auth(url, **kw):
+        calls.append(1)
+        return _Resp({"error": "denied"}, status=401)
+    monkeypatch.setattr("requests.post", fake_auth)
+    assert AIPlanner(_cfg())._call("hi", timeout=5) == ""
+    assert len(calls) == 2  # one attempt only
+
+
+def test_malformed_json_body(monkeypatch):
+    class BadResp(_Resp):
+        def json(self):
+            raise ValueError("nope")
+    monkeypatch.setattr("requests.post",
+                        lambda *a, **k: BadResp({}))
+    assert AIPlanner(_cfg())._call("hi", timeout=5) == ""
+
+
+def test_bounded_log_bodies():
+    from apex_fuzzer.ai.planner import _truncate
+    assert _truncate("x" * 500) == "x" * 300 + "…"
+    assert _truncate("short") == "short"
+
+
+# ── M3.2 config + validation ─────────────────────────────────────────
+def test_effective_settings_precedence():
+    cfg = Config()
+    assert cfg.ai.effective_ollama()["model"] == "llama3.1"
+    assert cfg.ai.effective_gemini()["model"] == "gemini-1.5-flash"
+    cfg.ai.ollama = {"model": "qwen2.5:14b", "host": "http://g:11434"}
+    cfg.ai.ollama_model = "should-lose"
+    eff = cfg.ai.effective_ollama()
+    assert eff["model"] == "qwen2.5:14b" and eff["host"] == "http://g:11434"
+    cfg.ai.gemini = {"model": "gemini-2.0-flash"}
+    assert cfg.ai.effective_gemini()["model"] == "gemini-2.0-flash"
+
+
+def test_validate_config_cases(monkeypatch):
+    cfg = _cfg()
+    cfg.ai.enabled = False
+    assert AIPlanner(cfg).validate_config() == ["ai.enabled is false"]
+    cfg = _cfg()
+    cfg.ai.provider = "mystery"
+    assert any("unknown ai.provider" in p
+               for p in AIPlanner(cfg).validate_config())
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    cfg = _cfg("gemini")
+    assert any("GEMINI_API_KEY" in p
+               for p in AIPlanner(cfg).validate_config())
+    monkeypatch.setenv("GEMINI_API_KEY", "K")
+    assert AIPlanner(_cfg("gemini")).validate_config() == []
+
+
+def test_ollama_host_precedence(monkeypatch):
+    cfg = _cfg()
+    cfg.ai.ollama = {"host": "http://block:11434"}
+    cfg.ai.ollama_host = "http://legacy:11434"
+    monkeypatch.setenv("OLLAMA_HOST", "http://env:11434")
+    # explicit block beats env beats legacy flat key
+    assert AIPlanner(cfg).ollama_host == "http://block:11434"
+    cfg.ai.ollama = {}
+    assert AIPlanner(cfg).ollama_host == "http://env:11434"
+    monkeypatch.delenv("OLLAMA_HOST")
+    assert AIPlanner(cfg).ollama_host == "http://legacy:11434"

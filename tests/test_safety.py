@@ -7,12 +7,11 @@ from apex_fuzzer.safety.impact import (
     max_level, needs_authorization, MODULE_LEVELS, ModuleState,
     PASSIVE, READ_ONLY, ACTIVE, STATEFUL, BURST, CLAIMING)
 from apex_fuzzer.safety.authorization import (
-    Authorization, AuthorizationRefused, GATED_MODULES,
-    EXIT_OK, EXIT_FAIL, EXIT_REFUSED)
+    Authorization, AuthorizationRefused, EXIT_OK, EXIT_FAIL, EXIT_REFUSED)
 from apex_fuzzer.safety.preflight import (
     resolve_modules, RequestPlan, plan_differential, plan_authz_matrix,
     plan_race, plan_business, plan_second_order, plan_oast,
-    dry_run_plan, render_plan_text, check_fit, StopFlag, Pacer,
+    render_plan_text, check_fit, StopFlag, Pacer,
     get_interrupt_flag, install_signal_handlers)
 from apex_fuzzer.config import Config
 from apex_fuzzer.budgets import BudgetTracker, BudgetExceeded
@@ -174,7 +173,6 @@ def test_planner_math():
 
 # ── dry-run: zero network ─────────────────────────────────────────────
 def test_dry_run_sends_zero_requests(tmp_path, monkeypatch):
-    import socket
     from apex_fuzzer.orchestrator import Orchestrator
     from apex_fuzzer.profiles import get as get_profile
 
@@ -211,6 +209,18 @@ def test_dry_run_uses_inventory_when_present(tmp_path):
     plan = orch.dry_run("https://t.com")
     assert plan["inventory_endpoints"] == 2
     assert plan["inventory_estimated"] is False
+    assert plan["target_in_scope"] is True
+
+
+def test_dry_run_flags_out_of_scope_target(tmp_path):
+    from apex_fuzzer.orchestrator import Orchestrator
+    from apex_fuzzer.profiles import get as get_profile
+    cfg = Config()
+    cfg.scope.allowed_domains = ["other.com"]
+    orch = Orchestrator(cfg, tmp_path, profile=get_profile("standard"))
+    plan = orch.dry_run("https://t.com")
+    assert plan["target_in_scope"] is False
+    assert "outside the configured scope" in render_plan_text(plan)
 
 
 def test_dry_run_refusal_reported_not_raised(tmp_path):
@@ -241,7 +251,6 @@ def test_check_fit():
 def test_max_requests_gate():
     cfg = Config()
     cfg.safety.max_requests = 2
-    from apex_fuzzer.budgets import BudgetTracker
     t = BudgetTracker(cfg)
     assert t.consume_request("h", "e1")
     assert t.consume_request("h", "e2")
@@ -254,7 +263,6 @@ def test_max_requests_gate():
 def test_max_state_changes_gate():
     cfg = Config()
     cfg.safety.max_state_changes = 1
-    from apex_fuzzer.budgets import BudgetTracker
     t = BudgetTracker(cfg)
     assert t.consume_mutation("h", "e1") is True
     assert t.consume_mutation("h", "e2") is False
@@ -264,7 +272,6 @@ def test_max_state_changes_gate():
 
 
 def test_caps_unset_by_default():
-    from apex_fuzzer.budgets import BudgetTracker
     t = BudgetTracker(Config())
     for _ in range(50):
         assert t.consume_request("h", "e")
@@ -285,7 +292,6 @@ def test_budget_usage_roundtrip_with_new_counters():
 
 def test_http_client_mutation_gate():
     from apex_fuzzer.orchestrator import _HTTPClient
-    from apex_fuzzer.budgets import BudgetTracker, BudgetExceeded
     cfg = Config()
     cfg.safety.max_state_changes = 0
     client = _HTTPClient(budgets=BudgetTracker(cfg))
@@ -327,7 +333,6 @@ def test_stop_on_candidate_halts_remaining_targets():
     from apex_fuzzer.profiles import get as get_profile
     from apex_fuzzer.reporting.metrics import Metrics
     from apex_fuzzer.reporting.coverage import CoverageTracker
-    from apex_fuzzer.budgets import BudgetTracker
     from apex_fuzzer.validation.evidence import EvidenceStore
     from apex_fuzzer.validation.differential import DifferentialTester
     from apex_fuzzer.models import Endpoint, Parameter
@@ -464,3 +469,39 @@ def test_report_safety_block(tmp_path):
     out2 = tmp_path / "r2.html"
     render_html(out2, "t.com", [], [], {})
     assert "Authorization" not in out2.read_text()
+
+
+def test_doctor_config_checks(tmp_path, monkeypatch):
+    from apex_fuzzer.cli import doctor_config
+    monkeypatch.chdir(tmp_path)
+    # default config.yaml absent → defaults → clean
+    assert doctor_config(Config()) == []
+    cfg = Config()
+    cfg.ai.enabled = True
+    monkeypatch.delenv("GEMINI_API_KEY", raising=False)
+    assert any("GEMINI_API_KEY" in p for p in doctor_config(cfg))
+    cfg = Config()
+    cfg.ai.enabled = True
+    cfg.ai.provider = "mystery"
+    assert any("unknown ai.provider" in p for p in doctor_config(cfg))
+    cfg = Config()
+    cfg.race.enabled = True
+    assert any("strict" in p for p in doctor_config(cfg))
+    cfg = Config()
+    cfg.auth.login.enabled = True
+    from apex_fuzzer.config import LoginIdentityConfig
+    cfg.auth.login.identities = [LoginIdentityConfig(
+        name="a", username="u", password_env="PW_MISSING_XYZ")]
+    problems = doctor_config(cfg)
+    assert any("browser" in p for p in problems)
+    assert any("PW_MISSING_XYZ" in p or "a" in p for p in problems)
+    # unreadable config
+    bad = tmp_path / "bad.yaml"
+    bad.write_text(":\tbad: [\n")
+    orig_load = Config.load
+
+    def _boom(path):
+        raise ValueError("nope")
+    monkeypatch.setattr(Config, "load", classmethod(lambda c, p: _boom(p)))
+    assert any("unreadable" in p for p in doctor_config())
+    monkeypatch.setattr(Config, "load", orig_load)

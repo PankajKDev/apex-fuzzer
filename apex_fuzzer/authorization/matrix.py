@@ -7,7 +7,7 @@ tenants and methods. Persisted to ``authorization_matrix.json``.
 """
 import json
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 from ..logging_setup import get_logger
 
 log = get_logger("authz")

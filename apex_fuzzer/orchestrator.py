@@ -60,14 +60,13 @@ from .reporting.metrics import Metrics
 from .reporting.html import render_html
 from .safety.preflight import (StopFlag, Pacer, get_interrupt_flag,
                                resolve_modules, dry_run_plan,
-                               render_plan_text, plan_differential,
+                               plan_differential,
                                plan_authz_matrix, plan_race,
                                plan_business, plan_second_order,
                                plan_oast)
 from .safety.impact import max_level
 from .safety.authorization import (
-    Authorization, AuthorizationRefused, GATED_MODULES,
-    EXIT_OK, EXIT_FAIL, EXIT_REFUSED)
+    Authorization, AuthorizationRefused, GATED_MODULES)
 
 log = get_logger("orchestrator")
 
@@ -309,6 +308,8 @@ class Orchestrator:
         # ── 9. AI (+ loop closure into deterministic testing) ───────────
         hypotheses: List[Hypothesis] = []
         planner = AIPlanner(self.cfg)
+        for problem in planner.validate_config():
+            log.warning("ai config: %s", problem)
         if (self.profile.run_ai or self.cfg.ai.enabled) and \
                 planner.available():
             ck.mark("ai", "running")
@@ -1937,8 +1938,6 @@ class Orchestrator:
             except Exception as e:
                 log.debug("workflow discovery: bad traffic file: %s", e)
         # CRUD linkage from app resources × endpoint methods
-        from .state.resources import ResourceTracker, \
-            link_crud_from_endpoints
         tracker = ResourceTracker()
         resources = []
         if application is not None:

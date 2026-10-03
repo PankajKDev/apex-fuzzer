@@ -269,7 +269,6 @@ def test_replay_scope_and_budget_gates():
 
 
 def test_replay_budget_exhaustion_propagates():
-    from apex_fuzzer.budgets import BudgetExceeded
 
     class H:
         def get(self, url, **kw):

@@ -4,7 +4,7 @@ Pure functions. Snapshot diffs drive transition detection; graph
 diffs are the comparison primitive the Phase 22 regression engine
 will build on (new/removed endpoints, permission changes).
 """
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 
 def diff_snapshots(before, after) -> Dict[str, Any]:

@@ -4,7 +4,7 @@ A developer needs a curl; a triage team needs *why it matters*,
 numbered repro steps, and what was checked to rule out false
 positives.
 """
-from typing import List, Optional
+from typing import List
 from ..models import Finding
 
 _IMPACT = {
@@ -136,8 +136,8 @@ def build_repro_steps(f: Finding) -> List[str]:
             f"Request {url} with {param}=<interactsh-token>.oast.pro.",
             f"Observe the out-of-band callback arrive at {cb} "
             f"(DNS/HTTP interaction recorded by Interactsh).",
-            f"Repeat with the same token to rule out one-off noise "
-            f"(consistent callback on repeated requests).",
+            "Repeat with the same token to rule out one-off noise "
+            "(consistent callback on repeated requests).",
             "Note: no in-band response change is required — the "
             "callback itself is the proof.",
         ]

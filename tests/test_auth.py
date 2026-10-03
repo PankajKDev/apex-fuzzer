@@ -17,7 +17,7 @@ from apex_fuzzer.auth.sessions import (
     AuthSession, SessionStore, from_browser_session)
 from apex_fuzzer.auth.jwt import parse_jwt, find_jwts
 from apex_fuzzer.auth.oauth import (
-    pkce_pair, OAuthFlow, new_pkce_flow, find_token_leaks)
+    pkce_pair, new_pkce_flow, find_token_leaks)
 from apex_fuzzer.auth.oidc import (
     check_issuer, NonceTracker, parse_id_token, fetch_discovery)
 from apex_fuzzer.auth.workflows import (
@@ -310,7 +310,6 @@ def test_build_workflow_masks_password():
 
 
 def test_mfa_checkpoint_roundtrip(tmp_path):
-    from apex_fuzzer.auth.workflows import MfaCheckpoint
     cp = MfaCheckpoint(identity="a", url="https://t.com/mfa")
     p = cp.save(tmp_path / "mfa_a.json")
     assert MfaCheckpoint.from_dict(json.loads(p.read_text())).url == \
@@ -422,7 +421,6 @@ def test_attempt_still_logged_out():
                       post_html='<input name="password" type="password">')
     # stays on a password-bearing page → failed, not ok
     page.url = "https://t.com/login"
-    orig_click = page.click
 
     def click_no_nav(selector, timeout=None):
         pass  # submit does nothing

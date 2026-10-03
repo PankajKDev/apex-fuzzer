@@ -115,7 +115,6 @@ def link_crud_from_endpoints(tracker: "ResourceTracker", resources,
     endpoint parameters (method implies the action). Shared by
     workflow discovery and resource intel — one rule, one place.
     Returns the number of links created."""
-    from ..application.resources import _guess_type
     made = 0
     for res in resources or []:
         if isinstance(res, dict):

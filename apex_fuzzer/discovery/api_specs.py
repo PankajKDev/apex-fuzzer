@@ -1,7 +1,7 @@
 """OpenAPI / Swagger spec discovery (spec §6, §11)."""
 from __future__ import annotations
 import json
-from urllib.parse import urljoin, urlparse
+from urllib.parse import urljoin
 from typing import List, Dict, Optional
 from ..logging_setup import get_logger
 

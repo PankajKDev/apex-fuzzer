@@ -7,7 +7,7 @@ a broken prerequisite is data for mutation testing, not a crash.
 Scope and budgets gate every request; budget exhaustion aborts with
 the steps completed so far.
 """
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List
 from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
 from ..budgets import BudgetExceeded
 from ..logging_setup import get_logger

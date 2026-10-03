@@ -80,7 +80,6 @@ def harvest_ids(http, endpoint, identities, timeout: int = 10,
     later swap comparison.
     """
     from ..validation.differential import normalize_response
-    from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
     out: List[HarvestedId] = []
     seen = set()
     for ident in identities or []:

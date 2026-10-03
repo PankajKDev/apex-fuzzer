@@ -172,10 +172,29 @@ class AIConfig:
     ollama_host: str = "http://localhost:11434"
     ollama_model: str = "llama3.1"
     ollama_timeout: int = 180
+    # provider-scoped blocks (M3.2) take precedence over the legacy
+    # flat keys above, which keep working with a deprecation note
+    gemini: Dict[str, Any] = field(default_factory=dict)
+    ollama: Dict[str, Any] = field(default_factory=dict)
     # how many JS chunks get sent to the planner (spec §6)
     js_chunk_budget: int = 6
     # max hypotheses per test class fed back into deterministic testing
     max_hypothesis_tests: int = 5
+
+    def effective_gemini(self) -> Dict[str, Any]:
+        out = {"model": self.model, "timeout": 30,
+               "max_output_tokens": self.max_output_tokens}
+        out.update({k: v for k, v in (self.gemini or {}).items()
+                    if v is not None})
+        return out
+
+    def effective_ollama(self) -> Dict[str, Any]:
+        out = {"host": self.ollama_host, "model": self.ollama_model,
+               "timeout": self.ollama_timeout,
+               "max_output_tokens": self.max_output_tokens}
+        out.update({k: v for k, v in (self.ollama or {}).items()
+                    if v is not None})
+        return out
 
 
 @dataclass

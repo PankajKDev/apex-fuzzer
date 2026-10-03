@@ -1,15 +1,13 @@
 """Phase 1 (foundation) tests: application model, graph, invariants,
 coverage, budgets, checkpoint blobs, plugin interface, orchestrator
 wiring. No network access in any test."""
-import json
 
 import pytest
 
 from apex_fuzzer.models import (
-    Identity, Role, Tenant, Resource, TestResult, AttackChain,
+    Identity, Resource, TestResult, AttackChain,
     Finding, Hypothesis,
-    RESULT_CONFIRMED, RESULT_CANDIDATE, RESULT_NEGATIVE,
-    RESULT_INCONCLUSIVE, RESULT_BLOCKED, RESULT_SKIPPED, RESULT_ERROR,
+    RESULT_INCONCLUSIVE,
 )
 from apex_fuzzer.config import Config, AuthContext
 from apex_fuzzer.budgets import BudgetTracker, BudgetExceeded, BudgetUsage
@@ -18,7 +16,7 @@ from apex_fuzzer.application.application_model import (
     Application, build_from_scan)
 from apex_fuzzer.application.identities import from_auth_contexts
 from apex_fuzzer.application.resources import (
-    extract_resources, IDENTIFIER_NAMES)
+    extract_resources)
 from apex_fuzzer.application.workflows import Workflow, WorkflowStep
 from apex_fuzzer.graph.application_graph import (
     ApplicationGraph, build_from_application, NODE_TYPES, EDGE_TYPES, nid)
@@ -26,13 +24,10 @@ from apex_fuzzer.logic import invariants as inv_mod
 from apex_fuzzer.logic.invariants import (
     Invariant, evaluate, evaluate_all, default_invariants, register_check)
 from apex_fuzzer.reporting.coverage import (
-    CoverageTracker, KNOWN_CLASSES,
-    CONFIRMED, CANDIDATE, TESTED_NEGATIVE, INCONCLUSIVE, BLOCKED,
-    UNTESTABLE, NOT_TESTED, NOT_APPLICABLE)
+    CoverageTracker, KNOWN_CLASSES)
 from apex_fuzzer.plugins.base import (
     SecurityTest, TestTarget, TestContext, run_plugins,
     register, get, registered)
-import apex_fuzzer.plugins.adapters as adapters  # noqa: registers builtins
 from apex_fuzzer.models import Endpoint, Parameter
 
 
@@ -572,8 +567,6 @@ def test_differential_probe_records_negative_and_blocked():
 
     class Calm:
         def get(self, url, **kw):
-            from apex_fuzzer.validation.differential import (
-                normalize_response)
 
             class R:
                 status_code = 403

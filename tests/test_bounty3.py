@@ -8,7 +8,7 @@ from apex_fuzzer.authorization.matrix import (
     AuthorizationMatrix, AuthorizationObservation, same_object,
     evaluate_cell, describe_cell)
 from apex_fuzzer.authorization.access_tests import (
-    swap_ids, sweep_methods, SwapResult)
+    swap_ids, sweep_methods)
 from apex_fuzzer.validation.second_order import (
     make_canary, classify_context, inject_canary, find_renders,
     INERT_TAG)
@@ -539,7 +539,6 @@ def test_validate_runs_authz_and_second_order_steps():
     from apex_fuzzer.reporting.coverage import CoverageTracker
     from apex_fuzzer.budgets import BudgetTracker
     from apex_fuzzer.validation.evidence import EvidenceStore
-    from apex_fuzzer.models import Identity
 
     store = {}
 

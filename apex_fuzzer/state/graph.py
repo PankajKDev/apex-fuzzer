@@ -6,7 +6,7 @@ Static structure comes from build_from_application; these functions
 add what only testing can observe — who accessed what, how, and what
 changed as a result.
 """
-from typing import Any, Dict, List, Optional
+from typing import List, Optional
 from ..graph.application_graph import ApplicationGraph, nid
 from ..logging_setup import get_logger
 

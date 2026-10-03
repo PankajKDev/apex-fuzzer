@@ -16,7 +16,7 @@ Prerequisite tokens (strings in ``prerequisites``):
 """
 import time
 from abc import ABC, abstractmethod
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 from ..models import TestResult, RESULT_SKIPPED
 from ..logging_setup import get_logger
 

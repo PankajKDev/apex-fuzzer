@@ -4,7 +4,7 @@ Which HTTP methods were actually tested where, with what outcome —
 and which configured methods never got a probe (undocumented-action
 surface for follow-up). Built from extended cells, not new requests.
 """
-from typing import Any, Dict, List
+from typing import Any, Dict
 
 
 def action_coverage(cells, endpoints=None,

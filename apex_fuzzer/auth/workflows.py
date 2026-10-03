@@ -14,12 +14,12 @@ import os
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Tuple
 from ..browser.workflows import BrowserWorkflow
-from ..browser.sessions import (SessionManager, looks_logged_out)
+from ..browser.sessions import (looks_logged_out)
 from ..browser.storage import StorageCapture
 from ..logging_setup import get_logger
-from .sessions import AuthSession, from_browser_session
+from .sessions import from_browser_session
 
 log = get_logger("auth-login")
 

@@ -14,7 +14,7 @@ import sys
 import threading
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Dict, List
 from .impact import (ModuleState, max_level, MODULE_LEVELS)
 from .authorization import Authorization
 from ..logging_setup import get_logger
@@ -136,6 +136,8 @@ def dry_run_plan(target: str, cfg, profile,
     if not scope_cfg.allowed_domains:
         scope_cfg.allowed_domains = [host]
     scope = Scope(scope_cfg)
+    in_scope = scope.is_in_scope(
+        target if "://" in target else f"https://{target}")
     states = resolve_modules(cfg, profile)
     level = max_level(states)
     strict = bool(getattr(cfg.safety, "strict", False))
@@ -184,6 +186,7 @@ def dry_run_plan(target: str, cfg, profile,
     total = sum(p.total for p in plans)
     fit, fit_reasons = check_fit(cfg, total)
     return {"target": target, "host": host, "strict": strict,
+            "target_in_scope": in_scope,
             "modules": [{"name": s.name, "level": s.level,
                          "enabled": s.enabled, "reason": s.reason}
                         for s in states],
@@ -220,6 +223,9 @@ def render_plan_text(plan: Dict) -> str:
     lines = [f"Preflight plan for {plan['target']} "
              f"(strict={'on' if plan['strict'] else 'off'}, "
              f"max impact: {plan['max_impact']})"]
+    if not plan.get("target_in_scope", True):
+        lines.append("  WARNING: target is outside the configured scope "
+                     "— nothing would run")
     for m in plan["modules"]:
         mark = "ON " if m["enabled"] else "off"
         lines.append(f"  [{mark}] {m['name']:<18} {m['level']:<10} "

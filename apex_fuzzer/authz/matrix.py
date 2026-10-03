@@ -8,7 +8,7 @@ confirmed, tested_negative, inconclusive, blocked, not_tested,
 untestable) so no second status language exists. Display helpers
 render the Phase 7 names (negative/tested).
 """
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional
 from ..logging_setup import get_logger
 
 log = get_logger("authz-matrix")

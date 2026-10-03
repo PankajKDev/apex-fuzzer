@@ -110,7 +110,53 @@ def doctor():
         log.warning("%d tools missing — run --update", missing)
     else:
         log.info("all tools present")
-    sys.exit(0 if missing == 0 else 1)
+    # config + credentials + module prerequisites (no network)
+    problems = doctor_config()
+    for p in problems:
+        log.warning("config: %s", p)
+    sys.exit(0 if missing == 0 and not problems else 1)
+
+
+def doctor_config(cfg=None) -> list:
+    """Validate config, credentials presence, and module
+    prerequisites without sending any request. Returns problems."""
+    import os
+    problems = []
+    try:
+        cfg = cfg or Config.load("config.yaml")
+    except Exception as e:
+        return [f"config.yaml unreadable: {e}"]
+    if cfg.ai.enabled:
+        if cfg.ai.provider == "gemini" and \
+                not os.environ.get("GEMINI_API_KEY"):
+            problems.append("ai.enabled with provider gemini but "
+                            "GEMINI_API_KEY is empty")
+        if cfg.ai.provider not in ("gemini", "ollama"):
+            problems.append(f"unknown ai.provider "
+                            f"'{cfg.ai.provider}'")
+    if (cfg.race.enabled or cfg.business.enabled
+            or cfg.validation.second_order
+            or cfg.authorization.enabled) and not cfg.safety.strict:
+        problems.append("stateful modules enabled without strict "
+                        "mode — add safety.strict or --strict for "
+                        "controlled targets")
+    if cfg.auth.login.enabled and not cfg.browser.enabled:
+        problems.append("auth.login.enabled but browser discovery is "
+                        "off — login needs Chromium "
+                        "(pip install 'apex-fuzzer[browser]')")
+    empty_pw = [i.name for i in cfg.auth.login.identities
+                if not os.environ.get(i.password_env or "", "")]
+    if cfg.auth.login.enabled and empty_pw:
+        problems.append("login identities without resolvable "
+                        f"passwords: {', '.join(empty_pw)}")
+    try:
+        Path("output").mkdir(parents=True, exist_ok=True)
+        probe = Path("output") / ".doctor-write-test"
+        probe.write_text("ok")
+        probe.unlink()
+    except Exception as e:
+        problems.append(f"output dir not writable: {e}")
+    return problems
 
 
 def update():

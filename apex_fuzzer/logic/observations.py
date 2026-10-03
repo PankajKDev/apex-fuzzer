@@ -7,9 +7,8 @@ observation dicts the checks consume. Authz-matrix swap matches also
 get their invariant evaluation attached as finding provenance
 (corroboration, never duplicate findings).
 """
-from typing import Any, Dict, List, Tuple
-from .invariants import (Invariant, InvariantResult, evaluate,
-                         default_invariants)
+from typing import Any, Dict, List
+from .invariants import (Invariant, InvariantResult, default_invariants)
 from ..logging_setup import get_logger
 
 log = get_logger("observations")

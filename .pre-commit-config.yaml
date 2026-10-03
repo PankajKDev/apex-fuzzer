@@ -1,0 +1,18 @@
+repos:
+  - repo: https://github.com/astral-sh/ruff-pre-commit
+    rev: v0.16.10
+    hooks:
+      - id: ruff
+        args: [--select, F,E9]
+        # NOTE: no ruff-format hook on purpose — the codebase follows
+        # its own layout; formatting is not gated (see pyproject).
+  - repo: https://github.com/pre-commit/mirrors-mypy
+    rev: v2.4.0
+    hooks:
+      - id: mypy
+        files: ^apex_fuzzer/(safety/|verify/|budgets\.py|ai/)
+        args: [--python-version, "3.10", --ignore-missing-imports]
+  - repo: https://github.com/gitleaks/gitleaks
+    rev: v8.18.0
+    hooks:
+      - id: gitleaks

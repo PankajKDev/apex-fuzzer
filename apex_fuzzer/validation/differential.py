@@ -16,8 +16,7 @@ import hashlib
 import json
 import re
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
-from ..models import Endpoint
+from typing import Any, Dict, List, Tuple
 from ..budgets import BudgetExceeded
 from ..logging_setup import get_logger
 

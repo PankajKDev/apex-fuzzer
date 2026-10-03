@@ -137,13 +137,11 @@ class MutationEngine:
         baseline_ms = None
         if baseline is not None:
             baseline_ms = baseline.get("elapsed_ms")
-        last_text = ""
         for payload in mutations_for(self.waf, "sqli")[:self.max_payloads]:
             r = self._fetch(_inject(candidate.endpoint_url, param, payload))
             if r is None:
                 continue
             text = r.get("text") or ""
-            last_text = text
             if sqli_error_signal(text):
                 return ValidationOutcome(
                     status=ValidationStatus.STRONG_CANDIDATE.value,

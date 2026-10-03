@@ -5,7 +5,7 @@ adds the Permission model and the explicit relationship queries the
 authorization matrix consumes (identity → roles → permissions,
 tenant scoping). No duplicate identity types.
 """
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 from ..models import Identity, Role, Tenant
 

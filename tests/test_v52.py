@@ -5,8 +5,7 @@ import time
 
 from apex_fuzzer.discovery import param_miner, technologies as tech_mod
 from apex_fuzzer.discovery.javascript import chunk_js, parse_source_map
-from apex_fuzzer.discovery import parameters as param_mod
-from apex_fuzzer.models import Parameter, Endpoint, Finding, Hypothesis
+from apex_fuzzer.models import Parameter, Hypothesis
 from apex_fuzzer.validation import differential as diff_mod
 from apex_fuzzer.validation import mutate as mut_mod
 from apex_fuzzer.validation import oast as oast_mod

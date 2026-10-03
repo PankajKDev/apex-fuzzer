@@ -5,7 +5,7 @@ action log so interaction sequences can be replayed (login flows in
 workflows.py). Every primitive is scope-checked by the caller.
 """
 import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 from ..logging_setup import get_logger
 

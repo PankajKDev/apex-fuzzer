@@ -4,7 +4,6 @@ Multi-source ID extractors, lifecycle-aware enrichment, shared-ID
 graph links, CRUD helper reuse, and the offline orchestrator intel
 step. No network in any test.
 """
-import json
 
 from apex_fuzzer.application.resources import (
     discover_ids_from_html, discover_ids_from_headers,
@@ -13,11 +12,10 @@ from apex_fuzzer.application.resources import (
 from apex_fuzzer.state.resources import (
     ResourceTracker, link_crud_from_endpoints)
 from apex_fuzzer.authz.resources import enrich_resource_records
-from apex_fuzzer.authz.graph import link_shared_identifiers
 from apex_fuzzer.authorization.harvest import HarvestedId
 from apex_fuzzer.authorization.matrix import AuthorizationObservation
 from apex_fuzzer.graph.application_graph import ApplicationGraph
-from apex_fuzzer.models import Endpoint, Parameter, Identity
+from apex_fuzzer.models import Endpoint, Parameter
 
 
 def _ep(url, method="GET", qparams=None):

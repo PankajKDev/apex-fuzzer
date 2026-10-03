@@ -13,7 +13,7 @@ from typing import Optional, Tuple
 from .base import (SecurityTest, TestTarget, TestContext, register)
 from ..models import (TestResult, RESULT_CONFIRMED, RESULT_CANDIDATE,
                       RESULT_NEGATIVE, RESULT_INCONCLUSIVE,
-                      ValidationStatus, Confidence)
+                      ValidationStatus)
 from ..validation.base import Candidate
 from ..validation.mutate import MutationEngine
 from ..validation.sqli import SqliValidator

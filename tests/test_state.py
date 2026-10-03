@@ -5,7 +5,6 @@ resources and lifecycles — plus orchestrator integration proving
 matrix observations land in the graph with snapshots, transitions,
 and resume-aware change detection. No network in any test.
 """
-import json
 
 from apex_fuzzer.graph.application_graph import (
     ApplicationGraph, NODE_TYPES, EDGE_TYPES, nid)
@@ -231,7 +230,6 @@ def test_lifecycle_rules():
     assert check_transition(
         DEFAULT_LIFECYCLES["invitation"], "sent", "accepted")[0] == \
         "allowed"
-    from apex_fuzzer.state.lifecycle import Lifecycle
     assert Lifecycle.from_dict(
         DEFAULT_LIFECYCLES["order"].to_dict()).states[0] == "draft"
 
@@ -260,7 +258,6 @@ def _matrix_http(mode):
 
 
 def _run_matrix(out_dir, http, identities, app_graph=None):
-    import tempfile
     from pathlib import Path
     from apex_fuzzer.orchestrator import Orchestrator
     from apex_fuzzer.config import Config

@@ -1,11 +1,51 @@
 """AI hypothesis planner — structured in/out, never declares vulns."""
 import json
 import os
-from typing import List, Dict
+import time
+from typing import List, Dict, Tuple, Any
 from ..models import Hypothesis
 from ..logging_setup import get_logger
 
 log = get_logger("ai")
+
+# error classes for deterministic, non-crashing behavior (M3.1)
+ERR_AUTH = "auth"
+ERR_TIMEOUT = "timeout"
+ERR_CONNECTION = "connection"
+ERR_MALFORMED = "malformed"
+ERR_RATE_LIMIT = "rate_limit"
+ERR_SERVER = "server"
+ERR_UNKNOWN = "unknown"
+
+_RETRYABLE_STATUS = {429, 502, 503, 504}
+_MAX_ATTEMPTS = 3
+_LOG_BODY_LIMIT = 300
+
+
+def _truncate(text: Any, limit: int = _LOG_BODY_LIMIT) -> str:
+    text = str(text or "")
+    return text if len(text) <= limit else text[:limit] + "…"
+
+
+def classify_http_error(status: int | None = None,
+                        exc: Exception | None = None) -> str:
+    """Map transport/HTTP failures to a stable error class."""
+    import requests as _rq
+    if status is not None:
+        if status in (401, 403):
+            return ERR_AUTH
+        if status == 404:
+            return ERR_MALFORMED  # wrong URL/model name, not auth
+        if status == 429:
+            return ERR_RATE_LIMIT
+        if status is not None and status >= 500:
+            return ERR_SERVER
+        return ERR_UNKNOWN
+    if isinstance(exc, _rq.exceptions.Timeout):
+        return ERR_TIMEOUT
+    if isinstance(exc, _rq.exceptions.ConnectionError):
+        return ERR_CONNECTION
+    return ERR_UNKNOWN
 
 
 class AIPlanner:
@@ -14,37 +54,116 @@ class AIPlanner:
         self.key = os.environ.get("GEMINI_API_KEY")
         self.provider = (getattr(cfg.ai, "provider", "gemini")
                          or "gemini").lower()
-        host = (getattr(cfg.ai, "ollama_host", "") or
-                os.environ.get("OLLAMA_HOST", "") or
-                "http://localhost:11434")
-        self.ollama_host = host.rstrip("/")
+        # precedence: explicit ai.ollama.host block > OLLAMA_HOST
+        # env > legacy ai.ollama_host > localhost default
+        block_host = str((cfg.ai.ollama or {}).get("host") or "")
+        host = block_host or os.environ.get("OLLAMA_HOST", "") or \
+            getattr(cfg.ai, "ollama_host", "") or \
+            "http://localhost:11434"
+        self.ollama_host = str(host).rstrip("/")
 
     def available(self) -> bool:
         if not self.cfg.ai.enabled:
             return False
         if self.provider == "ollama":
             return self._ollama_ready()
-        return bool(self.key)
+        if self.provider == "gemini":
+            return bool(self.key)
+        return False
 
-    def _ollama_ready(self) -> bool:
-        """True when the server answers and the model is pulled."""
+    def validate_config(self) -> List[str]:
+        """Startup validation: problems that disable the AI stage,
+        each with precise remediation (M3.2). Empty = usable."""
+        problems: List[str] = []
+        if not self.cfg.ai.enabled:
+            return ["ai.enabled is false"]
+        if self.provider not in ("gemini", "ollama"):
+            return [f"unknown ai.provider '{self.provider}' "
+                    f"(want gemini|ollama)"]
+        if self.provider == "gemini" and not self.key:
+            problems.append(
+                "GEMINI_API_KEY is empty — export it or switch to "
+                "ai.provider: ollama")
+        if self.provider == "ollama":
+            ok, reason = self._ollama_status()
+            if not ok:
+                problems.append(reason)
+        return problems
+
+    def _ollama_status(self) -> Tuple[bool, str]:
+        """(reachable-and-loaded, remediation message)."""
         import requests
         try:
             r = requests.get(f"{self.ollama_host}/api/tags", timeout=5)
+            r.raise_for_status()
             models = [m.get("name", "") for m in
                       r.json().get("models", [])]
         except Exception as e:
-            log.warning("Ollama not reachable at %s: %s "
-                        "(is `ollama serve` running?)",
-                        self.ollama_host, e)
-            return False
-        want = self.cfg.ai.ollama_model
+            kind = classify_http_error(
+                status=getattr(getattr(e, "response", None),
+                               "status_code", None),
+                exc=e)
+            return False, (
+                f"Ollama not reachable at {self.ollama_host} "
+                f"({kind}: {_truncate(e, 120)}). Is `ollama serve` "
+                f"running?")
+        want = self.cfg.ai.effective_ollama().get("model",
+                                                  "llama3.1")
         if not any(m == want or m.startswith(want + ":") for m in models):
-            log.warning("Ollama model '%s' not loaded (have: %s). "
-                        "Run: ollama pull %s",
-                        want, ", ".join(models) or "none", want)
-            return False
-        return True
+            return False, (
+                f"Ollama model '{want}' not loaded (have: "
+                f"{', '.join(models) or 'none'}). Run: ollama pull "
+                f"{want}")
+        return True, ""
+
+    def _ollama_ready(self) -> bool:
+        """True when the server answers and the model is pulled."""
+        ok, reason = self._ollama_status()
+        if not ok:
+            log.warning("%s", reason)
+        return ok
+
+    def _post_json(self, url: str, payload: dict,
+                   timeout: int) -> Tuple[bool, dict, str]:
+        """POST with raise_for_status, bounded logs, and retries for
+        transient statuses only (429/502/503/504). Returns
+        (ok, data, error_class). Never raises; never retries timeouts
+        or connection failures (fail fast, especially for slow local
+        inference and stateful-adjacent callers)."""
+        import requests
+        last_kind = ERR_UNKNOWN
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
+            try:
+                r = requests.post(url, json=payload, timeout=timeout)
+                r.raise_for_status()
+            except requests.exceptions.HTTPError as e:
+                status = getattr(getattr(e, "response", None),
+                                 "status_code", None)
+                last_kind = classify_http_error(status=status)
+                if status in _RETRYABLE_STATUS and \
+                        attempt < _MAX_ATTEMPTS:
+                    log.warning("AI HTTP %s (attempt %d/%d): backing "
+                                "off", status, attempt, _MAX_ATTEMPTS)
+                    time.sleep(attempt)
+                    continue
+                log.warning("AI HTTP error (%s): %s", last_kind,
+                            _truncate(e))
+                return False, {}, last_kind
+            except Exception as e:
+                last_kind = classify_http_error(exc=e)
+                log.warning("AI call failed (%s): %s", last_kind,
+                            _truncate(e))
+                return False, {}, last_kind
+            try:
+                data = r.json()
+            except Exception:
+                log.warning("AI returned non-JSON output")
+                return False, {}, ERR_MALFORMED
+            if not isinstance(data, dict):
+                log.warning("AI returned non-object JSON")
+                return False, {}, ERR_MALFORMED
+            return True, data, ""
+        return False, {}, last_kind
 
     def _call(self, prompt: str, timeout: int = 30) -> str:
         if self.provider == "ollama":
@@ -52,56 +171,51 @@ class AIPlanner:
         return self._call_gemini(prompt, timeout)
 
     def _call_gemini(self, prompt: str, timeout: int = 30) -> str:
-        import requests
+        eff = self.cfg.ai.effective_gemini()
+        ok, data, kind = self._post_json(
+            f"https://generativelanguage.googleapis.com/v1beta/"
+            f"models/{eff.get('model')}:generateContent?key={self.key}",
+            {"contents": [{"parts": [{"text": prompt}]}],
+             "generationConfig": {
+                 "maxOutputTokens": eff.get("max_output_tokens", 8192),
+                 "responseMimeType": "application/json"}},
+            timeout=timeout)
+        if not ok:
+            return ""
+        if "error" in data:
+            log.warning("AI error: %s",
+                        _truncate((data["error"] or {}).get("message")
+                                  if isinstance(data["error"], dict)
+                                  else data["error"]))
+            return ""
+        cands = data.get("candidates") or []
+        if not cands:
+            return ""
         try:
-            r = requests.post(
-                f"https://generativelanguage.googleapis.com/v1beta/"
-                f"models/{self.cfg.ai.model}:generateContent?key={self.key}",
-                json={"contents": [{"parts": [{"text": prompt}]}],
-                      "generationConfig": {
-                          "maxOutputTokens": self.cfg.ai.max_output_tokens,
-                          "responseMimeType": "application/json"}},
-                timeout=timeout)
-            data = r.json()
-            if "error" in data:
-                log.warning("AI error: %s", data["error"].get("message"))
-                return ""
-            cands = data.get("candidates") or []
-            if not cands:
-                return ""
             return cands[0]["content"]["parts"][0]["text"]
-        except Exception as e:
-            log.warning("AI call failed: %s", e)
+        except (KeyError, IndexError, TypeError):
+            log.warning("AI response missing candidates content")
             return ""
 
     def _call_ollama(self, prompt: str, timeout: int = 30) -> str:
         """Local inference via Ollama. `format: json` constrains the
         model to valid JSON, which feeds straight into _parse."""
-        import requests
-        timeout = max(timeout, self.cfg.ai.ollama_timeout)
-        model = self.cfg.ai.ollama_model
-        try:
-            r = requests.post(
-                f"{self.ollama_host}/api/generate",
-                json={"model": model, "prompt": prompt,
-                      "stream": False, "format": "json",
-                      "options": {"num_predict":
-                                  self.cfg.ai.max_output_tokens}},
-                timeout=timeout)
-        except Exception as e:
-            log.warning("Ollama call failed at %s: %s",
-                        self.ollama_host, e)
+        eff = self.cfg.ai.effective_ollama()
+        timeout = max(timeout, int(eff.get("timeout", 180) or 180))
+        model = eff.get("model", "llama3.1")
+        ok, data, kind = self._post_json(
+            f"{self.ollama_host}/api/generate",
+            {"model": model, "prompt": prompt,
+             "stream": False, "format": "json",
+             "options": {"num_predict":
+                         eff.get("max_output_tokens", 8192)}},
+            timeout=timeout)
+        if not ok:
             return ""
-        try:
-            data = r.json()
-        except Exception:
-            log.warning("Ollama returned non-JSON output")
+        if data.get("error"):
+            log.warning("Ollama error: %s", _truncate(data["error"]))
             return ""
-        if isinstance(data, dict) and data.get("error"):
-            log.warning("Ollama error: %s", data["error"])
-            return ""
-        text = (data.get("response") or "") \
-            if isinstance(data, dict) else ""
+        text = data.get("response") or ""
         if not text:
             log.warning("Ollama returned an empty response "
                         "(model '%s' loaded?)", model)
@@ -183,7 +297,8 @@ class AIPlanner:
         return "\n".join(parts)[:total]
 
     def _chunk_endpoints(self, endpoints: List[Dict]) -> List[Dict]:
-        seen, out = set(), []
+        seen: set = set()
+        out: List[Dict] = []
         for e in endpoints:
             key = (e.get("host"), e.get("endpoint_type"))
             if key in seen and len(out) > 200:

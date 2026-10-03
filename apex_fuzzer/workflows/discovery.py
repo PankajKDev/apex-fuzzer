@@ -9,7 +9,6 @@ that literally happened; everything else is inferred.
 import re
 from typing import Any, Dict, List
 from .model import Flow, FlowStep
-from ..models import Parameter
 from ..logging_setup import get_logger
 
 log = get_logger("workflows-discovery")

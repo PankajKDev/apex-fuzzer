@@ -3,7 +3,7 @@ matrix views, graph sync. No network in any test."""
 import json
 
 from apex_fuzzer.authz.compare import (
-    is_generic_response, compare_access, DEFAULT_OWNERSHIP_FIELDS)
+    is_generic_response, compare_access)
 from apex_fuzzer.authz.matrix import (
     ExtendedMatrix, AuthzCell, build_extended, display_status)
 from apex_fuzzer.authz.roles import (
@@ -274,7 +274,6 @@ def test_graph_sync_edges():
     h = HarvestedId(endpoint_url="https://t.com/a?id=1",
                     normalized_url="https://t.com/a", param="id",
                     value="1", owner="a", owner_tenant="t1")
-    from apex_fuzzer.authz.graph import sync_extended
     from apex_fuzzer.graph.application_graph import nid
     assert sync_extended(g, [h]) == 2  # OWNS + CONTAINS (EXPOSED_BY
     # needs a pre-existing endpoint node, absent here by design)

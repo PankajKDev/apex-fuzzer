@@ -1087,6 +1087,31 @@ below every cap.
 - Reports carry an authorization metadata block (reference identifiers
   only — never document content, never secrets).
 
+## Milestone 3 — reliability and CI
+
+- **Provider hardening** (`ai/planner.py`): `raise_for_status()`
+  before every JSON parse, errors classified (auth / timeout /
+  connection / malformed / rate-limit / server / unknown) with
+  bodies truncated to 300 chars in logs, retries for transient
+  HTTP statuses only (429/502/503/504, max 3 attempts) — timeouts
+  and connection failures fail fast, and stateful target requests
+  are never auto-retried by this path (it only calls AI APIs).
+- **Provider config**: `ai.gemini.*` / `ai.ollama.*` blocks override
+  the legacy flat keys (`model`, `ollama_host`, …), which keep
+  working. Unknown providers fail clearly at startup validation
+  (`AIPlanner.validate_config()`), never mid-scan.
+- **CI** (`.github/workflows/ci.yml`): ruff (F/E9 subset), mypy on
+  the gated scope (`safety/`, `verify/`, `budgets.py`, `ai/` —
+  ratchets outward), pytest matrix (3.10/3.12) with a 70% coverage
+  floor (measured baseline 73%), pip-audit, gitleaks on full
+  history, wheel/sdist build + clean install check.
+- **Local gates**: `make test|lint|typecheck|security|build|ci`,
+  `.pre-commit-config.yaml` (ruff, mypy-scoped, gitleaks),
+  `requirements.lock` (`make lock`), `--doctor` now also validates
+  config parsing, credentials presence, module prerequisites
+  (strict-without-auth, login-without-browser, missing login
+  passwords), and output-dir writability — still zero network.
+
 ## Plugin architecture (Phase 1)
 
 `plugins/base.py` defines `SecurityTest` (`name`,
@@ -1146,10 +1171,11 @@ self-DoS and the false negatives that timeouts masquerade as.
 ## Running the tests
 
 ```bash
-.venv/bin/python -m pytest tests/ -q
+.venv/bin/python -m pytest tests/ -q     # or: make test
+make ci                                  # lint + types + tests + security + build
 ```
 
-337 tests: URL normalization, endpoint classification, parameter extraction
+347 tests: URL normalization, endpoint classification, parameter extraction
 (URL/HTML/JS), scope rules, secret redaction, plus v5.2 coverage — Arjun JSON
 parsing, WAF fingerprinting, JS-bundle tech gating, structural JS chunking,
 source-map parsing, differential verdicts (BOLA / broken-access / healthy /
@@ -1215,6 +1241,10 @@ apex_fuzzer/
                          sessions · recordable workflows (agent Phase 1)
   authz/                 ownership compare · extended matrix · role/
                          tenant/resource/action views · graph sync (P7)
+  safety/                impact levels · authorization gates ·
+                         preflight/costs/dry-run/stop controls (M1)
+  verify/                readback/idempotency/token verifiers +
+                         JSONPath assertions (M2.4)
   plugins/
     base.py              SecurityTest interface, registry, run_plugins (Phase 1)
     adapters.py          sqli/xss/ssrf adapters over existing validators
@@ -1258,4 +1288,8 @@ tests/                   pytest suite (test_v52.py: 5.2 additions, test_phase1.p
                          (test_workflows.py: 19 discovery/replay/mutation/dependency tests)
                          (test_resources.py: 12 multi-source intel/enrichment/link tests)
 setup1.sh … setup8.sh    project scaffolding scripts
+Makefile                 test/lint/typecheck/security/build/ci targets
+.pre-commit-config.yaml  ruff + scoped mypy + gitleaks hooks
+requirements.lock        pinned dev+runtime deps (`make lock`)
+.github/workflows/ci.yml  lint/types/tests+coverage/audit/secrets/build
 ```

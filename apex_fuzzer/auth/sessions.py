@@ -148,7 +148,6 @@ class SessionStore:
         """OAuth refresh-token rotation. Returns True on new tokens."""
         if not session.can_refresh():
             return False
-        import urllib.parse as _up
         body = {"grant_type": "refresh_token",
                 "refresh_token": session.refresh_token,
                 "client_id": session.client_id}

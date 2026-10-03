@@ -271,9 +271,6 @@ class AttackChain:
         known = {k: v for k, v in d.items() if k in cls.__dataclass_fields__}
         return cls(**known)
 
-    def to_dict(self) -> Dict[str, Any]:
-        return asdict(self)
-
 
 def write_jsonl(path, items):
     with open(path, "w") as f:
@@ -283,7 +280,7 @@ def write_jsonl(path, items):
 
 
 def read_jsonl(path) -> List[dict]:
-    out = []
+    out: List[dict] = []
     if not path.exists():
         return out
     with open(path) as f:

@@ -218,7 +218,6 @@ def run_hypothesis_templates(runner: "NucleiRunner",
     ``hypotheses`` may be Hypothesis objects or dicts (``endpoint``,
     ``test_class``, ``hypothesis``, ``reason``).
     """
-    from urllib.parse import urlparse
     tdir = runner.output_dir / "ai-templates"
     tdir.mkdir(parents=True, exist_ok=True)
     written: List[str] = []
@@ -228,7 +227,6 @@ def run_hypothesis_templates(runner: "NucleiRunner",
                   (h.get("endpoint") if isinstance(h, dict) else None) or "")
         if not url or not url.startswith("http"):
             continue
-        host = (urlparse(url).hostname or "").lower()
         if not runner.cfg.scope.is_in_scope(url):
             continue
         tpl = generate_template_for_hypothesis(h, url)

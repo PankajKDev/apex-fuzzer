@@ -422,7 +422,6 @@ def test_swap_negative_coverage_recorded():
     from apex_fuzzer.reporting.coverage import CoverageTracker
     from apex_fuzzer.budgets import BudgetTracker
     from apex_fuzzer.validation.evidence import EvidenceStore
-    from apex_fuzzer.validation.differential import DifferentialTester
 
     class H:
         def get(self, url, **kw):

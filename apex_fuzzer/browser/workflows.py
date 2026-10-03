@@ -5,8 +5,7 @@ can be recorded once — e.g. a login sequence — and replayed per
 identity to mint fresh sessions. Keeps browser automation
 declarative and replayable instead of buried in ad-hoc scripts.
 """
-import time
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from typing import Any, Dict, List, Optional
 from ..logging_setup import get_logger
 from .actions import ActionLog
@@ -49,7 +48,6 @@ class BrowserWorkflow:
                ) -> List[Dict[str, Any]]:
         """Execute every step; returns per-step {ok, detail} (never
         raises — a failed login step is data, not a crash)."""
-        from .actions import fill_form, click
         results: List[Dict[str, Any]] = []
         for step in self.steps:
             ok, detail = self._run_step(page, step, log_actions)
