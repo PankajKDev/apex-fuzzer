@@ -45,6 +45,18 @@ business:
   enabled: false           # or --business-logic / deep/validation profiles
   max_endpoints: 10
   max_params: 3
+  # Optional readback assertions for user-known workflows. A passing
+  # check means the invariant held (effect absent); a failing check
+  # means the abuse persisted (verified effect).
+  # assertions:
+  #   - endpoint: "/api/cart/items"
+  #     parameter: "quantity"
+  #     method: POST
+  #     after_read: "/api/cart"
+  #     checks:
+  #       - jsonpath: "$.items[?(@.sku == 'SKU-1')].quantity"
+  #         rule: "gte"    # gte | lte | eq | ne | contains
+  #         value: 0
 # Race-condition engine. Off by default: synchronized bursts of
 # state-changing requests are the most aggressive test in the suite.
 race:
@@ -74,6 +86,23 @@ budgets:
   authz_tests_per_endpoint: 20
   browser_actions: 500
   ai_experiments: 50
+
+# Safety gates + execution controls (Milestone 1). Everything here
+# defaults to today's behavior. Strict mode fails closed for
+# stateful/burst/claiming modules BEFORE any network activity.
+safety:
+  strict: false                # or --strict
+  authorization_ref: ""        # or --auth-ref (e.g. ENG-SEC-2026-041)
+  approved_domains: []         # allowlist: exact + subdomains
+  approved_cidrs: []           # allowlist for literal-IP targets
+  valid_from: ""               # ISO-8601 UTC, empty = unbounded
+  valid_until: ""              # ISO-8601 UTC, empty = unbounded
+  allowed_modules: []          # e.g. [business_logic, race]
+  allow_state_change: false    # or --ack-state-change
+  max_requests: null           # global request cap (or --max-requests)
+  max_state_changes: null      # mutating-request cap
+  stop_on_candidate: false     # or --stop-on-candidate
+  cooldown_ms: 0               # delay between stateful probes
 
 # Interactsh out-of-band verification (spec §3)
 oast:

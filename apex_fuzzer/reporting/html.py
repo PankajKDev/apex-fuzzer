@@ -19,7 +19,8 @@ def render_html(output: Path, target: str, findings: List[Finding],
                 hypotheses: List[Dict], metrics: Dict,
                 min_severity: str = "info",
                 output_dir: Optional[Path] = None,
-                coverage: Optional[Dict] = None) -> None:
+                coverage: Optional[Dict] = None,
+                safety_info: Optional[Dict] = None) -> None:
     min_rank = MIN_RANK.get(min_severity, 0)
     findings = [f for f in findings
                 if MIN_RANK.get(f.severity, 4) >= min_rank]
@@ -41,6 +42,7 @@ def render_html(output: Path, target: str, findings: List[Finding],
         f"<p class='target'>Target: <b>{_h.escape(target)}</b></p>",
         _metrics_block(metrics),
         _coverage_block(coverage),
+        _safety_block(safety_info),
         _section("🟥 Confirmed", confirmed, output_dir),
         _section("🟧 Strong Candidates", strong, output_dir),
         _section("🟦 Informational & Untested", informational, output_dir),
@@ -93,6 +95,7 @@ def _metrics_block(m: Dict) -> str:
             ("Biz logic", m.get("business_logic_candidates")),
             ("Race", m.get("race_candidates")),
             ("Inv violated", m.get("invariants_violated")),
+            ("Verified fx", m.get("effects_verified")),
             ("Logins", m.get("logins_succeeded")),
             ("Graph", f"{m.get('graph_nodes', 0)}/"
                       f"{m.get('graph_edges', 0)}"),
@@ -141,6 +144,33 @@ def _coverage_block(coverage: Optional[Dict]) -> str:
                 f"for these classes means they were not tested — not "
                 f"that they are secure.</em></p>")
     return (f"<h2>📊 Coverage</h2><p>{chips}</p>{note}")
+
+
+def _safety_block(safety_info: Optional[Dict]) -> str:
+    """Authorization metadata for the run. Reference identifiers only —
+    never document content, never secrets (the model holds none)."""
+    if not safety_info:
+        return ""
+    auth = safety_info.get("authorization") or {}
+    rows = "".join(
+        f"<tr><td>{_h.escape(k)}</td><td>{_h.escape(str(v))}</td></tr>"
+        for k, v in [
+            ("strict mode",
+             "on" if safety_info.get("strict") else "off"),
+            ("max impact", safety_info.get("max_impact", "")),
+            ("authorization ref", auth.get("reference") or "—"),
+            ("gated modules",
+             ", ".join(safety_info.get("gated_modules") or []) or "—"),
+            ("validity",
+             f"{auth.get('valid_from') or '…'} → "
+             f"{auth.get('valid_until') or '…'}"),
+        ])
+    refused = ""
+    if safety_info.get("refusal"):
+        refused = "<p><em>Refused (this run did not execute): " + \
+            _h.escape("; ".join(safety_info["refusal"])) + "</em></p>"
+    return (f"<h2>🛡 Authorization &amp; Safety</h2>"
+            f"<table>{rows}</table>{refused}")
 
 
 def _evidence_links(f: Finding, output_dir: Optional[Path]) -> str:

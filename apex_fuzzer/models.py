@@ -2,7 +2,21 @@
 from dataclasses import dataclass, field, asdict
 from typing import List, Dict, Any, Optional
 from enum import Enum
+import hashlib
 import json
+
+
+def stable_finding_id(prefix: str, *parts: str) -> str:
+    """Deterministic finding ID (SHA-256, first 16 hex chars).
+
+    Replaces built-in hash(), whose randomization per process made IDs
+    unstable across runs — breaking resume dedup, evidence links, and
+    regression comparison. Only stable, non-volatile inputs belong in
+    parts: no timestamps, random IDs, or response bodies.
+    """
+    canonical = "\x1f".join(str(p) for p in parts)
+    digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
+    return f"{prefix}-{digest}"
 
 
 class EndpointType(str, Enum):

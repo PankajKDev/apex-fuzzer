@@ -73,6 +73,9 @@ class BusinessConfig:
     enabled: bool = False
     max_endpoints: int = 10
     max_params: int = 3
+    # user-supplied readback assertions (Terra M2.4); see
+    # verify/assertions.py for the schema
+    assertions: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass
@@ -83,6 +86,27 @@ class RaceConfig:
     concurrency: int = 10
     rounds: int = 3
     max_endpoints: int = 5
+
+
+@dataclass
+class SafetyConfig:
+    """Strict-mode gates + execution controls (Milestone 1).
+
+    Everything defaults to today's behavior (strict off, no caps).
+    бюджетов max_requests / max_state_changes use None = unlimited.
+    """
+    strict: bool = False
+    authorization_ref: str = ""
+    approved_domains: List[str] = field(default_factory=list)
+    approved_cidrs: List[str] = field(default_factory=list)
+    valid_from: str = ""
+    valid_until: str = ""
+    allowed_modules: List[str] = field(default_factory=list)
+    allow_state_change: bool = False
+    max_requests: Optional[int] = None
+    max_state_changes: Optional[int] = None
+    stop_on_candidate: bool = False
+    cooldown_ms: int = 0
 
 
 @dataclass
@@ -244,6 +268,7 @@ class Config:
         default_factory=AuthorizationConfig)
     business: BusinessConfig = field(default_factory=BusinessConfig)
     race: RaceConfig = field(default_factory=RaceConfig)
+    safety: SafetyConfig = field(default_factory=SafetyConfig)
     browser: BrowserConfig = field(default_factory=BrowserConfig)
     budgets: BudgetConfig = field(default_factory=BudgetConfig)
     oast: OastConfig = field(default_factory=OastConfig)
@@ -353,4 +378,18 @@ def apply_cli_overrides(cfg: Config, args) -> Config:
         cfg.browser.enabled = True
     if getattr(args, "no_browser", False):
         cfg.browser.enabled = False
+    if getattr(args, "strict", False):
+        cfg.safety.strict = True
+    if getattr(args, "auth_ref", None):
+        cfg.safety.authorization_ref = args.auth_ref
+    if getattr(args, "ack_state_change", False):
+        cfg.safety.allow_state_change = True
+    if getattr(args, "max_requests", None) is not None:
+        cfg.safety.max_requests = args.max_requests
+    if getattr(args, "max_state_changes", None) is not None:
+        cfg.safety.max_state_changes = args.max_state_changes
+    if getattr(args, "stop_on_candidate", False):
+        cfg.safety.stop_on_candidate = True
+    if getattr(args, "cooldown_ms", None) is not None:
+        cfg.safety.cooldown_ms = args.cooldown_ms
     return cfg
