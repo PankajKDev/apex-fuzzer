@@ -994,19 +994,38 @@ transitions automatically; the graph re-saves after validation with
 discovery (Phase 4), CAN_ACCESS from richer matrices (Phase 7), and
 chain edges (Phase 19) against this schema.
 
-## Security invariants (Phase 1)
+## Security invariants (Phase 1 + 6)
 
 `logic/invariants.py` evaluates named predicates over normalized
-observations. Built-ins (`default_invariants()`, all nine spec examples):
+observations. Built-ins (`default_invariants()`, twelve checks):
 cross-user read, unauthorized write, modify-deleted, self-promotion,
 negative quantity, unauthorized price change, refund-exceeds-payment,
-single-use token reuse, revert-completed. Custom checks register via
+single-use token reuse, revert-completed, plus deleted-access,
+expired-session, and recharge-after-refund. Custom checks register via
 `register_check(name, fn)`; `evaluate()` / `evaluate_all()` return
-`InvariantResult(violated, detail)`. Observation producers are wired
+`InvariantResult(violated, detail)`. Invariant `params` act as
+central scope filters (`resource`, `endpoint`, `actor`, `tenant`) —
+out-of-scope observations report the skip explicitly instead of
+silently passing. Observation producers are wired
 for swap matches (attached to findings as corroboration), business-logic
-mutations, and race outcomes (`logic/observations.py`); the Phase 3
-authorization matrix cells that lack an `authorized` signal and the
-Phase 5 workflow transitions will extend them.
+mutations, race outcomes (`logic/observations.py`), and matrix cells.
+
+`logic/invariant_engine.py` centralizes evaluation with a complete
+log (violations and holds), per-invariant summary, and persistence.
+`logic/invariant_discovery.py` mines holding rules from matrix
+observations — only with consistent enforcement evidence (≥2
+identities, ≥1 denial, no shared object); anything less emits
+nothing.
+
+### 8h. Invariant discovery (always on, zero network)
+
+After resource intel, discovered holdings are re-evaluated as a
+second opinion over the same observations: a firing holding with an
+existing finding in the mapped classes (BOLA/IDOR/authz/…) attaches
+as corroboration — never a duplicate; a firing holding with no such
+finding becomes a new `source: invariant` strong candidate with the
+mapped classes recorded as candidate coverage. Artifacts:
+`invariants.json` (discovered rules + engine summary).
 
 ## Coverage model (Phase 1)
 
@@ -1130,7 +1149,7 @@ self-DoS and the false negatives that timeouts masquerade as.
 .venv/bin/python -m pytest tests/ -q
 ```
 
-328 tests: URL normalization, endpoint classification, parameter extraction
+337 tests: URL normalization, endpoint classification, parameter extraction
 (URL/HTML/JS), scope rules, secret redaction, plus v5.2 coverage — Arjun JSON
 parsing, WAF fingerprinting, JS-bundle tech gating, structural JS chunking,
 source-map parsing, differential verdicts (BOLA / broken-access / healthy /
@@ -1184,7 +1203,9 @@ apex_fuzzer/
   graph/
     application_graph.py node/edge store, queries, JSON persistence (Phase 1)
   logic/
-    invariants.py        security invariant registry + built-ins (Phase 1)
+    invariants.py        12 checks + central scope filters (P1+P6)
+    invariant_engine.py  evaluation log, summary, persist (P6)
+    invariant_discovery.py  evidenced holding rules (P6)
     observations.py      invariant observation producers (stateful slice)
     business_logic.py    quantity/price/refund/replay mutations
     race.py              barrier-synchronized burst engine
@@ -1233,6 +1254,7 @@ tests/                   pytest suite (test_v52.py: 5.2 additions, test_phase1.p
                          (test_browser.py: 18 unit + 2 live-Chromium integration, test_ollama.py, test_dotenv.py)
                          (test_auth.py: 34 auth-workflow/JWT/OAuth/OIDC tests + 2 live-browser login tests)
                          (test_state.py: 13 state-graph/snapshot/transition/diff/lifecycle tests)
+                         (test_invariants.py: 9 scoping/checks/engine/discovery/producer tests)
                          (test_workflows.py: 19 discovery/replay/mutation/dependency tests)
                          (test_resources.py: 12 multi-source intel/enrichment/link tests)
 setup1.sh … setup8.sh    project scaffolding scripts

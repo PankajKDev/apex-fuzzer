@@ -77,6 +77,24 @@ LIVE_CODES = "200,204,301,302,401,403,405,500,502,503,504"
 _OAST_TYPES = ("proxy", "webhook", "callback", "import", "export",
                "download", "api")
 
+# invariant check → finding-tag classes that already cover the same
+# verdict space (a violation there corroborates, never duplicates)
+_INVARIANT_CLASSES = {
+    "no_cross_user_read": {"bola", "idor", "tenant_isolation",
+                           "authz"},
+    "no_unauthorized_write": {"authz", "bfla"},
+    "no_access_deleted": {"authz"},
+    "no_modify_deleted": {"authz"},
+    "no_self_promote": {"authz"},
+    "no_expired_session": {"authz", "broken_auth"},
+    "no_recharge_refunded": {"business_logic"},
+    "quantity_non_negative": {"business_logic"},
+    "price_stable": {"business_logic"},
+    "refund_lte_payment": {"business_logic"},
+    "single_use_token": {"business_logic"},
+    "no_revert_completed": {"business_logic"},
+}
+
 
 class Orchestrator:
     def __init__(self, cfg: Config, base_output: Path,
@@ -277,6 +295,16 @@ class Orchestrator:
         # Zero network: only cached files and in-memory sweep data.
         self._build_resource_intel(out_dir, endpoints, application,
                                    app_graph, metrics, ck)
+
+        # ── 8d. INVARIANT DISCOVERY (agent Phase 6, offline) ─────────
+        # Mine holding rules from matrix observations; second-opinion
+        # re-evaluation that corroborates existing findings or emits
+        # genuinely new ones — never duplicates.
+        inv_findings = self._discover_invariants(
+            out_dir, endpoints, evidence, metrics, coverage, findings)
+        if inv_findings:
+            findings += inv_findings
+            write_jsonl(out_dir / "findings.jsonl", findings)
 
         # ── 9. AI (+ loop closure into deterministic testing) ───────────
         hypotheses: List[Hypothesis] = []
@@ -2053,6 +2081,107 @@ class Orchestrator:
                 log.debug("resource intel: graph sync failed: %s", e)
         log.info("resources: %d enriched records (%d harvest, %d "
                  "supplementary)", len(records), len(pool), len(extra))
+
+    # ── INVARIANT DISCOVERY (agent Phase 6, offline) ───────────────
+    def _discover_invariants(self, out_dir: Path, endpoints,
+                             evidence: EvidenceStore, metrics: Metrics,
+                             coverage: CoverageTracker,
+                             findings: List[Finding]) -> List[Finding]:
+        """Mine holding rules from matrix observations, then run every
+        invariant (built-in + discovered) as a second opinion.
+
+        - holding + fires + existing finding in mapped classes →
+          corroboration attached, no duplicate;
+        - holding + fires + no such finding → new invariant finding;
+        - holdings that hold → persisted as enforcement evidence.
+        Zero network; findings only on observed violations.
+        """
+        from .logic.invariant_discovery import discover_invariants
+        from .logic.invariant_engine import InvariantEngine
+        from .logic.observations import observation_from_matrix_cell
+        matrix = getattr(self, "_last_matrix", None)
+        observations = list(getattr(matrix, "observations", []) or [])
+        if not observations:
+            log.debug("invariant discovery: no matrix observations")
+            return []
+        pool = list(getattr(self, "_harvest_pool", []) or [])
+        discovered = discover_invariants(observations, pool)
+        engine = InvariantEngine()
+        for rule in discovered:
+            engine.add(rule.invariant)
+        obs_dicts = [observation_from_matrix_cell(o, pool)
+                     for o in observations]
+        new_findings: List[Finding] = []
+        for obs in obs_dicts:
+            for res in engine.evaluate(obs):
+                metrics.invariants_tested += 1
+                if not res.violated:
+                    continue
+                metrics.invariants_violated += 1
+                covered = _INVARIANT_CLASSES.get(
+                    self._check_of(engine, res.invariant_id), set())
+                dup = next((f for f in findings
+                            if covered & set(f.tags or [])), None)
+                if dup is not None:
+                    inv_list = dup.raw.setdefault("invariants", [])
+                    if not any(e.get("invariant_id") == res.invariant_id
+                               for e in inv_list):
+                        inv_list.append({
+                            "invariant_id": res.invariant_id,
+                            "detail": res.detail,
+                            "corroborated_by": "invariant-engine"})
+                    continue
+                f = Finding(
+                    id=stable_finding_id(
+                        "inv", res.invariant_id,
+                        str(obs.get("endpoint", "")),
+                        str(obs.get("actor", ""))),
+                    source="invariant",
+                    name=(f"Invariant violated: {res.invariant_id} "
+                          f"on {obs.get('endpoint', '')}"),
+                    severity="high",
+                    confidence=Confidence.PROBABLE.value,
+                    validation_status=ValidationStatus.STRONG_CANDIDATE.value,
+                    host="", matched_at=obs.get("endpoint", ""),
+                    endpoint_url=obs.get("endpoint", ""),
+                    method="GET",
+                    description=res.detail,
+                    tags=["invariant", self._check_of(
+                        engine, res.invariant_id)],
+                    raw={"invariant_id": res.invariant_id,
+                         "observation": obs},
+                    false_positive_notes=(
+                        "Second-opinion evaluation over recorded matrix "
+                        "observations — same evidence the verdict passes "
+                        "saw, judged by an independent rule. Confirm "
+                        "interactively before reporting."),
+                    identity=str(obs.get("actor", "")),
+                )
+                evidence.allocate(f)
+                evidence.record(
+                    f,
+                    request_text=(f"invariant {res.invariant_id} "
+                                  f"over recorded observations"),
+                    response_text=res.detail)
+                new_findings.append(f)
+                for cls in sorted(covered) or ["authz"]:
+                    coverage.record(cls, "candidate",
+                                    f"invariant {res.invariant_id}: "
+                                    f"{res.detail}")
+                log.info("invariant: NEW violation %s — %s",
+                         res.invariant_id, res.detail)
+        import json as _json
+        (out_dir / "invariants.json").write_text(_json.dumps(
+            {"discovered": [r.to_dict() for r in discovered],
+             "summary": engine.summary()}, indent=2))
+        return new_findings
+
+    @staticmethod
+    def _check_of(engine, invariant_id: str) -> str:
+        for inv in engine.invariants:
+            if inv.id == invariant_id:
+                return inv.check
+        return ""
 
     # ── STORED-XSS CORRELATION (bounty item #3) ────────────────────────
     def _second_order_probe(self, endpoints: List[Endpoint],

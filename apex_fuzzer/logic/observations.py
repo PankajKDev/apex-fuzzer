@@ -83,3 +83,33 @@ def observation_from_race(endpoint_url: str, token_single_use: bool,
             "resource": endpoint_url,
             "token_single_use": token_single_use,
             "token_reused": token_reused}
+
+
+def observation_from_matrix_cell(cell, pool=None) -> Dict[str, Any]:
+    """One matrix observation → normalized invariant observation.
+
+    Owner resolution: the harvest pool's owner for the same endpoint
+    and resource value; unknown when the cell carries no resource or
+    no pool record matches (checks then safely abstain).
+    """
+    identity = getattr(cell, "identity", "")
+    method = (getattr(cell, "method", "GET") or "GET").upper()
+    action = "read" if method in ("GET", "HEAD", "OPTIONS") else "write"
+    endpoint = getattr(cell, "endpoint", "")
+    resource = getattr(cell, "resource", "") or ""
+    owner = ""
+    for h in pool or []:
+        hep = getattr(h, "normalized_url", "") or \
+            getattr(h, "endpoint_url", "")
+        if hep == endpoint and (
+                not resource or str(getattr(h, "value", "")) == resource):
+            owner = getattr(h, "owner", "") or ""
+            if owner:
+                break
+    return {"actor": identity,
+            "actor_tenant": getattr(cell, "tenant", "") or None,
+            "action": action,
+            "resource": resource or endpoint,
+            "resource_owner": owner or None,
+            "endpoint": endpoint,
+            "status": int(getattr(cell, "status", 0) or 0)}

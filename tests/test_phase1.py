@@ -307,7 +307,7 @@ def test_invariant_unknown_and_custom():
 
 
 def test_default_invariants_cover_spec():
-    assert len(default_invariants()) == 9
+    assert len(default_invariants()) == 12
     assert {i.check for i in default_invariants()} == set(
         inv_mod.BUILTIN_IDS)
 

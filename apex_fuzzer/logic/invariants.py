@@ -101,6 +101,38 @@ def _check_no_revert_completed(obs, params) -> Tuple[bool, str]:
     return False, ""
 
 
+def _check_no_access_deleted(obs, params) -> Tuple[bool, str]:
+    # observation contract: {action, state_before, actor, resource}
+    if _get(obs, "state_before") == "deleted" and \
+            _get(obs, "action") in ("read", "export"):
+        return True, (f"{_get(obs, 'actor')} accessed deleted object "
+                      f"{_get(obs, 'resource', '')}")
+    return False, ""
+
+
+def _check_no_expired_session(obs, params) -> Tuple[bool, str]:
+    # observation contract: {session_expired: bool, status, actor,
+    # endpoint_type}; violation needs a SUCCEEDED protected request —
+    # mere expiry with denial is enforcement, not a bug
+    if _get(obs, "session_expired") and \
+            _get(obs, "status") == 200 and \
+            _get(obs, "endpoint_type", "api") in (
+                "api", "admin", "authentication"):
+        return True, (f"{_get(obs, 'actor')} performed a protected "
+                       f"request with an expired session")
+    return False, ""
+
+
+def _check_no_recharge_refunded(obs, params) -> Tuple[bool, str]:
+    # observation contract: {state_before, action, actor, resource}
+    if _get(obs, "state_before") == "refunded" and \
+            _get(obs, "action") in ("charge", "pay", "capture",
+                                     "write", "update"):
+        return True, (f"{_get(obs, 'resource', '')} was charged again "
+                      f"after refund")
+    return False, ""
+
+
 for _name, _fn in {
     "no_cross_user_read": _check_no_cross_user_read,
     "no_unauthorized_write": _check_no_unauthorized_write,
@@ -111,10 +143,35 @@ for _name, _fn in {
     "refund_lte_payment": _check_refund_lte_payment,
     "single_use_token": _check_single_use_token,
     "no_revert_completed": _check_no_revert_completed,
+    "no_access_deleted": _check_no_access_deleted,
+    "no_expired_session": _check_no_expired_session,
+    "no_recharge_refunded": _check_no_recharge_refunded,
 }.items():
     register_check(_name, _fn)
 
 BUILTIN_IDS = sorted(_REGISTRY.keys())
+
+# params keys honored centrally as scoping filters (all checks,
+# including future/custom ones): an invariant with params scoping
+# only evaluates in-scope observations, and reports the skip
+# explicitly instead of silently passing.
+_SCOPE_KEYS = ("resource", "endpoint", "actor", "tenant")
+
+
+def _in_scope(inv, observation: Dict[str, Any]) -> Tuple[bool, str]:
+    for key in _SCOPE_KEYS:
+        wanted = (inv.params or {}).get(key)
+        if wanted in (None, ""):
+            continue
+        if key == "tenant":
+            got = observation.get("resource_tenant",
+                                  observation.get("actor_tenant"))
+        else:
+            got = observation.get(key)
+        if got != wanted:
+            return False, f"out of scope ({key}={got!r}, rule pins " \
+                          f"{wanted!r})"
+    return True, ""
 
 
 @dataclass
@@ -179,6 +236,17 @@ def default_invariants() -> List[Invariant]:
                   description="A completed workflow cannot be reverted "
                               "without authorization.",
                   check="no_revert_completed"),
+        Invariant(id="inv-access-deleted",
+                  description="A deleted object cannot be accessed.",
+                  check="no_access_deleted"),
+        Invariant(id="inv-expired-session",
+                  description="An expired session cannot perform "
+                              "protected actions.",
+                  check="no_expired_session"),
+        Invariant(id="inv-recharge",
+                  description="A refunded transaction cannot be charged "
+                              "again.",
+                  check="no_recharge_refunded"),
     ]
 
 
@@ -189,6 +257,9 @@ def evaluate(inv: Invariant, observation: Dict[str, Any]
         log.warning("unknown invariant check: %s", inv.check)
         return InvariantResult(inv.id, False,
                                detail=f"unknown check '{inv.check}'")
+    ok, reason = _in_scope(inv, observation)
+    if not ok:
+        return InvariantResult(inv.id, False, detail=reason)
     try:
         violated, detail = fn(observation, inv.params)
     except Exception as e:
