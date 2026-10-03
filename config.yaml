@@ -1,0 +1,89 @@
+scan:
+  rate_limit: 50
+  concurrency: 5
+  timeout: 300
+  http_timeout: 10
+
+discovery:
+  javascript: true
+  js_max_files: 40
+  source_maps: true
+  api_specs: true
+  html_forms: true
+  # Arjun active hidden-parameter mining (spec §1)
+  arjun: true
+  arjun_methods: ["GET", "POST", "JSON"]
+  arjun_max_endpoints: 15
+  arjun_timeout: 180
+  arjun_stable: false
+  arjun_require_existing_param: false
+  linkfinder: false
+
+validation:
+  enabled: false
+  ssrf: false
+  differential: false
+  mutation: true
+  mutation_payloads: 8
+  differential_max_endpoints: 30
+  min_severity: medium
+
+# Request budgets (§50) — backstop against runaway testing.
+# Normal scans stay far below every cap.
+budgets:
+  requests_per_host: 10000
+  requests_per_endpoint: 100
+  authz_tests_per_endpoint: 20
+  browser_actions: 500
+  ai_experiments: 50
+
+# Interactsh out-of-band verification (spec §3)
+oast:
+  enabled: true
+  server: "oast.pro"
+  api_base: null
+  poll_timeout: 15
+  poll_interval: 2
+  max_endpoints: 10
+  max_params_per_endpoint: 3
+
+nuclei:
+  bb_templates_dir: "~/nuclei-bb-templates"
+  workflows: false
+  ai_templates: true
+
+ai:
+  enabled: false
+  js_chunk_budget: 6
+  max_hypothesis_tests: 5
+
+# Differential auth contexts (spec §2). Fill in real session material
+# per engagement; anonymous is always probed implicitly.
+# identity/roles/tenant attach the context to the application model;
+# storage_state points at a Playwright storage-state file (Phase 2).
+auth:
+  contexts:
+    - name: anonymous
+      headers: {}
+    # - name: user_a
+    #   headers:
+    #     Cookie: "session=REPLACE_ME"
+    #   identity: user_a
+    #   roles: ["member"]
+    #   tenant: acme
+    # - name: user_b
+    #   headers:
+    #     Cookie: "session=REPLACE_ME_2"
+    #   identity: user_b
+    #   roles: ["member"]
+    #   tenant: acme
+
+reporting:
+  redact_secrets: true
+  min_severity: info
+
+scope:
+  allowed_domains: []
+  allow_subdomains: true
+  excluded_hosts: []
+  excluded_paths: []

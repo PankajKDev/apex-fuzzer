@@ -1,0 +1,20 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "apex-fuzzer"
+version = "5.2.0"
+description = "Evidence-driven security assessment orchestrator"
+requires-python = ">=3.10"
+dependencies = [
+    "colorama>=0.4",
+    "requests>=2.28",
+    "pyyaml>=6.0",
+]
+
+[project.scripts]
+apex-fuzzer = "apex_fuzzer.cli:main"
+
+[tool.setuptools.packages.find]
+include = ["apex_fuzzer*"]

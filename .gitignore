@@ -1,0 +1,26 @@
+# secrets — copy .env.example to .env locally
+.env
+
+# scan artifacts (per-target outputs, evidence, caches, resume state)
+output/
+*.log
+
+# python
+__pycache__/
+*.py[cod]
+*$py.class
+.venv/
+venv/
+*.egg-info/
+build/
+dist/
+.pytest_cache/
+.coverage
+htmlcov/
+
+# editors / OS
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
