@@ -781,6 +781,8 @@ Per target, `output/<host>/`:
 | `application_graph.json` | persisted application graph (Phase 1) |
 | `coverage.json` | per-class test coverage (Phase 1) |
 | `authorization_matrix.json` | authz observations per identity×method |
+| `state/snapshots.jsonl` | point-in-time behavior snapshots (Phase 3) |
+| `state/transitions.jsonl` | observed cross-run cell changes (Phase 3) |
 | `attack_chains.jsonl` | attack chains (schema only until Phase 9) |
 | `state/` | checkpoint blobs (application, graph, coverage, budgets) |
 | `proofs/finding-NNN/` | `request.txt`, `response.txt`, `metadata.json` |
@@ -802,6 +804,7 @@ business_logic_tests, business_logic_candidates,
 race_tests, race_candidates,
 invariants_tested, invariants_violated,
 logins_attempted, logins_succeeded,
+graph_nodes, graph_edges,
 scan_duration_seconds`.
 
 (`stage_durations` exists in the schema but is currently unpopulated —
@@ -862,13 +865,45 @@ reloads instead of rebuilding).
 `graph/application_graph.py` persists the structural skeleton to
 `application_graph.json`. Node types: domain, host, service, endpoint,
 parameter, technology, identity, role, tenant, resource, workflow, session,
-secret, finding. Edge types: HOSTS, CALLS, AUTHENTICATES_TO, OWNS,
+secret, finding — plus Phase 3 behavioral types: state, transition,
+request, response, observation, token, resource_field, workflow_step.
+Edge types: HOSTS, CALLS, AUTHENTICATES_TO, OWNS,
 BELONGS_TO, CAN_ACCESS, READS, WRITES, CREATES, DELETES, REDIRECTS_TO,
-FETCHES, USES, GENERATES, DEPENDS_ON, LEADS_TO, EXPOSED_BY, CONTAINS.
+FETCHES, USES, GENERATES, DEPENDS_ON, LEADS_TO, EXPOSED_BY, CONTAINS —
+plus Phase 3: AUTHENTICATED_AS, UPDATES, TRANSITIONS, PRECEDES,
+REQUIRES, PRODUCES, CONSUMES, TRIGGERS, STORES, RENDERS, INVALIDATES,
+REQUIRES_STATE, CHANGES_STATE.
 Query helpers: `neighbors()`, `nodes_of_type()`,
-`endpoints_exposing_resource()`, `resources_of_tenant()`. Behavioral edges
-(`CAN_ACCESS` from matrix observations, `LEADS_TO` from chains) arrive in
-Phases 3/9 against this stable schema.
+`endpoints_exposing_resource()`, `resources_of_tenant()`.
+
+## Application state graph (agent Phase 3)
+
+`apex_fuzzer/state/` builds behavior onto the structural graph — same
+`ApplicationGraph` store, no parallel implementation:
+
+- **`graph.py`**: observation → edge builders. Every tested
+  (identity × endpoint × method) cell becomes an observation node;
+  HTTP 200s add `CAN_ACCESS` (+ `READS`/`WRITES`), denials add no
+  access edge. Workflow step lists link via `PRECEDES`.
+- **`snapshots.py`**: point-in-time captures (identity, endpoint,
+  method, status, shape, cookie/storage digests) persisted to
+  `state/snapshots.jsonl` — facts, never verdicts.
+- **`transitions.py`**: before → after links recorded only when a
+  resumed scan observably changes a cell; `state/transitions.jsonl`
+  plus `TRANSITIONS` graph edges.
+- **`diff.py`**: pure snapshot/graph diffs — the comparison primitive
+  the Phase 22 regression engine builds on.
+- **`resources.py`**: per-object lifecycle state + history + CRUD
+  endpoint linkage (`state/resources.jsonl` when wired).
+- **`lifecycle.py`**: explicit allow/deny/inconclusive transition
+  rules (generic CRUD, order, invitation defaults). Unknown states
+  are inconclusive, never violations.
+
+The authz-matrix probe syncs its observations, snapshots, and
+transitions automatically; the graph re-saves after validation with
+`metrics.graph_nodes/graph_edges`. Later phases append workflow
+discovery (Phase 4), CAN_ACCESS from richer matrices (Phase 7), and
+chain edges (Phase 19) against this schema.
 
 ## Security invariants (Phase 1)
 
@@ -970,7 +1005,7 @@ self-DoS and the false negatives that timeouts masquerade as.
 .venv/bin/python -m pytest tests/ -q
 ```
 
-217 tests: URL normalization, endpoint classification, parameter extraction
+230 tests: URL normalization, endpoint classification, parameter extraction
 (URL/HTML/JS), scope rules, secret redaction, plus v5.2 coverage — Arjun JSON
 parsing, WAF fingerprinting, JS-bundle tech gating, structural JS chunking,
 source-map parsing, differential verdicts (BOLA / broken-access / healthy /
@@ -981,7 +1016,8 @@ application/graph models, invariants, coverage precedence, budgets,
 checkpoint blobs, plugin registry/prerequisites, and orchestrator wiring —
 plus bounty engines (authz swap/BFLA, stored XSS, business logic, race),
 Ollama backend, dotenv handling, browser/session engine, and auth
-workflows (login, sessions, JWT/OAuth/OIDC passive).
+workflows (login, sessions, JWT/OAuth/OIDC passive), and state graph
+(snapshots, transitions, diffs, resource states, lifecycles).
 
 ---
 
@@ -1027,6 +1063,8 @@ apex_fuzzer/
     observations.py      invariant observation producers (stateful slice)
     business_logic.py    quantity/price/refund/replay mutations
     race.py              barrier-synchronized burst engine
+  state/                 snapshots · transitions · diffs · resource
+                         states · lifecycles · behavioral graph (P3)
   browser/               Chromium lifecycle · network/storage/actions ·
                          sessions · recordable workflows (agent Phase 1)
   plugins/
@@ -1063,5 +1101,6 @@ tests/                   pytest suite (test_v52.py: 5.2 additions, test_phase1.p
                          (test_bounty3.py: authz/second-order, test_stateful.py: stateful slice)
                          (test_browser.py: 18 unit + 2 live-Chromium integration, test_ollama.py, test_dotenv.py)
                          (test_auth.py: 34 auth-workflow/JWT/OAuth/OIDC tests + 2 live-browser login tests)
+                         (test_state.py: 13 state-graph/snapshot/transition/diff/lifecycle tests)
 setup1.sh … setup8.sh    project scaffolding scripts
 ```

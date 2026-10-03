@@ -21,12 +21,20 @@ log = get_logger("appgraph")
 
 NODE_TYPES = {"domain", "host", "service", "endpoint", "parameter",
               "technology", "identity", "role", "tenant", "resource",
-              "workflow", "session", "secret", "finding"}
+              "workflow", "session", "secret", "finding",
+              # agent Phase 3 (behavioral): additive, old artifacts unaffected
+              "state", "transition", "request", "response",
+              "observation", "token", "resource_field",
+              "workflow_step"}
 
 EDGE_TYPES = {"HOSTS", "CALLS", "AUTHENTICATES_TO", "OWNS", "BELONGS_TO",
               "CAN_ACCESS", "READS", "WRITES", "CREATES", "DELETES",
               "REDIRECTS_TO", "FETCHES", "USES", "GENERATES", "DEPENDS_ON",
-              "LEADS_TO", "EXPOSED_BY", "CONTAINS"}
+              "LEADS_TO", "EXPOSED_BY", "CONTAINS",
+              # agent Phase 3 (behavioral): additive
+              "AUTHENTICATED_AS", "UPDATES", "TRANSITIONS", "PRECEDES",
+              "REQUIRES", "PRODUCES", "CONSUMES", "TRIGGERS", "STORES",
+              "RENDERS", "INVALIDATES", "REQUIRES_STATE", "CHANGES_STATE"}
 
 
 def nid(kind: str, *parts: str) -> str:

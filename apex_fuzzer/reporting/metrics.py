@@ -32,6 +32,8 @@ class Metrics:
     browser_requests: int = 0
     logins_attempted: int = 0
     logins_succeeded: int = 0
+    graph_nodes: int = 0
+    graph_edges: int = 0
     takeover_confirmed: int = 0
     hypotheses_validated: int = 0
     waf_detected: str = ""

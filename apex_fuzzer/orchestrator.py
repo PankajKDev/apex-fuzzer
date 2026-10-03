@@ -232,7 +232,8 @@ class Orchestrator:
             ck.mark("validation", "running")
             findings = self._validate(findings, endpoints, evidence,
                                       metrics, client, out_dir,
-                                      budgets, coverage)
+                                      budgets, coverage,
+                                      app_graph=app_graph, ck=ck)
             write_jsonl(out_dir / "findings.jsonl", findings)
             ck.mark("validation")
         else:
@@ -775,6 +776,8 @@ class Orchestrator:
         metrics.identities_tested = len(identities)
         metrics.roles_tested = len({r.name for r in application.roles})
         metrics.tenants_tested = len({t.name for t in application.tenants})
+        metrics.graph_nodes = len(graph.nodes)
+        metrics.graph_edges = len(graph.edges)
         return application, graph
 
     def _fresh_app_state(self, endpoints: List[Endpoint], host: str,
@@ -1023,8 +1026,8 @@ class Orchestrator:
     def _validate(self, findings: List[Finding],
                   endpoints: List[Endpoint], evidence: EvidenceStore,
                   metrics: Metrics, client, out_dir: Path,
-                  budgets: BudgetTracker, coverage: CoverageTracker
-                  ) -> List[Finding]:
+                  budgets: BudgetTracker, coverage: CoverageTracker,
+                  app_graph=None, ck=None) -> List[Finding]:
         out: List[Finding] = []
 
         # 0) WAF fingerprint from a live probe (drives mutation choice)
@@ -1053,7 +1056,8 @@ class Orchestrator:
         if (self.profile.authz_matrix or self.cfg.authorization.enabled):
             out += self._authz_matrix_probe(endpoints, evidence,
                                             metrics, budgets, coverage,
-                                            client, out_dir, identities)
+                                            client, out_dir, identities,
+                                            app_graph=app_graph)
 
         # 2) OAST sweep for blind SSRF (spec §3)
         oast_provider = self._maybe_register_oast()
@@ -1114,6 +1118,18 @@ class Orchestrator:
                 out += self._race_probe(
                     endpoints, evidence, metrics, budgets, coverage,
                     client, identities)
+            # behavioral state accumulated above → persist the graph
+            # (agent Phase 3: validation findings ride on observations)
+            if app_graph is not None:
+                try:
+                    app_graph.save(out_dir / "application_graph.json")
+                    if ck is not None:
+                        ck.save_blob("application_graph",
+                                     app_graph.to_dict())
+                    metrics.graph_nodes = len(app_graph.nodes)
+                    metrics.graph_edges = len(app_graph.edges)
+                except Exception as e:
+                    log.debug("graph persist failed: %s", e)
         finally:
             if oast_provider is not None:
                 oast_provider.close()
@@ -1376,7 +1392,8 @@ class Orchestrator:
                             evidence: EvidenceStore, metrics: Metrics,
                             budgets: BudgetTracker,
                             coverage: CoverageTracker, client,
-                            out_dir: Path, identities) -> List[Finding]:
+                            out_dir: Path, identities,
+                            app_graph=None) -> List[Finding]:
         from .authorization.harvest import harvest_ids
         from .authorization.matrix import (AuthorizationMatrix,
                                            describe_cell, evaluate_cell)
@@ -1604,7 +1621,40 @@ class Orchestrator:
                 findings.append(f)
                 log.info("authz-matrix: %s", notes)
         matrix.save(out_dir / "authorization_matrix.json")
+        # ── behavioral state (agent Phase 3): observations → graph
+        # edges, snapshots, and cross-run transitions ───────────────
+        if app_graph is not None:
+            self._record_behavioral_state(app_graph, matrix, out_dir)
         return findings
+
+    # ── BEHAVIORAL STATE (agent Phase 3) ─────────────────────────────
+    @staticmethod
+    def _record_behavioral_state(app_graph, matrix, out_dir: Path):
+        """Sync matrix observations into the graph; snapshot every cell;
+        link cross-run changes as transitions. Additive and idempotent."""
+        from .state.graph import (sync_matrix_observations,
+                                  record_transition)
+        from .state.snapshots import StateSnapshot, SnapshotStore
+        from .state.transitions import TransitionLog
+        sync_matrix_observations(app_graph, matrix.observations)
+        state_dir = out_dir / "state"
+        store = SnapshotStore.load(state_dir / "snapshots.jsonl")
+        tlog = TransitionLog.load(state_dir / "transitions.jsonl")
+        for o in matrix.observations:
+            snap = StateSnapshot.capture(
+                identity=o.identity, endpoint=o.endpoint,
+                method=o.method, status=o.status, shape=o.shape)
+            prev = store.latest(o.identity, o.endpoint, o.method)
+            store.add(snap)
+            if prev is not None:
+                t = tlog.record_if_changed(
+                    prev, snap, via=snap.snapshot_id, actor=o.identity)
+                if t is not None:
+                    record_transition(app_graph, prev.snapshot_id,
+                                      snap.snapshot_id, snap.snapshot_id,
+                                      actor=o.identity)
+        store.save(state_dir / "snapshots.jsonl")
+        tlog.save(state_dir / "transitions.jsonl")
 
     # ── STORED-XSS CORRELATION (bounty item #3) ────────────────────────
     def _second_order_probe(self, endpoints: List[Endpoint],

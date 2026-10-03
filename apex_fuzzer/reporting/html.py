@@ -94,6 +94,8 @@ def _metrics_block(m: Dict) -> str:
             ("Race", m.get("race_candidates")),
             ("Inv violated", m.get("invariants_violated")),
             ("Logins", m.get("logins_succeeded")),
+            ("Graph", f"{m.get('graph_nodes', 0)}/"
+                      f"{m.get('graph_edges', 0)}"),
             ("Hypotheses", m.get("hypotheses_generated")),
             ("Hyp. validated", m.get("hypotheses_validated")),
             ("Takeovers", m.get("takeover_confirmed")),
