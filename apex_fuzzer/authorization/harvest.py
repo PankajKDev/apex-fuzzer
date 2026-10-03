@@ -29,6 +29,8 @@ class HarvestedId:
     markers: Dict[str, str] = field(default_factory=dict)
     # redacted snippet of the owner's response (evidence, no secrets)
     snippet: str = ""
+    # GraphQL __typename when the response is a GraphQL payload
+    resource_type_hint: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {"endpoint_url": self.endpoint_url,
@@ -37,7 +39,8 @@ class HarvestedId:
                 "owner": self.owner, "owner_tenant": self.owner_tenant,
                 "shape": self.shape, "body_hash": self.body_hash,
                 "source": self.source, "markers": dict(self.markers),
-                "snippet": self.snippet}
+                "snippet": self.snippet,
+                "resource_type_hint": self.resource_type_hint}
 
 
 def _walk_json(value: Any, out: Dict[str, str], depth: int = 0):
@@ -96,6 +99,13 @@ def harvest_ids(http, endpoint, identities, timeout: int = 10,
             norm = normalize_response(r)
         except Exception:
             continue
+        from ..application.resources import discover_ids_from_graphql
+        try:
+            import json as _json2
+            _, typename = discover_ids_from_graphql(
+                _json2.loads(r.text or "{}"))
+        except Exception:
+            typename = ""
         for param, value in extract_ids_from_body(r.text or "").items():
             key = (endpoint.normalized_url, param, value, name)
             if key in seen:
@@ -114,7 +124,8 @@ def harvest_ids(http, endpoint, identities, timeout: int = 10,
                 owner_tenant=tenant, shape=norm.get("key_shape", ""),
                 body_hash=norm.get("body_hash", ""),
                 markers=dict(extract_ids_from_body(r.text or "")),
-                snippet=redact((r.text or "")[:500])))
+                snippet=redact((r.text or "")[:500]),
+                resource_type_hint=typename))
     if out:
         log.info("harvest: %d ids from %s", len(out), endpoint.url)
     return out

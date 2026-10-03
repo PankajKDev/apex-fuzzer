@@ -60,7 +60,6 @@ class ResourceState:
 class ResourceTracker:
     def __init__(self):
         self.resources: Dict[str, ResourceState] = {}
-
     def track(self, resource_key: str, resource_type: str = "object",
               owner: str = "", tenant: str = "") -> ResourceState:
         cur = self.resources.get(resource_key)
@@ -104,3 +103,47 @@ class ResourceTracker:
         except FileNotFoundError:
             pass
         return tracker
+
+
+_METHOD_TO_CRUD = {"POST": "create", "GET": "read", "PUT": "update",
+                   "PATCH": "update", "DELETE": "delete"}
+
+
+def link_crud_from_endpoints(tracker: "ResourceTracker", resources,
+                             endpoints) -> int:
+    """Link CRUD actions by matching resource identifiers against
+    endpoint parameters (method implies the action). Shared by
+    workflow discovery and resource intel — one rule, one place.
+    Returns the number of links created."""
+    from ..application.resources import _guess_type
+    made = 0
+    for res in resources or []:
+        if isinstance(res, dict):
+            rkey = res.get("key", "")
+            idents = res.get("identifiers", {}) or {}
+            owner, tenant = res.get("owner", ""), res.get("tenant", "")
+            rtype = res.get("resource_type", "object")
+        else:
+            rkey = getattr(res, "key", "")
+            idents = getattr(res, "identifiers", {}) or {}
+            owner = getattr(res, "owner", "")
+            tenant = getattr(res, "tenant", "")
+            rtype = getattr(res, "resource_type", "object")
+        if not rkey or not idents:
+            continue
+        state = tracker.track(rkey, rtype or "object", owner=owner,
+                              tenant=tenant)
+        for ep in endpoints or []:
+            ep_params = {p.name for p in
+                         list(getattr(ep, "query_parameters", [])
+                              or []) +
+                         list(getattr(ep, "body_parameters", [])
+                              or [])}
+            if not (set(idents) & ep_params):
+                continue
+            method = (getattr(ep, "method", "GET") or "GET").upper()
+            action = _METHOD_TO_CRUD.get(method, "")
+            if action and action not in state.crud:
+                state.link_crud(action, getattr(ep, "url", ""))
+                made += 1
+    return made

@@ -43,6 +43,45 @@ def sync_extended(graph, harvested, resource_map=None) -> int:
         eid = nid("endpoint", ep)
         if eid in graph.nodes:
             graph.add_edge(rid, eid, "EXPOSED_BY")
+    link_shared_identifiers(graph, harvested or [])
     added = len(graph.edges) - before
     log.debug("authz-graph: %d edges added", added)
     return added
+
+
+def _meaningful(value: str) -> bool:
+    """Twin of the workflows dependency rule: short/generic values
+    collide everywhere and prove no relationship."""
+    v = (value or "").strip()
+    if len(v) < 4:
+        return False
+    return v.lower() not in {"true", "false", "null", "undefined",
+                             "none", "nil", "yes", "no", "on", "off"}
+
+
+def link_shared_identifiers(graph, harvested) -> int:
+    """Link resource nodes sharing an identifier value (e.g. an order
+    carrying its owner's user_id): deterministic single edge per pair
+    (sorted IDs), annotated with the shared key=value. Direction is
+    unknown, so edges point from the lexicographically smaller node
+    with a `symmetric: True` attribute — stable across runs."""
+    by_value: Dict[str, list] = {}
+    for h in harvested or []:
+        value = str(getattr(h, "value", ""))
+        if not _meaningful(value):
+            continue
+        ep = getattr(h, "normalized_url", "") or \
+            getattr(h, "endpoint_url", "")
+        rid = nid("resource", ep, getattr(h, "param", ""), value)
+        if rid in graph.nodes:
+            by_value.setdefault(value, []).append(rid)
+    before = len(graph.edges)
+    for value, rids in by_value.items():
+        unique = sorted(set(rids))
+        if len(unique) < 2:
+            continue
+        for i in range(len(unique)):
+            for j in range(i + 1, len(unique)):
+                graph.add_edge(unique[i], unique[j], "DEPENDS_ON",
+                               {"via_value": value, "symmetric": True})
+    return len(graph.edges) - before

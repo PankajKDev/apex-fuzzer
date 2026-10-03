@@ -88,6 +88,7 @@ def swap_ids(http, harvested, tester, timeout: int = 10,
         if h.owner == tester_name:
             continue
         shape, body_hash = h.shape or "", h.body_hash or ""
+        markers = dict(getattr(h, "markers", None) or {})
         if (not shape or not body_hash) and owner_headers is not None \
                 and h.owner in (owner_headers or {}):
             try:
@@ -111,6 +112,13 @@ def swap_ids(http, harvested, tester, timeout: int = 10,
             body_hash = bn.get("body_hash", "")
             if not shape and not body_hash:
                 continue
+            # baseline response belongs to the TARGET endpoint:
+            # extract its markers (never reuse another endpoint's)
+            from ..authorization.harvest import extract_ids_from_body
+            try:
+                markers = dict(extract_ids_from_body(b.text or ""))
+            except Exception:
+                pass
         url = _with_param(h.endpoint_url, h.param, h.value)
         try:
             r = http.get(url, headers=headers, timeout=timeout)
@@ -133,7 +141,7 @@ def swap_ids(http, harvested, tester, timeout: int = 10,
         tester_snippet = ""
         if match:
             comparison = compare_access(
-                getattr(h, "markers", None) or {}, r.text or "",
+                markers, r.text or "",
                 ownership_fields, exclude=h.param)
             try:
                 tester_snippet = redact((r.text or "")[:500])

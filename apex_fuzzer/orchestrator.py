@@ -90,6 +90,8 @@ class Orchestrator:
         self._pacer = Pacer(0)
         self._safety_info: Optional[dict] = None
         self._harvest_pool: list = []
+        self._page_ids: list = []
+        self._last_matrix = None
 
     # =====================================================================
     def run(self, targets: List[str], resume: bool = False):
@@ -269,6 +271,12 @@ class Orchestrator:
         # Pure analysis over collected data — zero network, always safe.
         self._discover_workflows(out_dir, endpoints, application,
                                  app_graph, metrics, ck)
+
+        # ── 8c. RESOURCE INTEL (agent Phase 5, offline) ──────────────
+        # Lifecycle-aware records from everything collected so far.
+        # Zero network: only cached files and in-memory sweep data.
+        self._build_resource_intel(out_dir, endpoints, application,
+                                   app_graph, metrics, ck)
 
         # ── 9. AI (+ loop closure into deterministic testing) ───────────
         hypotheses: List[Hypothesis] = []
@@ -802,6 +810,7 @@ class Orchestrator:
         tech_by_name = {}
         html_params: List[Parameter] = []
         all_headers: Dict[str, str] = {}
+        page_ids: List[tuple] = []  # (url, param, value, source)
         for ep in [e for e in endpoints if e.method == "GET"][:30]:
             try:
                 r = client.get(ep.url, timeout=self.cfg.scan.http_timeout)
@@ -821,8 +830,28 @@ class Orchestrator:
                     all_headers.setdefault(k.lower(), v)
                 if self.cfg.discovery.html_forms:
                     html_params.extend(param_mod.from_html(r.text))
+                # Phase 5: harvest IDs from already-fetched bodies —
+                # zero extra requests, feeds resource intel only
+                try:
+                    from .application.resources import (
+                        discover_ids_from_html, discover_ids_from_headers)
+                    ctype = str((r.headers or {}).get(
+                        "content-type", "")).lower()
+                    if "html" in ctype:
+                        for pname, pvalue in \
+                                discover_ids_from_html(
+                                    r.text or "").items():
+                            page_ids.append(
+                                (ep.url, pname, pvalue, "html"))
+                    for pname, pvalue in discover_ids_from_headers(
+                            r.headers or {}).items():
+                        page_ids.append(
+                            (ep.url, pname, pvalue, "headers"))
+                except Exception as e:
+                    log.debug("page-id harvest failed: %s", e)
             except Exception:
                 continue
+        self._page_ids = page_ids
         # techs discovered from JS bundles (spec §7)
         for entry in read_jsonl(out_dir / "js_analysis.jsonl"):
             metrics.source_maps_found += len(entry.get("source_maps") or [])
@@ -1677,13 +1706,16 @@ class Orchestrator:
                          list(ep.query_parameters or []) +
                          list(ep.body_parameters or [])}
             same = [h for h in pool
-                    if h.normalized_url == ep.normalized_url]
+                    if h.normalized_url == ep.normalized_url
+                    and getattr(h, "source", "response") == "response"]
             # — cross-endpoint candidates: pool IDs whose param exists here,
             # retargeted at this endpoint with an empty baseline (the swap
             # engine fetches the owner's baseline on the target first) —
             from .authorization.harvest import HarvestedId
             seen_x, cross = set(), []
             for h in pool:
+                if getattr(h, "source", "response") != "response":
+                    continue  # traffic/JS/HTML IDs enrich views only
                 if h.normalized_url == ep.normalized_url:
                     continue
                 if h.param not in ep_params:
@@ -1819,6 +1851,7 @@ class Orchestrator:
             sync_extended(app_graph, pool)
         # ── behavioral state (agent Phase 3): observations → graph
         # edges, snapshots, and cross-run transitions ───────────────
+        self._last_matrix = matrix
         if app_graph is not None:
             self._record_behavioral_state(app_graph, matrix, out_dir)
         return findings
@@ -1864,7 +1897,8 @@ class Orchestrator:
         """
         from .workflows.discovery import discover_all
         from .workflows.mutations import mutation_catalog
-        from .state.resources import ResourceTracker
+        from .state.resources import ResourceTracker, \
+            link_crud_from_endpoints
         from .state.graph import ensure_workflow
         import json as _json
         traffic: dict = {}
@@ -1875,40 +1909,13 @@ class Orchestrator:
             except Exception as e:
                 log.debug("workflow discovery: bad traffic file: %s", e)
         # CRUD linkage from app resources × endpoint methods
+        from .state.resources import ResourceTracker, \
+            link_crud_from_endpoints
         tracker = ResourceTracker()
         resources = []
         if application is not None:
             resources = getattr(application, "resources", []) or []
-        for res in resources:
-            rkey = res.get("key", "") if isinstance(res, dict) else \
-                getattr(res, "key", "")
-            rtype = res.get("resource_type", "object") \
-                if isinstance(res, dict) else getattr(
-                    res, "resource_type", "object")
-            idents = res.get("identifiers", {}) if isinstance(
-                res, dict) else getattr(res, "identifiers", {})
-            if not rkey:
-                continue
-            tracker.track(rkey, rtype,
-                          owner=res.get("owner", "") if isinstance(
-                              res, dict) else getattr(res, "owner", ""),
-                          tenant=res.get("tenant", "") if isinstance(
-                              res, dict) else getattr(res, "tenant", ""))
-            for ep in endpoints or []:
-                ep_params = {p.name for p in
-                             list(getattr(ep, "query_parameters", [])
-                                  or []) +
-                             list(getattr(ep, "body_parameters", [])
-                                  or [])}
-                if not (set(idents) & ep_params):
-                    continue
-                method = (getattr(ep, "method", "GET") or "GET").upper()
-                action = {"POST": "create", "GET": "read",
-                          "PUT": "update", "PATCH": "update",
-                          "DELETE": "delete"}.get(method, "")
-                if action:
-                    tracker.resources[rkey].link_crud(
-                        action, getattr(ep, "url", ""))
+        link_crud_from_endpoints(tracker, resources, endpoints)
         flows = discover_all(
             endpoints=endpoints, traffic=traffic,
             resources=list(tracker.resources.values()),
@@ -1941,6 +1948,111 @@ class Orchestrator:
                           e)
         log.info("workflows: %d discovered (%d observed)",
                  len(flows), sum(1 for f in flows if f.observed))
+
+    # ── RESOURCE INTEL (agent Phase 5, offline) ──────────────────────
+    def _build_resource_intel(self, out_dir: Path, endpoints, application,
+                              app_graph, metrics: Metrics, ck: Checkpoint):
+        """Lifecycle-aware resource records from all collected sources.
+
+        Producers (all offline): harvest pool, stashed page IDs, JS
+        cache, browser traffic, OpenAPI-declared params (already
+        endpoints). Records never drive swap verdicts unless their
+        source is an authenticated response (see source filter).
+        """
+        from .application.resources import (
+            discover_ids_from_js, discover_ids_from_traffic)
+        from .authorization.harvest import HarvestedId
+        from .authz.resources import enrich_resource_records
+        from .state.resources import (ResourceTracker,
+                                      link_crud_from_endpoints)
+        import json as _json
+        pool = list(getattr(self, "_harvest_pool", []) or [])
+        extra: list = []
+
+        def _add(url: str, param: str, value: str, source: str):
+            if not url or not param or not value:
+                return
+            try:
+                norm = normalize_url(url)
+            except Exception:
+                norm = url
+            if any(e.normalized_url == norm and e.param == param
+                   and e.value == value for e in pool + extra):
+                return
+            extra.append(HarvestedId(
+                endpoint_url=url, normalized_url=norm, param=param,
+                value=value, owner="", owner_tenant="", shape="",
+                body_hash=""))
+            extra[-1].source = source
+
+        # stashed page IDs (HTML/headers parsed during mapping)
+        for url, param, value, source in \
+                getattr(self, "_page_ids", []) or []:
+            _add(url, param, value, source)
+        # JS bundle cache (meta files carry the source URL)
+        cache_dir = out_dir / "cache"
+        if cache_dir.exists():
+            for meta_file in sorted(cache_dir.glob("*.meta"))[:50]:
+                try:
+                    data_file = meta_file.with_name(
+                        meta_file.name[:-len(".meta")])
+                    if not data_file.exists():
+                        continue
+                    meta = _json.loads(meta_file.read_text())
+                    url = str(meta.get("url", ""))
+                    text = data_file.read_text(
+                        errors="ignore")[:200_000]
+                except Exception as e:
+                    log.debug("resource intel: cache read failed: %s",
+                              e)
+                    continue
+                if not url:
+                    continue
+                try:
+                    found = discover_ids_from_js(text)
+                except Exception:
+                    continue
+                for pname, pvalue in found.items():
+                    _add(url, pname, pvalue, "javascript")
+        # browser traffic URLs
+        traffic_file = out_dir / "browser_traffic.json"
+        if traffic_file.exists():
+            try:
+                traffic = _json.loads(traffic_file.read_text())
+                reqs = traffic.get("requests", [])
+            except Exception:
+                reqs = []
+            try:
+                for url, pname, pvalue in discover_ids_from_traffic(
+                        reqs):
+                    _add(url, pname, pvalue, "traffic")
+            except Exception as e:
+                log.debug("resource intel: traffic parse failed: %s", e)
+        # matrix observations (permissions) + CRUD linkage + enrich
+        matrix = getattr(self, "_last_matrix", None)
+        observations = list(getattr(matrix, "observations", []) or [])
+        tracker = ResourceTracker()
+        app_resources = []
+        if application is not None:
+            app_resources = getattr(application, "resources", []) or []
+        link_crud_from_endpoints(tracker, app_resources, endpoints)
+        combined = pool + extra
+        records = enrich_resource_records(
+            combined, observations, tracker, endpoints)
+        (out_dir / "resources.json").write_text(
+            _json.dumps({"records": records}, indent=2))
+        if app_graph is not None and extra:
+            try:
+                from .authz.graph import sync_extended
+                sync_extended(app_graph, extra)
+                app_graph.save(out_dir / "application_graph.json")
+                ck.save_blob("application_graph", app_graph.to_dict())
+                metrics.graph_nodes = len(app_graph.nodes)
+                metrics.graph_edges = len(app_graph.edges)
+            except Exception as e:
+                log.debug("resource intel: graph sync failed: %s", e)
+        log.info("resources: %d enriched records (%d harvest, %d "
+                 "supplementary)", len(records), len(pool), len(extra))
 
     # ── STORED-XSS CORRELATION (bounty item #3) ────────────────────────
     def _second_order_probe(self, endpoints: List[Endpoint],

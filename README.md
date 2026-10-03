@@ -698,6 +698,22 @@ stale-token/invalid-transition) as test candidates for later phases
 (flows + mutation catalog); stored workflows append to the
 application model; step chains link into the graph.
 
+### 8g. Resource intel (always on, zero network)
+
+Right after workflow discovery, resource records become
+lifecycle-aware (`resources.json`) — composed purely from collected
+data, no requests. Identifier producers: harvest pool, page
+HTML/headers parsed during mapping (stashed, never refetched), the
+JS bundle cache (via `.meta` source URLs), browser traffic URLs,
+and OpenAPI-declared parameters (already endpoints). Each record
+carries type (GraphQL `__typename` preferred over name heuristics),
+identifiers, owner/tenant, permissions (identities with a 200 on an
+exposing endpoint), field inventory, lifecycle state/history/CRUD,
+and provenance source. Records from passive sources enrich views
+and dependencies only — swap verdicts still require authenticated
+responses. Shared identifier values link resource nodes
+(`DEPENDS_ON`, symmetric, deterministic order).
+
 ### 9. AI → `hypotheses.jsonl`
 
 `AIPlanner` emits structured hypotheses
@@ -851,6 +867,7 @@ Per target, `output/<host>/`:
 | `coverage.json` | per-class test coverage (Phase 1) |
 | `authorization_matrix.json` | authz observations per identity×method |
 | `workflows.json` | discovered flows + mutation catalog (Phase 4) |
+| `resources.json` | lifecycle-aware resource records (Phase 5) |
 | `state/snapshots.jsonl` | point-in-time behavior snapshots (Phase 3) |
 | `state/transitions.jsonl` | observed cross-run cell changes (Phase 3) |
 | `attack_chains.jsonl` | attack chains (schema only until Phase 9) |
@@ -1113,7 +1130,7 @@ self-DoS and the false negatives that timeouts masquerade as.
 .venv/bin/python -m pytest tests/ -q
 ```
 
-316 tests: URL normalization, endpoint classification, parameter extraction
+328 tests: URL normalization, endpoint classification, parameter extraction
 (URL/HTML/JS), scope rules, secret redaction, plus v5.2 coverage — Arjun JSON
 parsing, WAF fingerprinting, JS-bundle tech gating, structural JS chunking,
 source-map parsing, differential verdicts (BOLA / broken-access / healthy /
@@ -1217,5 +1234,6 @@ tests/                   pytest suite (test_v52.py: 5.2 additions, test_phase1.p
                          (test_auth.py: 34 auth-workflow/JWT/OAuth/OIDC tests + 2 live-browser login tests)
                          (test_state.py: 13 state-graph/snapshot/transition/diff/lifecycle tests)
                          (test_workflows.py: 19 discovery/replay/mutation/dependency tests)
+                         (test_resources.py: 12 multi-source intel/enrichment/link tests)
 setup1.sh … setup8.sh    project scaffolding scripts
 ```
