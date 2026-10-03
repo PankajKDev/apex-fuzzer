@@ -50,6 +50,7 @@ class Metrics:
     business_logic_candidates: int = 0
     race_tests: int = 0
     race_candidates: int = 0
+    effects_verified: int = 0
     invariants_tested: int = 0
     invariants_violated: int = 0
 

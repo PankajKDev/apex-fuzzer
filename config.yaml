@@ -45,6 +45,18 @@ business:
   enabled: false           # or --business-logic / deep/validation profiles
   max_endpoints: 10
   max_params: 3
+  # Optional readback assertions for user-known workflows. A passing
+  # check means the invariant held (effect absent); a failing check
+  # means the abuse persisted (verified effect).
+  # assertions:
+  #   - endpoint: "/api/cart/items"
+  #     parameter: "quantity"
+  #     method: POST
+  #     after_read: "/api/cart"
+  #     checks:
+  #       - jsonpath: "$.items[?(@.sku == 'SKU-1')].quantity"
+  #         rule: "gte"    # gte | lte | eq | ne | contains
+  #         value: 0
 # Race-condition engine. Off by default: synchronized bursts of
 # state-changing requests are the most aggressive test in the suite.
 race:

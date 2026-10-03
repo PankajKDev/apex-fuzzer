@@ -73,6 +73,9 @@ class BusinessConfig:
     enabled: bool = False
     max_endpoints: int = 10
     max_params: int = 3
+    # user-supplied readback assertions (Terra M2.4); see
+    # verify/assertions.py for the schema
+    assertions: List[Dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass

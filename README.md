@@ -621,6 +621,19 @@ of token-bearing requests. A finding needs **both** server acceptance
 a bare 200 is never enough. Non-200 baselines yield `inconclusive`,
 never negatives.
 
+Every accepted mutation then goes through **readback verification**
+(`apex_fuzzer/verify/`): the mutated value is re-observed via a clean
+re-read (GET endpoints), user-supplied `after_read` URLs, or sequential
+double-submits (token reuse, idempotency keys). A persisted effect
+upgrades the finding to `confirmed` (`verified-effect` tag); a clean
+re-read proving non-persistence downgrades it to `inconclusive`;
+anything unverifiable leaves the candidate exactly as produced.
+POST endpoints without an `after_read` have no safe re-read
+(re-POSTing would be another write) and stay unverified by design.
+Optional per-workflow contracts live under `business.assertions`
+(`after_read` + `jsonpath`/`rule`/`value` checks; tiny subset:
+dotted paths, `[n]` indexes, one `[?(@.k == v)]` filter).
+
 ### 8e. Race engine (opt-in: synchronized bursts)
 
 With `race.enabled` (`--race`; off in every profile), POST endpoints
@@ -628,7 +641,9 @@ fire N identical requests through a start barrier (`logic/race.py`).
 All-200 with divergent object IDs → `strong_candidate` with round
 detail; fully consistent rounds → `tested_negative`; mixed errors →
 `inconclusive`. Budget exhaustion propagates as `blocked`, never a
-negative.
+negative. Divergent bursts carrying an idempotency key get a
+sequential double-submit re-check: double acceptance with different
+objects upgrades to `confirmed`; otherwise the candidate stands.
 
 ### 9. AI → `hypotheses.jsonl`
 
@@ -671,9 +686,9 @@ confirmed`.
 | dalfox | "verified"/"PoC" in output | — |
 | idor-swap (same + cross-endpoint) | victim object served to another identity, same shape | — (swap proves access; impact confirmed by human) |
 | authz-matrix BFLA | method treats roles/tenants identically (200s match) | — |
-| business-logic | abuse value accepted (echoed, 200) **and** invariant violated | — (echo is a proxy; confirm persisted state) |
+| business-logic | abuse value accepted (echoed, 200) **and** invariant violated | clean re-read shows the mutated value persisted (`verified-effect`) |
 | stored-XSS | inert canary persists and renders unescaped in active sink | — (confirm script execution manually) |
-| race | synchronized burst all-200 with divergent object IDs | — (rule out randomness first) |
+| race | synchronized burst all-200 with divergent object IDs | sequential idempotency re-check accepts twice with different objects |
 
 Healthy authorization (user A 200 / user B 401-403, or anonymous blocked while
 an authenticated user succeeds) yields `inconclusive` with an explanatory
@@ -804,6 +819,7 @@ second_order_tests, second_order_candidates,
 business_logic_tests, business_logic_candidates,
 race_tests, race_candidates,
 invariants_tested, invariants_violated,
+effects_verified,
 logins_attempted, logins_succeeded,
 graph_nodes, graph_edges,
 scan_duration_seconds`.
@@ -1042,7 +1058,7 @@ self-DoS and the false negatives that timeouts masquerade as.
 .venv/bin/python -m pytest tests/ -q
 ```
 
-230 tests: URL normalization, endpoint classification, parameter extraction
+283 tests: URL normalization, endpoint classification, parameter extraction
 (URL/HTML/JS), scope rules, secret redaction, plus v5.2 coverage — Arjun JSON
 parsing, WAF fingerprinting, JS-bundle tech gating, structural JS chunking,
 source-map parsing, differential verdicts (BOLA / broken-access / healthy /
@@ -1136,6 +1152,7 @@ apex_fuzzer/
 config.yaml              annotated defaults (copy per engagement, add secrets)
 tests/                   pytest suite (test_v52.py: 5.2 additions, test_phase1.py: foundation)
                          (test_bounty3.py: authz/second-order, test_stateful.py: stateful slice)
+                         (test_verify.py: 18 readback/idempotency/token/JSONPath/wiring tests)
                          (test_browser.py: 18 unit + 2 live-Chromium integration, test_ollama.py, test_dotenv.py)
                          (test_auth.py: 34 auth-workflow/JWT/OAuth/OIDC tests + 2 live-browser login tests)
                          (test_state.py: 13 state-graph/snapshot/transition/diff/lifecycle tests)

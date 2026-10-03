@@ -1985,28 +1985,57 @@ class Orchestrator:
                                         res.notes)
                         inv = res.violations[0]["invariant_id"] \
                             if res.violations else "invariant"
+                        # readback verification: echo is not proof —
+                        # re-observe clean state before confirming
+                        ver = self._verify_business_effect(
+                            client, ep, cand, res, actor)
+                        status, conf = (
+                            ValidationStatus.STRONG_CANDIDATE.value,
+                            Confidence.PROBABLE.value)
+                        extra_tags: list = []
+                        suffix = ""
+                        if ver["status"] == "verified":
+                            status = ValidationStatus.CONFIRMED.value
+                            conf = Confidence.CONFIRMED.value
+                            metrics.effects_verified += 1
+                            extra_tags.append("verified-effect")
+                            suffix = " [verified effect]"
+                            log.info("business-logic verified: %s",
+                                     ver["detail"])
+                        elif ver["status"] == "refuted":
+                            # positive proof of NO persistence: the
+                            # echo-only candidate cannot stand
+                            status = ValidationStatus.INCONCLUSIVE.value
+                            conf = Confidence.UNKNOWN.value
+                            suffix = " [effect not persisted]"
                         f = Finding(
                             id=stable_finding_id("bl", ep.normalized_url, cand.param, str(res.mutated)),
                             source="business-logic",
                             name=(f"Business logic: {cand.param}="
                                   f"{res.mutated} accepted, violates "
-                                  f"{inv} ({ep.path})"),
+                                  f"{inv} ({ep.path})" + suffix),
                             severity="high",
-                            confidence=Confidence.PROBABLE.value,
-                            validation_status=ValidationStatus.STRONG_CANDIDATE.value,
+                            confidence=conf,
+                            validation_status=status,
                             host=ep.host, matched_at=ep.url,
                             endpoint_url=ep.url, method=ep.method,
                             parameter=cand.param,
-                            description=res.notes,
+                            description=res.notes + (
+                                f" Verification: {ver['detail']}"
+                                if ver["detail"] else ""),
                             tags=["business-logic", cand.kind,
-                                  ep.endpoint_type],
-                            raw={"business": res.to_dict()},
+                                  ep.endpoint_type] + extra_tags,
+                            raw={"business": res.to_dict(),
+                                 "verification": ver},
                             false_positive_notes=(
                                 "Acceptance is echo-based (mutated value "
                                 "reflected with HTTP 200) — a proxy for "
                                 "server-side effect, not proof of it. "
-                                "Confirm the persisted state before "
-                                "reporting."),
+                                + ("Persistence CONFIRMED by clean "
+                                   "re-read; see verification evidence."
+                                   if ver["status"] == "verified"
+                                   else "Confirm the persisted state "
+                                   "before reporting.")),
                             identity=aname, tenant=atenant,
                             resource_key=(f"{ep.normalized_url}::"
                                           f"{cand.param}"),
@@ -2017,7 +2046,9 @@ class Orchestrator:
                             request_text=(
                                 f"{ep.method} {ep.url} "
                                 f"({cand.param}={res.mutated})"),
-                            response_text=res.notes)
+                            response_text=res.notes + (
+                                f"\n--- verification ---\n{ver['detail']}"
+                                if ver["detail"] else ""))
                         findings.append(f)
                         log.info("business-logic: %s", res.notes)
                     elif res.baseline_status != 200:
@@ -2030,6 +2061,128 @@ class Orchestrator:
                                         f"{cand.param}: {res.notes}")
         metrics.invariants_tested += tester.evaluations
         return findings
+
+    # ── RACE ENGINE (stateful slice, opt-in) ───────────────────────────
+    def _verify_business_effect(self, client, ep, cand, res,
+                                actor) -> dict:
+        """Readback verification for one accepted mutation.
+
+        Returns {"status": verified|refuted|inconclusive, "detail",
+        "evidence"}. Order: user assertions (explicit read URL wins) →
+        token-reuse sequential check → generic persistence readback.
+        POST endpoints without an after_read have no safe re-read
+        (re-POSTing is another write) → inconclusive, finding stands.
+        """
+        from urllib.parse import urljoin
+        from .verify.base import (verify_persisted, verify_token_reuse)
+        from .verify.assertions import (matching_assertions,
+                                        evaluate_assertions)
+        timeout = self.cfg.scan.http_timeout
+        headers = dict(getattr(actor, "auth_headers", None) or {})
+        blank = {"status": "inconclusive", "detail": "", "evidence": {}}
+
+        def _wrap(v):
+            return {"status": v.status, "detail": v.detail,
+                    "evidence": v.evidence}
+
+        # 1) user-supplied assertions (explicit readback contract)
+        matched = matching_assertions(
+            getattr(self.cfg.business, "assertions", []) or [],
+            ep.path, cand.param, ep.method)
+        for a in matched:
+            after = (a.get("after_read") or "").strip()
+            if not after:
+                continue
+            read_url = after if after.startswith("http") else \
+                urljoin(ep.url, after)
+            try:
+                r = client.get(read_url, headers=headers,
+                               timeout=timeout)
+            except Exception as e:
+                return {"status": "inconclusive",
+                        "detail": f"assertion readback failed: {e}"[:200],
+                        "evidence": {}}
+            if r.status_code != 200:
+                return {"status": "inconclusive",
+                        "detail": f"assertion readback → "
+                                  f"HTTP {r.status_code}",
+                        "evidence": {}}
+            verdict, detail, ev = evaluate_assertions(
+                [a], r.text or "")
+            if verdict == "passed":
+                # invariant holds on re-read: violation did NOT persist
+                return {"status": "refuted",
+                        "detail": f"assertion holds on re-read: {detail}",
+                        "evidence": {**ev, "read_url": read_url}}
+            if verdict == "failed":
+                return {"status": "verified",
+                        "detail": f"assertion violated on re-read: "
+                                  f"{detail}",
+                        "evidence": {**ev, "read_url": read_url}}
+            return {"status": "inconclusive", "detail": detail,
+                    "evidence": ev}
+        # 2) token-reuse: sequential double-submit is self-contained
+        if cand.kind == "token_reuse":
+            params = {p.name: (p.sample_value or "1") for p in
+                      list(ep.query_parameters or []) +
+                      list(ep.body_parameters or []) if p.name}
+            has_body = bool(ep.body_parameters)
+            v = verify_token_reuse(
+                client, "POST" if has_body else "GET", ep.url,
+                params if has_body else {},
+                headers, timeout,
+                query=None if has_body else params)
+            return _wrap(v)
+        # 3) generic persistence: safe re-read exists only for GET
+        # endpoints (re-POSTing baseline would be another write).
+        # The mutated param is stripped: a clean re-read observes
+        # persisted state instead of re-applying the mutation.
+        has_body = bool(ep.body_parameters)
+        if has_body:
+            return blank
+        from urllib.parse import (urlsplit, urlunsplit, parse_qsl,
+                                  urlencode)
+        parts = urlsplit(ep.url)
+        q = [(k, v) for k, v in
+             parse_qsl(parts.query, keep_blank_values=True)
+             if k != cand.param]
+        read_url = urlunsplit(
+            (parts.scheme, parts.netloc, parts.path,
+             urlencode(q, doseq=True), ""))
+        v = verify_persisted(client, read_url, headers, cand.param,
+                             res.mutated, timeout)
+        return _wrap(v)
+
+    def _verify_race_idempotent(self, client, ep, body,
+                                headers) -> dict:
+        """Sequential idempotency re-check for a divergent burst.
+
+        Only runs when the request carries an idempotency key
+        (Idempotency-Key header or *idempotency* body field) — without
+        one, there is nothing well-defined to re-check, so verification
+        stays inconclusive and the candidate stands as-is.
+        """
+        from .verify.base import verify_idempotency
+        timeout = self.cfg.scan.http_timeout
+        key_name = ""
+        for hk in headers:
+            if hk.lower() == "idempotency-key":
+                key_name = hk
+                break
+        if not key_name:
+            for bk in body:
+                if "idempotency" in bk.lower():
+                    key_name = bk
+                    break
+        if not key_name:
+            return {"status": "inconclusive",
+                    "detail": "no idempotency key present — nothing "
+                              "well-defined to re-check",
+                    "evidence": {}}
+        v = verify_idempotency(client, "POST", ep.url, body, headers,
+                               key_name, timeout)
+        return {"status": v.status, "detail": v.detail,
+                "evidence": v.evidence}
 
     # ── RACE ENGINE (stateful slice, opt-in) ───────────────────────────
     def _race_probe(self, endpoints: List[Endpoint],
@@ -2089,25 +2242,46 @@ class Orchestrator:
                 metrics.invariants_tested += 1
                 metrics.invariants_violated += len(res.violations)
                 coverage.record("race", "candidate", res.notes)
+                ver = self._verify_race_idempotent(
+                    client, ep, body, aheaders)
+                status, conf = (
+                    ValidationStatus.STRONG_CANDIDATE.value,
+                    Confidence.PROBABLE.value)
+                extra_tags: list = []
+                if ver["status"] == "verified":
+                    status = ValidationStatus.CONFIRMED.value
+                    conf = Confidence.CONFIRMED.value
+                    metrics.effects_verified += 1
+                    extra_tags.append("verified-effect")
+                    log.info("race verified: %s", ver["detail"])
                 f = Finding(
                     id=stable_finding_id("race", ep.normalized_url),
                     source="race",
                     name=(f"Race condition: {cfg_r.concurrency}× POST "
                           f"{ep.path} processed concurrently with "
-                          f"divergent results"),
+                          f"divergent results"
+                          + (" [verified effect]"
+                             if ver["status"] == "verified" else "")),
                     severity="high",
-                    confidence=Confidence.PROBABLE.value,
-                    validation_status=ValidationStatus.STRONG_CANDIDATE.value,
+                    confidence=conf,
+                    validation_status=status,
                     host=ep.host, matched_at=ep.url,
                     endpoint_url=ep.url, method="POST",
-                    description=res.notes,
-                    tags=["race", "business-logic", ep.endpoint_type],
-                    raw={"race": res.to_dict()},
+                    description=res.notes + (
+                        f" Verification: {ver['detail']}"
+                        if ver["detail"] else ""),
+                    tags=["race", "business-logic", ep.endpoint_type] +
+                    extra_tags,
+                    raw={"race": res.to_dict(),
+                         "verification": ver},
                     false_positive_notes=(
                         "Divergent IDs across a synchronized burst "
                         "indicate duplicate processing; rule out "
                         "request-specific randomness (timestamps, "
-                        "nonces) before reporting."),
+                        "nonces) before reporting."
+                        + (" Sequential idempotency re-check CONFIRMED "
+                           "double processing; see verification evidence."
+                           if ver["status"] == "verified" else "")),
                     identity=aname, tenant=atenant,
                 )
                 evidence.allocate(f)
@@ -2116,7 +2290,9 @@ class Orchestrator:
                     request_text=(f"{cfg_r.concurrency}× POST {ep.url} "
                                   f"through a start barrier, "
                                   f"{cfg_r.rounds} rounds"),
-                    response_text=res.notes)
+                    response_text=res.notes + (
+                        f"\n--- verification ---\n{ver['detail']}"
+                        if ver["detail"] else ""))
                 findings.append(f)
                 log.info("race: %s", res.notes)
             elif res.verdict == "negative":
