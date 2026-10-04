@@ -1,0 +1,6 @@
+HTTP 200
+Content-Type: application/json
+
+{"item":"SAMPLE-ITEM","quantity":2}
+
+[Synthetic readback confirms the configured test invariant was violated.]

@@ -1,0 +1,4 @@
+HTTP 503
+Content-Type: text/html
+
+[Synthetic upstream error response omitted.]

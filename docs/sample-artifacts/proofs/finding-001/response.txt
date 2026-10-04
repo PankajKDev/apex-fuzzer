@@ -1,0 +1,4 @@
+HTTP 200
+Content-Type: text/html
+
+<!-- Synthetic response excerpt; candidate did not reproduce. -->

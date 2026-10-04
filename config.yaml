@@ -23,6 +23,12 @@ validation:
   enabled: false
   ssrf: false
   differential: false
+  open_redirect: true
+  open_redirect_max_endpoints: 10
+  open_redirect_max_params: 3
+  cors: true
+  cors_max_endpoints: 10
+  cors_max_identities: 3
   mutation: true
   mutation_payloads: 8
   differential_max_endpoints: 30

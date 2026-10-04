@@ -1,0 +1,14 @@
+{
+  "timestamp": "2026-01-15T12:02:00Z",
+  "finding_id": "sample-verified-001",
+  "url": "https://demo.example.com/cart/items",
+  "method": "POST",
+  "severity": "high",
+  "validation_status": "confirmed",
+  "result_status": "verified_effect",
+  "confidence": "confirmed",
+  "template_id": "apex/business/readback-assertion",
+  "source": "business-logic-validator",
+  "response_status": 200,
+  "response_headers": {"Content-Type": "application/json"}
+}

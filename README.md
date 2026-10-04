@@ -171,6 +171,17 @@ Results land in `output/<host>/`: `report.html`, `findings.jsonl`,
 `coverage.json`, `application.json`, `application_graph.json`,
 `attack_chains.jsonl`, `proofs/`.
 
+For a strict, bounded bounty workflow with zero-network preflight, see
+[Authorized bounty scan workflow](docs/bounty-scan.md).
+For class-by-class coverage and the prioritized tool roadmap, see the
+[bug bounty class and tool matrix](docs/bounty-class-tool-matrix.md).
+For a loopback-only discovery walkthrough, see the
+[local-lab quickstart](docs/local-lab-quickstart.md). Detection boundaries
+and the release gate are documented in
+[known limitations](docs/known-limitations.md) and the
+[release checklist](docs/release-checklist.md); sanitized example outcomes are
+in [sample artifacts](docs/sample-artifacts/).
+
 ---
 
 ## CLI reference
@@ -209,7 +220,7 @@ Results land in `output/<host>/`: `report.html`, `findings.jsonl`,
 
 | profile         | nuclei | validation | AI | JS | api_specs | robots | differential | arjun | oast | tko-subs | authz-matrix | 2nd-order |
 |-----------------|--------|------------|----|----|-----------|--------|--------------|-------|------|----------|--------------|-----------|
-| `passive`       | –      | –          | –  | ✓  | ✓         | ✓      | –            | –     | –    | ✓ (subzy)| –            | –         |
+| `passive`       | –      | –          | –  | ✓  | ✓         | ✓      | –            | –     | –    | –        | –            | –         |
 | `standard`      | ✓      | –          | –  | ✓  | ✓         | ✓      | –            | ✓     | –    | ✓ (subzy)| –            | –         |
 | `deep`          | ✓      | –          | –  | ✓  | ✓         | ✓      | ✓            | ✓     | ✓    | ✓ (tko)  | ✓            | ✓         |
 | `api`           | ✓      | –          | –  | ✓  | ✓         | –      | ✓            | ✓     | ✓    | ✓ (subzy)| ✓            | –         |
@@ -219,6 +230,11 @@ Results land in `output/<host>/`: `report.html`, `findings.jsonl`,
 Combine profiles with flags: `--validate`, `--ai`, `--oast`, `--differential`,
 `--second-order` and `--second-order-ssrf` force-enable their stages
 regardless of profile.
+
+The passive profile still sends read-only discovery requests. It disables
+Nuclei, validation, AI, OAST, parameter mining, and takeover checks. For
+loopback/private targets, Apex also skips public archive lookups; see the
+[local-lab quickstart](docs/local-lab-quickstart.md).
 `--business-logic` / `--race` / `--browser` (and `--no-browser` to force
 off) do the same for their engines. Config-file keys
 (`validation.enabled/differential/ssrf/second_order/second_order_ssrf`,
@@ -262,6 +278,12 @@ validation:
   enabled: false
   ssrf: false             # also enables the OAST sweep
   differential: false
+  open_redirect: true     # validation profile/enabled only; observed GET fields
+  open_redirect_max_endpoints: 10
+  open_redirect_max_params: 3
+  cors: true              # cookie-authenticated contexts only
+  cors_max_endpoints: 10
+  cors_max_identities: 3
   mutation: true          # WAF-aware prescreen before sqlmap/dalfox
   mutation_payloads: 8    # ladder depth per class
   differential_max_endpoints: 30
@@ -458,11 +480,17 @@ Blind SSRF/RCE/XXE produce no in-band signal, so candidates are fired with a
 unique, per-request Interactsh callback hostname and the provider is polled for
 DNS/HTTP/SMTP interactions (`validation/oast.py`).
 
-- **Public (default):** `server: "oast.pro"`, `api_base: null` → registers at
-  `https://api.oast.pro`, callbacks at `<token>.oast.pro`. On registration
-  failure it fails over to `oast.live` automatically.
+- **Public (default):** `server: "oast.pro"`, `api_base: null` → Apex starts
+  the official `interactsh-client`, reads its generated callback payload, and
+  consumes its JSONL interaction output. It needs no ProjectDiscovery API key.
+  If registration fails on the selected public server, Apex retries the other
+  default (`oast.live` / `oast.pro`). Install the binary with
+  `apex-fuzzer --update`; if it is missing, public OAST is marked unavailable
+  rather than falling back to the legacy empty registration request.
 - **Self-hosted:** point `server` at your Interactsh callback domain and set
-  `api_base` to its REST endpoint.
+  `api_base` to its custom REST endpoint to use the compatibility REST path.
+  When `api_base` is `null`, the official client is used for public or
+  self-hosted servers it can address directly.
 - **Local static collector:** pass `--oast-callback-url
   http://localhost:9001` for a simple HTTP collector exposing a JSON `/_log`
   endpoint (such as the SSRF lab). This uses unique path tokens and avoids
@@ -476,8 +504,9 @@ collectors use a unique path nonce and their configured scheme (the lab's
 collector is HTTP). The scanner matches that per-request nonce, retains the
 request method and shape, and records status/length differences as
 inconclusive signals when no callback arrives. It does not request cloud
-metadata or credential endpoints. The provider is deregistered
-(`DELETE /deregister/{uuid}`) after the scan.
+metadata or credential endpoints. The official client is interrupted and
+deregisters its session after the scan; the explicit custom-REST compatibility
+path uses `DELETE /deregister/{uuid}`.
 
 ---
 

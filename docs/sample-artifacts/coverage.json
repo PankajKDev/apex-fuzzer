@@ -1,0 +1,18 @@
+{
+  "status": {
+    "sqli": "inconclusive",
+    "xss": "tested_negative",
+    "business_logic": "confirmed"
+  },
+  "detail": {
+    "sqli": "Upstream error interrupted the paired control.",
+    "xss": "The sampled reflected-input candidate did not reproduce.",
+    "business_logic": "Configured readback invariant failed after the controlled mutation."
+  },
+  "counts": {
+    "sqli": 1,
+    "xss": 1,
+    "business_logic": 1
+  },
+  "known": ["sqli", "xss", "business_logic"]
+}

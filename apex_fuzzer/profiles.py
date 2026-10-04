@@ -36,7 +36,7 @@ PROFILES = {
     "passive": Profile(
         name="passive", run_nuclei=False, run_validation=False,
         run_ai=False, differential=False, param_mining=False,
-        oast=False,
+        oast=False, run_subzy=False,
     ),
     "standard": Profile(name="standard"),
     "deep": Profile(

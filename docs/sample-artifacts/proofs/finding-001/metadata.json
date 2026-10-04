@@ -1,0 +1,14 @@
+{
+  "timestamp": "2026-01-15T12:00:00Z",
+  "finding_id": "sample-negative-001",
+  "url": "https://demo.example.com/search?q=sample",
+  "method": "GET",
+  "severity": "low",
+  "validation_status": "false_positive",
+  "result_status": "negative",
+  "confidence": "possible",
+  "template_id": "example/reflection",
+  "source": "nuclei-template",
+  "response_status": 200,
+  "response_headers": {"Content-Type": "text/html"}
+}

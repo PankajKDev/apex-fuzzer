@@ -1,0 +1,49 @@
+# Strict, bounded starter configuration for an explicitly authorized target.
+# Replace the example authorization reference, host, and time window before use.
+scan:
+  rate_limit: 5
+  concurrency: 2
+  timeout: 300
+  http_timeout: 10
+
+discovery:
+  arjun: false
+
+validation:
+  mutation: true
+  mutation_payloads: 4
+  second_order_max_endpoints: 3
+  second_order_max_renders: 5
+
+business:
+  enabled: false # validation profile enables this module; strict gates it
+  max_endpoints: 3
+  max_params: 2
+
+oast:
+  max_endpoints: 3
+  max_params_per_endpoint: 2
+
+budgets:
+  requests_per_host: 300
+  requests_per_endpoint: 30
+  authz_tests_per_endpoint: 10
+  browser_actions: 50
+  ai_experiments: 0
+
+safety:
+  strict: true
+  authorization_ref: "PROGRAM-1234-TARGET-5678"
+  approved_domains:
+    - app.example.com
+  approved_cidrs: []
+  valid_from: "2026-10-04T00:00:00Z"
+  valid_until: "2026-10-05T00:00:00Z"
+  allowed_modules:
+    - business_logic
+    - second_order
+  allow_state_change: false # CLI acknowledgment is required per run
+  max_requests: 250
+  max_state_changes: 20
+  stop_on_candidate: true
+  cooldown_ms: 500

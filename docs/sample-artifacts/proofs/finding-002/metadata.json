@@ -1,0 +1,14 @@
+{
+  "timestamp": "2026-01-15T12:01:00Z",
+  "finding_id": "sample-inconclusive-001",
+  "url": "https://demo.example.com/items?id=7",
+  "method": "GET",
+  "severity": "medium",
+  "validation_status": "inconclusive",
+  "result_status": "inconclusive",
+  "confidence": "possible",
+  "template_id": "apex/sqli/boolean-control",
+  "source": "sqli-validator",
+  "response_status": 503,
+  "response_headers": {"Content-Type": "text/html"}
+}

@@ -1,0 +1,4 @@
+POST https://demo.example.com/cart/items
+Content-Type: application/json
+
+{"item":"SAMPLE-ITEM","quantity":2}

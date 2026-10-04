@@ -12,6 +12,12 @@ resolve the hostname but never complete an HTTP request (DNS rebinding,
 libraries that resolve before connecting).
 """
 import time
+import json
+import os
+import shutil
+import signal
+import subprocess
+import tempfile
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Optional
 from urllib.parse import urlencode, urlsplit, urlunsplit, parse_qsl
@@ -147,17 +153,18 @@ def _nested_json(values: Dict[str, str]) -> Dict:
 
 
 class InteractshProvider:
-    """Thin client over the Interactsh REST API.
+    """Provider adapter for official Interactsh, custom REST, or a lab.
 
-    Public:   register on https://api.oast.pro, callbacks at {token}.oast.pro
-    Self-host: set ``api_base`` (REST) — the callback host is then
-    {token}.{server} where ``server`` is your interactsh callback domain.
+    Public and ordinary self-hosted sessions use ``interactsh-client``.
+    Explicit ``api_base`` selects the legacy custom-REST compatibility path;
+    ``callback_url`` selects the static local-lab collector.
     """
 
     def __init__(self, server: str = "oast.pro", api_base: Optional[str] = None,
                  timeout: int = 15, callback_url: str = ""):
         self.server = (server or "oast.pro").strip().rstrip(".")
         self.timeout = timeout
+        self._custom_api_base = bool(api_base)
         self.callback_url = (callback_url or "").strip().rstrip("/")
         if api_base:
             self.api_base = api_base.rstrip("/")
@@ -168,6 +175,10 @@ class InteractshProvider:
         self.uuid: Optional[str] = None
         self.token: Optional[str] = None
         self._closed = False
+        self._client_process: Optional[subprocess.Popen] = None
+        self._client_tmp: Optional[tempfile.TemporaryDirectory] = None
+        self._client_log = None
+        self._interaction_file = None
 
     # ── lifecycle ──────────────────────────────────────────────────────
     def register(self) -> bool:
@@ -180,6 +191,17 @@ class InteractshProvider:
             log.info("using static OAST callback collector %s",
                      self.callback_url)
             return True
+        if not self._custom_api_base:
+            return self._register_client()
+        return self._register_rest()
+
+    def _register_rest(self) -> bool:
+        """Compatibility path for custom REST endpoints.
+
+        The public Interactsh protocol is handled by the official client.
+        Keep explicit ``api_base`` support for self-hosted deployments whose
+        REST endpoint differs from the endpoint inferred by interactsh-client.
+        """
         import requests
         try:
             r = requests.post(f"{self.api_base}/register",
@@ -215,8 +237,131 @@ class InteractshProvider:
                  self.server, self.uuid[:8])
         return True
 
+    def _register_client(self) -> bool:
+        """Start ProjectDiscovery's client and consume its machine outputs."""
+        binary = shutil.which("interactsh-client")
+        if not binary:
+            log.warning("interactsh-client not installed; public OAST is "
+                        "unavailable (install with apex-fuzzer --update)")
+            return False
+
+        servers = [self.server]
+        if self.server in DEFAULT_SERVERS:
+            alternate = "oast.live" if self.server == "oast.pro" else "oast.pro"
+            if alternate not in servers:
+                servers.append(alternate)
+        for server in servers:
+            if self._start_client(binary, server):
+                return True
+            self._stop_client()
+        return False
+
+    def _start_client(self, binary: str, server: str) -> bool:
+        temp = tempfile.TemporaryDirectory(prefix="apex-interactsh-")
+        root = temp.name
+        config_file = os.path.join(root, "config.yaml")
+        payload_file = os.path.join(root, "payloads.txt")
+        interaction_file = os.path.join(root, "interactions.jsonl")
+        log_file = os.path.join(root, "client.log")
+        with open(config_file, "w", encoding="utf-8") as f:
+            f.write("{}\n")
+        log_handle = open(log_file, "w", encoding="utf-8")
+        command = [
+            binary, "-s", server, "-n", "1", "-ps", "-psf", payload_file,
+            "-json", "-o", interaction_file, "-pi", "1", "-duc",
+            "-auth=false", "-config", config_file,
+        ]
+        try:
+            proc = subprocess.Popen(
+                command, stdin=subprocess.DEVNULL, stdout=log_handle,
+                stderr=subprocess.STDOUT, close_fds=True)
+        except OSError as exc:
+            log_handle.close()
+            temp.cleanup()
+            log.warning("could not start interactsh-client: %s", exc)
+            return False
+
+        self._client_tmp = temp
+        self._client_log = log_handle
+        self._client_process = proc
+        self._interaction_file = interaction_file
+        deadline = time.monotonic() + self.timeout
+        while time.monotonic() < deadline:
+            if os.path.isfile(payload_file):
+                try:
+                    with open(payload_file, encoding="utf-8") as f:
+                        lines = f.read().splitlines()
+                except OSError:
+                    lines = []
+                for line in lines:
+                    host = (urlsplit("//" + line.strip()).hostname or "")
+                    labels = host.split(".")
+                    if len(labels) >= 2 and all(labels):
+                        self.token = labels[0]
+                        self.server = ".".join(labels[1:])
+                        self.uuid = self.token
+                        log.info("interactsh-client registered on %s",
+                                 self.server)
+                        return True
+            if proc.poll() is not None:
+                break
+            time.sleep(0.1)
+
+        detail = ""
+        try:
+            log_handle.flush()
+            with open(log_file, encoding="utf-8") as f:
+                detail = f.read()[-500:].strip()
+        except OSError:
+            pass
+        log.warning("interactsh-client registration failed on %s%s",
+                    server, f": {detail}" if detail else "")
+        return False
+
+    def _read_client_interactions(self) -> List[Dict]:
+        if not self._interaction_file:
+            return []
+        try:
+            with open(self._interaction_file, encoding="utf-8") as f:
+                interactions = []
+                for line in f:
+                    try:
+                        item = json.loads(line)
+                    except (TypeError, ValueError):
+                        continue
+                    if isinstance(item, dict):
+                        interactions.append(item)
+                return interactions
+        except OSError:
+            return []
+
+    def _stop_client(self) -> None:
+        proc, self._client_process = self._client_process, None
+        if proc is not None and proc.poll() is None:
+            try:
+                proc.send_signal(signal.SIGINT)
+                proc.wait(timeout=5)
+            except (OSError, subprocess.TimeoutExpired):
+                try:
+                    proc.kill()
+                    proc.wait(timeout=2)
+                except (OSError, subprocess.TimeoutExpired):
+                    pass
+        self._interaction_file = None
+        if self._client_log is not None:
+            try:
+                self._client_log.close()
+            except OSError:
+                pass
+            self._client_log = None
+        if self._client_tmp is not None:
+            self._client_tmp.cleanup()
+            self._client_tmp = None
+
     def available(self) -> bool:
-        return bool(self.token) and not self._closed
+        process_ok = (self._client_process is None or
+                      self._client_process.poll() is None)
+        return bool(self.token) and not self._closed and process_ok
 
     def create_token(self) -> str:
         """Unique callback hostname for this scan."""
@@ -243,6 +388,19 @@ class InteractshProvider:
     def poll(self, timeout: Optional[int] = None,
              interval: Optional[int] = None) -> List[Dict]:
         """Poll for interactions until ``timeout`` seconds elapse."""
+        if self._client_process is not None:
+            timeout = self.timeout if timeout is None else timeout
+            interval = 1 if interval is None else max(1, interval)
+            deadline = time.monotonic() + timeout
+            while time.monotonic() < deadline:
+                interactions = self._read_client_interactions()
+                if interactions:
+                    return interactions
+                if self._client_process.poll() is not None:
+                    return []
+                time.sleep(min(interval, max(0.0,
+                                             deadline - time.monotonic())))
+            return self._read_client_interactions()
         import requests
         timeout = timeout or self.timeout
         interval = interval or 2
@@ -278,6 +436,9 @@ class InteractshProvider:
         if self._closed:
             return
         self._closed = True
+        if self._client_process is not None:
+            self._stop_client()
+            return
         if not self.uuid or self.callback_url:
             return
         import requests

@@ -50,6 +50,14 @@ class ValidationConfig:
     mutation: bool = True
     mutation_payloads: int = 8
     differential_max_endpoints: int = 30
+    # Safe, non-following GET checks against observed redirect-like query
+    # parameters. Runs only as part of an explicitly enabled validation pass.
+    open_redirect: bool = True
+    open_redirect_max_endpoints: int = 10
+    open_redirect_max_params: int = 3
+    cors: bool = True
+    cors_max_endpoints: int = 10
+    cors_max_identities: int = 3
     # stored-XSS correlation writes canary data: opt-in only
     second_order: bool = False
     # blind stored-SSRF correlation writes callback URLs: opt-in only

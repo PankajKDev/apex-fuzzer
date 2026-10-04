@@ -12,6 +12,7 @@ New stages (v5.2):
 - adaptive rate limiting on all direct HTTP (spec §9)
 """
 import csv
+import ipaddress
 import time
 from pathlib import Path
 from typing import List, Dict, Set, Optional
@@ -71,6 +72,18 @@ from .safety.authorization import (
     Authorization, AuthorizationRefused, GATED_MODULES)
 
 log = get_logger("orchestrator")
+
+
+def _is_public_archive_target(target: str) -> bool:
+    """Avoid disclosing local/private lab targets to public archive tools."""
+    hostname = target_hostname(target)
+    if not hostname or hostname == "localhost" or hostname.endswith(
+            ".localhost"):
+        return False
+    try:
+        return ipaddress.ip_address(hostname).is_global
+    except ValueError:
+        return "." in hostname
 
 LIVE_CODES = "200,204,301,302,401,403,405,500,502,503,504"
 
@@ -464,17 +477,22 @@ class Orchestrator:
         host = target.replace("http://", "").replace(
             "https://", "").split("/")[0]
         jobs = []
-        ps = Path.home() / "ParamSpider" / "paramspider.py"
-        if ps.exists():
-            jobs.append((["python3", str(ps), "-d", host, "--level", "high",
-                          "--quiet", "-o", str(out_dir / "param.txt")],
-                         "paramspider", None, out_dir / "param.txt"))
-        if which("waybackurls"):
-            jobs.append((["waybackurls"], "waybackurls",
-                         host + "\n", out_dir / "wayback.txt"))
-        if which("gauplus"):
-            jobs.append((["gauplus", "-subs"], "gauplus",
-                         host + "\n", out_dir / "gau.txt"))
+        if _is_public_archive_target(target):
+            ps = Path.home() / "ParamSpider" / "paramspider.py"
+            if ps.exists():
+                jobs.append((["python3", str(ps), "-d", host,
+                              "--level", "high", "--quiet", "-o",
+                              str(out_dir / "param.txt")],
+                             "paramspider", None, out_dir / "param.txt"))
+            if which("waybackurls"):
+                jobs.append((["waybackurls"], "waybackurls",
+                             host + "\n", out_dir / "wayback.txt"))
+            if which("gauplus"):
+                jobs.append((["gauplus", "-subs"], "gauplus",
+                             host + "\n", out_dir / "gau.txt"))
+        else:
+            log.info("recon: skipping public archive lookups for local or "
+                     "non-public target %s", host)
         if which("hakrawler"):
             jobs.append((["hakrawler", "-d", "3", "-subs", "-u"],
                          "hakrawler", url + "\n", out_dir / "hakrawler.txt"))
@@ -1241,6 +1259,17 @@ class Orchestrator:
                   app_graph=None, ck=None) -> List[Finding]:
         out: List[Finding] = []
 
+        # Open redirects are checked only during an explicitly enabled
+        # validation run, never merely because OAST/differential was selected.
+        if ((self.profile.run_validation or self.cfg.validation.enabled)
+                and self.cfg.validation.open_redirect):
+            from .validation.open_redirect import probe_open_redirects
+            out += probe_open_redirects(
+                endpoints, client, evidence, metrics, coverage, self.scope,
+                max_endpoints=self.cfg.validation.open_redirect_max_endpoints,
+                max_params=self.cfg.validation.open_redirect_max_params,
+                timeout=self.cfg.scan.http_timeout)
+
         # 0) WAF fingerprint from a live probe (drives mutation choice)
         waf = metrics.waf_detected or ""
         if endpoints and not waf:
@@ -1256,6 +1285,18 @@ class Orchestrator:
 
         techs = read_jsonl(out_dir / "technologies.jsonl")
         identities, _, _ = from_auth_contexts(self.cfg.auth.contexts)
+
+        # CORS needs an explicitly configured cookie-authenticated identity;
+        # anonymous header reflection is not treated as a bounty finding.
+        if ((self.profile.run_validation or self.cfg.validation.enabled)
+                and self.cfg.validation.cors):
+            from .validation.cors import probe_cors
+            out += probe_cors(
+                endpoints, client, evidence, metrics, coverage, self.scope,
+                identities,
+                max_endpoints=self.cfg.validation.cors_max_endpoints,
+                max_identities=self.cfg.validation.cors_max_identities,
+                timeout=self.cfg.scan.http_timeout)
 
         # 1) differential auth-context testing (spec §2)
         if (self.profile.differential or self.cfg.validation.differential):
