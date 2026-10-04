@@ -18,6 +18,22 @@ from ..logging_setup import get_logger
 log = get_logger("nuclei")
 
 
+def _observed_http_method(result: Dict) -> str:
+    """Return an actual HTTP verb; Nuclei's ``type`` is a protocol label."""
+    methods = {"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS",
+               "HEAD", "TRACE"}
+    for key in ("method", "http-method", "http_method"):
+        value = str(result.get(key) or "").upper()
+        if value in methods:
+            return value
+    request = result.get("request") or result.get("request_raw")
+    if isinstance(request, str) and request.split():
+        value = request.split()[0].upper()
+        if value in methods:
+            return value
+    return "GET"
+
+
 class NucleiRunner:
     def __init__(self, cfg, output_dir: Path):
         self.cfg = cfg
@@ -110,7 +126,7 @@ class NucleiRunner:
                     host=d.get("host", ""),
                     matched_at=d.get("matched-at", ""),
                     endpoint_url=d.get("matched-at"),
-                    method=(d.get("type") or "GET").upper(),
+                    method=_observed_http_method(d),
                     description=info.get("description", "") or "",
                     tags=info.get("tags", []) or [],
                     raw=d,

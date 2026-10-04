@@ -23,14 +23,26 @@ validation:
   enabled: false
   ssrf: false
   differential: false
+  ssti: true
+  xxe: true                 # OAST-only; observed XML POST + state-change gate
+  path_traversal: true      # requires a harmless operator-supplied marker
+  # Relative path to an owner-created canary file, not a system file.
+  path_traversal_marker_path: ""
+  path_traversal_marker_content: ""    # exact unique file contents
+  path_traversal_max_depth: 4
   open_redirect: true
   open_redirect_max_endpoints: 10
   open_redirect_max_params: 3
   cors: true
+  cors_browser: false       # opt-in real-browser proof after CORS candidates
   cors_max_endpoints: 10
   cors_max_identities: 3
   mutation: true
   mutation_payloads: 8
+  # sqlmap time-based (delay) confirmation is a separate opt-in: delay
+  # payloads hold DB connections open and are the heaviest SQLi check.
+  sqli_time_based: false
+  sqli_time_sec: 2
   differential_max_endpoints: 30
   min_severity: medium
   # Stored-XSS correlation persists canary data server-side: opt-in only.
@@ -49,6 +61,10 @@ authorization:
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE"]
   max_endpoints: 20
   max_ids_per_endpoint: 3
+  # MTN-pattern write replay: replays the attacker's observed mutating
+  # request with the victim's ID, verified via readback. Opt-in only for
+  # test accounts/objects; additionally requires --ack-state-change.
+  write_replay: false
   # identifier fields proving ownership when equal in owner and
   # tester responses (Phase 7 comparison)
   # ownership_fields: ["owner_id", "user_id", "account_id",
@@ -93,12 +109,14 @@ race:
 browser:
   enabled: false           # or --browser / deep profile
   headless: true
+  chromium_executable_path: ""  # optional system Chromium path
   max_pages: 100
   max_depth: 5
   capture_network: true
   capture_websocket: true   # record ws:// URLs for later phases
   capture_storage: true     # cookies + web storage + session export
   capture_dom: true
+  capture_authenticated_requests: false  # opt-in; read-only, in-scope, same-origin request capture
   navigation_timeout_ms: 30000
 
 # Request budgets (§50) — backstop against runaway testing.

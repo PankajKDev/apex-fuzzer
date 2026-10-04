@@ -52,8 +52,14 @@ def build_parser() -> argparse.ArgumentParser:
                         "(persists callback URLs)")
     p.add_argument("--business-logic", action="store_true",
                    help="Enable business-logic mutation engine")
+    p.add_argument("--sqli-time", action="store_true",
+                   help="Opt in to sqlmap time-based (delay) confirmation; "
+                        "holds DB connections open, heaviest SQLi check")
     p.add_argument("--race", action="store_true",
                    help="Enable race-condition engine (aggressive)")
+    p.add_argument("--authz-write-replay", action="store_true",
+                   help="Replay observed mutating requests with swapped "
+                        "IDs (test accounts only; needs --ack-state-change)")
     p.add_argument("--browser", action="store_true",
                    help="Enable browser-driven discovery (needs playwright)")
     p.add_argument("--no-browser", action="store_true",

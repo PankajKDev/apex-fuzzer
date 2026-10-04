@@ -431,7 +431,8 @@ def test_plugin_prerequisites():
 
 def test_builtin_plugins_registered():
     for name in ("sqli-mutation", "sqli-sqlmap", "xss-mutation",
-                 "xss-dalfox", "ssrf-oast"):
+                 "xss-dalfox", "ssrf-oast", "ssti-arithmetic",
+                 "xxe-oast", "path-traversal-marker"):
         assert name in registered()
 
 
@@ -450,7 +451,8 @@ def test_adapter_class_gating():
     ctx = TestContext(Config())
     tgt = TestTarget("https://a.com/", test_class="unknown")
     for name in ("sqli-mutation", "sqli-sqlmap", "xss-mutation",
-                 "xss-dalfox", "ssrf-oast"):
+                 "xss-dalfox", "ssrf-oast", "ssti-arithmetic",
+                 "xxe-oast", "path-traversal-marker"):
         _, res = run_plugins(tgt, ctx, [name])[0]
         assert res.status == "skipped", name
 

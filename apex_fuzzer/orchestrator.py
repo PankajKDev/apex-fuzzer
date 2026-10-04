@@ -694,6 +694,23 @@ class Orchestrator:
                 confidence=Confidence.POSSIBLE.value))
         if entry.get("form_method") and ep.method == "GET":
             ep.method = entry["form_method"].upper()
+        observed = list(getattr(ep, "observed_requests", []) or [])
+        observed_keys = {
+            (item.get("identity"), item.get("method"), item.get("url"),
+             item.get("post_data"))
+            for item in observed if isinstance(item, dict)}
+        for request in entry.get("observed_requests") or []:
+            if not isinstance(request, dict):
+                continue
+            key = (request.get("identity"), request.get("method"),
+                   request.get("url"), request.get("post_data"))
+            if key in observed_keys or len(observed) >= 100:
+                continue
+            observed.append(dict(request))
+            observed_keys.add(key)
+        if observed:
+            # Runtime-only material. Endpoint.to_dict deliberately omits it.
+            ep.observed_requests = observed
         ep.query_parameters = param_mod.merge(
             ep.query_parameters, [p for p in new_params
                                   if p.location == "query"])
@@ -715,13 +732,17 @@ class Orchestrator:
             log.info("browser: playwright not installed — skipping "
                      "(`pip install apex-fuzzer[browser]`)")
             return []
-        from .browser.network import NetworkRecorder
+        from .browser.network import (NetworkRecorder,
+                                      authenticated_capture_request_allowed,
+                                      safe_artifact_url)
         from .browser.actions import snapshot_dom
         from .browser.storage import StorageCapture
         from .browser.sessions import SessionManager
         bcfg = self.cfg.browser
         entries: List[Dict] = []
         pages_visited = 0
+        visited_urls: List[str] = []
+        recorders = []
         try:
             with BrowserEngine(self.cfg, headless=bcfg.headless,
                                timeout_ms=bcfg.navigation_timeout_ms
@@ -731,6 +752,7 @@ class Orchestrator:
                 recorder = NetworkRecorder(
                     scope=self.scope,
                     max_requests=bcfg.max_pages * 50)
+                recorders.append(recorder)
                 if bcfg.capture_network:
                     recorder.attach(page)
                 seen, queue = set(), [(base_url, 0)]
@@ -747,6 +769,7 @@ class Orchestrator:
                     try:
                         page.goto(url, timeout=bcfg.navigation_timeout_ms)
                         pages_visited += 1
+                        visited_urls.append(url)
                     except Exception as e:
                         log.debug("browser: goto %s failed: %s", url, e)
                         continue
@@ -777,16 +800,107 @@ class Orchestrator:
                                              or "GET").upper()})
                 if bcfg.capture_network:
                     entries.extend(recorder.to_endpoints())
+                if getattr(bcfg, "capture_authenticated_requests", False):
+                    for auth_context in self.cfg.auth.contexts or []:
+                        if not (auth_context.storage_state or
+                                auth_context.headers):
+                            continue
+                        auth_page = auth_browser_context = None
+                        try:
+                            auth_browser_context = engine.new_context(
+                                storage_state=auth_context.storage_state,
+                                identity=auth_context.name,
+                                service_workers="block")
+                            auth_page = auth_browser_context.new_page()
+                            recorder_for_identity = NetworkRecorder(
+                                scope=self.scope,
+                                max_requests=bcfg.max_pages * 50,
+                                identity=auth_context.name)
+                            recorders.append(recorder_for_identity)
+                            # This recorder is controlled by the dedicated
+                            # opt-in flag, independently of anonymous network
+                            # artifact capture.
+                            recorder_for_identity.attach(auth_page)
+                            current_navigation = [""]
+
+                            def route_authenticated(route):
+                                request = route.request
+                                if authenticated_capture_request_allowed(
+                                        request.method, request.url,
+                                        current_navigation[0], self.scope):
+                                    headers = dict(request.headers or {})
+                                    headers.update(auth_context.headers or {})
+                                    route.continue_(headers=headers)
+                                else:
+                                    route.abort()
+
+                            auth_page.route("**/*", route_authenticated)
+                            if hasattr(auth_page, "route_web_socket"):
+                                auth_page.route_web_socket(
+                                    "**/*", lambda websocket: websocket.close())
+                            else:
+                                auth_page.add_init_script(
+                                    "window.WebSocket = class { "
+                                    "constructor() { throw new Error("
+                                    "'WebSocket disabled during capture'); } };")
+                            for auth_url in visited_urls[:bcfg.max_pages]:
+                                if not self.scope.is_in_scope(auth_url):
+                                    continue
+                                if not budgets.consume_test("browser",
+                                                            auth_url):
+                                    log.info("browser: authenticated capture "
+                                             "action budget exhausted")
+                                    break
+                                current_navigation[0] = auth_url
+                                try:
+                                    auth_page.goto(
+                                        auth_url,
+                                        timeout=bcfg.navigation_timeout_ms)
+                                    pages_visited += 1
+                                except Exception as exc:
+                                    log.debug(
+                                        "browser: authenticated navigation "
+                                        "for '%s' failed: %s",
+                                        auth_context.name, exc)
+                            entries.extend(
+                                recorder_for_identity.to_endpoints())
+                        except Exception as exc:
+                            log.info("browser: authenticated capture skipped "
+                                     "for '%s' (%s)",
+                                     auth_context.name, type(exc).__name__)
+                        finally:
+                            if auth_page is not None:
+                                try:
+                                    auth_page.close()
+                                except Exception:
+                                    pass
+                            if auth_browser_context is not None:
+                                try:
+                                    auth_browser_context.close()
+                                except Exception:
+                                    pass
                 if bcfg.capture_websocket:
                     for ws in recorder.websockets:
                         entries.append({"url": ws, "method": "WS",
                                         "params": [], "body": {}})
                 (out_dir / "browser_urls.txt").write_text(
-                    "\n".join(sorted({e["url"] for e in entries
+                    "\n".join(sorted({safe_artifact_url(e["url"])
+                                      for e in entries
                                       if e.get("url")})))
                 import json as _json
                 (out_dir / "browser_traffic.json").write_text(
-                    _json.dumps(recorder.to_dict(), indent=2))
+                    _json.dumps({
+                        "identities": [r.identity for r in recorders],
+                        "requests": [request.to_dict()
+                                     for r in recorders
+                                     for request in r.requests],
+                        "websockets": list(dict.fromkeys(
+                            safe_artifact_url(ws)
+                            for r in recorders for ws in r.websockets)),
+                        "navigations": list(dict.fromkeys(
+                            safe_artifact_url(url)
+                            for r in recorders for url in r.navigations)),
+                    }, indent=2))
                 if bcfg.capture_storage:
                     try:
                         capture = StorageCapture().capture(ctx, page)
@@ -810,7 +924,8 @@ class Orchestrator:
             return []
         metrics.browser_pages = pages_visited
         try:
-            metrics.browser_requests = len(recorder.requests)
+            metrics.browser_requests = sum(len(r.requests)
+                                            for r in recorders)
         except Exception:
             pass
         log.info("browser: %d pages → %d endpoint entries",
@@ -1291,12 +1406,59 @@ class Orchestrator:
         if ((self.profile.run_validation or self.cfg.validation.enabled)
                 and self.cfg.validation.cors):
             from .validation.cors import probe_cors
-            out += probe_cors(
+            cors_findings = probe_cors(
                 endpoints, client, evidence, metrics, coverage, self.scope,
                 identities,
                 max_endpoints=self.cfg.validation.cors_max_endpoints,
                 max_identities=self.cfg.validation.cors_max_identities,
                 timeout=self.cfg.scan.http_timeout)
+            if self.cfg.validation.cors_browser:
+                from .validation.cors_browser import confirm_cors_readability
+                identities_by_name = {item.name: item for item in identities}
+                for finding in cors_findings:
+                    if not budgets.consume_test(
+                            "browser", finding.endpoint_url, limit=1):
+                        finding.raw["browser_confirmation"] = {
+                            "status": "blocked",
+                            "reason": "browser action budget exhausted"}
+                        continue
+                    identity = identities_by_name.get(finding.identity)
+                    if identity is None:
+                        result = {
+                            "status": "unavailable",
+                            "reason": "candidate identity is unavailable"}
+                    else:
+                        result = confirm_cors_readability(
+                            finding, identity, self.cfg,
+                            timeout_ms=self.cfg.browser.navigation_timeout_ms)
+                    finding.raw["browser_confirmation"] = result
+                    if result.get("status") != "confirmed":
+                        continue
+                    finding.validation_status = ValidationStatus.CONFIRMED.value
+                    finding.confidence = Confidence.CONFIRMED.value
+                    finding.tags.append("cors-browser-readable")
+                    finding.description += (
+                        " Chromium confirmed that a cross-origin page could "
+                        "read the successful response while the configured "
+                        "cookie was sent. The response body was not retained.")
+                    evidence.record(
+                        finding,
+                        request_text=(
+                            f"GET {finding.endpoint_url}\n"
+                            f"Origin: {result.get('origin', finding.raw.get('origin', ''))}\n"
+                            f"[browser identity: {finding.identity}; cookie value omitted]\n"),
+                        response_text=(
+                            f"Chromium fetch status: "
+                            f"{result.get('response_status')}\n"
+                            f"[body readable; {result.get('response_length')} "
+                            "characters; body omitted]\n"),
+                        response_headers=finding.response_headers)
+                    metrics.validated_confirmed += 1
+                    coverage.record(
+                        "cors", "confirmed",
+                        "Chromium read a successful cross-origin response "
+                        "with the configured cookie present")
+            out += cors_findings
 
         # 1) differential auth-context testing (spec §2)
         if (self.profile.differential or self.cfg.validation.differential):
@@ -1794,11 +1956,20 @@ class Orchestrator:
         log.info("authz-matrix: %d endpoints × %s as %d identities",
                  len(targets), cfg_a.methods,
                  len(identities))
+        write_replays = 0
+        write_gated = bool(getattr(cfg_a, "write_replay", False)) and \
+            bool(getattr(getattr(self.cfg, "safety", None),
+                         "allow_state_change", False))
+        if write_gated:
+            write_replays = (len(targets) *
+                             cfg_a.max_ids_per_endpoint *
+                             max(0, len(identities) - 1))
         if not self._reserve_or_block(
                 budgets, coverage, "authz",
                 plan_authz_matrix(len(targets), len(identities),
                                   len(cfg_a.methods),
-                                  cfg_a.max_ids_per_endpoint)):
+                                  cfg_a.max_ids_per_endpoint,
+                                  write_replays)):
             return []
         matrix = AuthorizationMatrix()
         findings: List[Finding] = []
@@ -2033,6 +2204,18 @@ class Orchestrator:
                     response_text=notes)
                 findings.append(f)
                 log.info("authz-matrix: %s", notes)
+            # — MTN-pattern write replay (opt-in): attacker's observed
+            # mutating shape with the victim's ID, verified via readback —
+            if write_gated and self.scope.active_test_allowed(ep.url):
+                self._paced()
+                try:
+                    findings.extend(self._authz_write_replay(
+                        ep, pool, identities, owner_headers, evidence,
+                        metrics, coverage, client, ep_params))
+                except BudgetExceeded:
+                    coverage.record("authz", "blocked",
+                                    f"budget: {ep.normalized_url}")
+                    continue
         # ── Phase 7 views: extended matrix + role/tenant/resource/
         # action analytics over everything the sweeps observed ──────
         from .authz.matrix import build_extended
@@ -2074,6 +2257,98 @@ class Orchestrator:
         self._last_matrix = matrix
         if app_graph is not None:
             self._record_behavioral_state(app_graph, matrix, out_dir)
+        return findings
+
+    # ── BOLA WRITE REPLAY (MTN pattern, opt-in) ──────────────────────
+    def _authz_write_replay(self, ep, pool, identities, owner_headers,
+                            evidence, metrics, coverage, client,
+                            ep_params) -> List[Finding]:
+        """Replay attacker shapes with victim IDs; readback decides."""
+        from .authorization.write_replay import replay_writes
+        cfg_a = self.cfg.authorization
+        findings: List[Finding] = []
+        for tester in identities or []:
+            tester_name = getattr(tester, "name", "anonymous")
+            victims = [h for h in pool
+                       if getattr(h, "param", "") in (ep_params or set())
+                       and getattr(h, "source", "response") == "response"
+                       and getattr(h, "owner", "") not in ("", tester_name)]
+            if not victims:
+                continue
+            results = replay_writes(
+                client, ep, victims, tester, owner_headers,
+                timeout=self.cfg.scan.http_timeout,
+                max_ids=cfg_a.max_ids_per_endpoint, scope=self.scope)
+            for res in results:
+                if res.verdict not in ("strong_candidate", "confirmed"):
+                    # completed denial with a finished request is a
+                    # genuine negative (same precondition rule as swaps);
+                    # timeouts and 5xx stay unrecorded, never negative
+                    if 400 <= res.status < 500:
+                        coverage.record(
+                            "bola", "tested_negative",
+                            f"{ep.normalized_url}::{res.param}: "
+                            f"{tester_name}→{res.status}")
+                    continue
+                metrics.authorization_tests += 1
+                metrics.authorization_confirmed += 1
+                self._note_candidate()
+                cross_tenant = bool(
+                    res.tester_tenant and res.owner_tenant and
+                    res.tester_tenant != res.owner_tenant)
+                cls = ("tenant_isolation" if cross_tenant else "bola")
+                if res.verdict == "confirmed":
+                    coverage.record(cls, "confirmed", res.notes)
+                    status = ValidationStatus.CONFIRMED.value
+                    conf = Confidence.CONFIRMED.value
+                    extra = ["verified-effect"]
+                    suffix = " [verified effect]"
+                else:
+                    coverage.record(cls, "candidate", res.notes)
+                    coverage.record("idor", "candidate", res.notes)
+                    status = ValidationStatus.STRONG_CANDIDATE.value
+                    conf = Confidence.PROBABLE.value
+                    extra = []
+                    suffix = ""
+                f = Finding(
+                    id=stable_finding_id("bolawrite", res.endpoint_url,
+                                         res.method, res.param,
+                                         res.victim_value),
+                    source="bola-write",
+                    name=(f"BOLA write: '{res.tester}' modifies "
+                          f"'{res.owner}''s '{res.param}="
+                          f"{res.victim_value}' ({ep.path})" + suffix),
+                    severity="high",
+                    confidence=conf,
+                    validation_status=status,
+                    host=ep.host, matched_at=res.endpoint_url,
+                    endpoint_url=res.endpoint_url, method=res.method,
+                    parameter=res.param,
+                    description=res.notes,
+                    tags=["bola", "idor", "authz",
+                          "tenant-isolation" if cross_tenant else
+                          "cross-user", ep.endpoint_type] + extra,
+                    raw={"write_replay": res.to_dict()},
+                    false_positive_notes=(
+                        "Victim ID harvested from the owner's own session; "
+                        "the attacker's own observed mutating request was "
+                        "replayed with only the identifier swapped. "
+                        "Confirmation requires a clean readback showing "
+                        "the attacker's values newly persisted — confirm "
+                        "interactively before reporting."),
+                    identity=res.tester, tenant=res.tester_tenant,
+                    resource_key=(f"{ep.normalized_url}::{res.param}"
+                                  f"={res.victim_value}"),
+                )
+                evidence.allocate(f)
+                evidence.record(
+                    f,
+                    request_text=(f"{res.method} {res.endpoint_url}\n(as "
+                                  f"{res.tester}; owner: {res.owner}; "
+                                  f"readback: {res.readback})"),
+                    response_text=res.notes)
+                findings.append(f)
+                log.info("authz-write-replay: %s", res.notes)
         return findings
 
     # ── BEHAVIORAL STATE (agent Phase 3) ─────────────────────────────
@@ -3882,9 +4157,13 @@ def _classify_finding(f: Finding) -> str:
         return "xss"
     if "ssrf" in name:
         return "ssrf"
-    if "ssti" in name:
+    if "ssti" in name or "server-side template" in name or \
+            "server side template" in name:
         return "ssti"
-    if "traversal" in name or "lfi" in name:
+    if "xxe" in name or "xml external entity" in name:
+        return "xxe"
+    if ("traversal" in name or "lfi" in name
+            or "file inclusion" in name):
         return "path_traversal"
     if "redirect" in name:
         return "open_redirect"

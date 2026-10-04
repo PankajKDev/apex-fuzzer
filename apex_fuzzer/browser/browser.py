@@ -73,19 +73,29 @@ class BrowserEngine:
             ) from e
         self._pw = sync_playwright().start()
         try:
+            executable_path = str(getattr(
+                getattr(self.cfg, "browser", None),
+                "chromium_executable_path", "") or "").strip()
             self._browser = self._pw.chromium.launch(
-                headless=self.headless)
+                headless=self.headless,
+                **({"executable_path": executable_path}
+                   if executable_path else {}))
         except Exception as e:
             self.stop()
             raise RuntimeError(f"chromium launch failed: {e}") from e
         log.info("browser started (headless=%s)", self.headless)
         return self
 
-    def new_context(self, storage_state: Optional[Dict[str, Any]] = None,
-                    identity: str = ""):
+    def new_context(self, storage_state: Optional[Any] = None,
+                    identity: str = "", ignore_https_errors: bool = False,
+                    service_workers: str = "allow"):
         if not self.running:
             raise RuntimeError("browser not started — call start() first")
-        kw: Dict[str, Any] = {"user_agent": self.user_agent}
+        kw: Dict[str, Any] = {
+            "user_agent": self.user_agent,
+            "ignore_https_errors": ignore_https_errors,
+            "service_workers": service_workers,
+        }
         if storage_state:
             kw["storage_state"] = storage_state
         ctx = self._browser.new_context(**kw)

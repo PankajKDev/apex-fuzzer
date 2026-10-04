@@ -200,6 +200,8 @@ in [sample artifacts](docs/sample-artifacts/).
 --second-order          stored-XSS correlation on (persists canaries)
 --second-order-ssrf     stored-SSRF OAST correlation (persists callback URLs)
 --business-logic        business-logic mutation engine on (submits abuse values)
+--sqli-time             opt in to sqlmap time-based (delay) confirmation
+--authz-write-replay    replay observed mutating requests with swapped IDs
 --race                  race-condition engine on (synchronized bursts)
 --browser               browser-driven discovery on (needs playwright)
 --no-browser            browser-driven discovery off
@@ -278,14 +280,23 @@ validation:
   enabled: false
   ssrf: false             # also enables the OAST sweep
   differential: false
+  ssti: true               # paired inert arithmetic checks on SSTI leads
+  xxe: true                 # OAST-only XXE proof on observed XML POST bodies
+  path_traversal: true      # uses only the configured harmless marker
+  path_traversal_marker_path: ""       # relative path on the target
+  path_traversal_marker_content: ""    # exact known contents; keep unique
+  path_traversal_max_depth: 4           # hard-capped at 6
   open_redirect: true     # validation profile/enabled only; observed GET fields
   open_redirect_max_endpoints: 10
   open_redirect_max_params: 3
   cors: true              # cookie-authenticated contexts only
+  cors_browser: false     # opt-in Chromium read confirmation (extra GET)
   cors_max_endpoints: 10
   cors_max_identities: 3
   mutation: true          # WAF-aware prescreen before sqlmap/dalfox
   mutation_payloads: 8    # ladder depth per class
+  sqli_time_based: false  # opt-in sqlmap delay confirmation (holds DB conns)
+  sqli_time_sec: 2        # per-delay seconds when sqli_time_based is true
   differential_max_endpoints: 30
   min_severity: medium     # reserved
   # Stored-XSS correlation persists canary data server-side: opt-in only.
@@ -320,6 +331,7 @@ authorization:
   methods: ["GET", "POST", "PUT", "PATCH", "DELETE"]
   max_endpoints: 20
   max_ids_per_endpoint: 3
+  write_replay: false      # MTN-pattern write proof (test accounts only)
 
 # Business-logic mutations (quantity/price/refund/token-reuse).
 business:
@@ -337,6 +349,7 @@ race:
 
 # Browser-driven discovery + sessions (GET navigations only, safe).
 # Needs: pip install "apex-fuzzer[browser]" (Playwright + Chromium).
+# validation.cors_browser additionally confirms CORS candidates in Chromium.
 browser:
   enabled: false           # or --browser / deep profile
   headless: true
@@ -346,6 +359,7 @@ browser:
   capture_websocket: true   # record ws:// URLs for later phases
   capture_storage: true     # cookies + web storage + session export
   capture_dom: true
+  capture_authenticated_requests: false  # safe, same-origin capture for configured identities
   navigation_timeout_ms: 30000
 
 nuclei:
@@ -381,6 +395,11 @@ scope:
   # crawl_exclude_exts / active_test_exclude_exts default to image, font,
   # media and archive extensions
 ```
+
+Path-traversal validation stays idle until both marker values are configured.
+Use an owner-approved, harmless canary file at a relative application path and
+its exact unique contents. Apex sends only bounded GET requests for observed
+path-like query fields; it never tries common system files.
 
 ---
 
@@ -535,7 +554,24 @@ and WebSocket URLs into the same endpoint pool (`source: ["browser"]`,
 params `probable`, form inputs `possible`). Cookies, web storage, and
 extracted tokens export to `sessions/browser.json`; auth contexts
 declaring `storage_state` files get their Cookie headers filled before
-validation. Without Playwright installed the stage logs a skip.
+validation. The separate browser.capture_authenticated_requests option
+defaults off. When enabled, configured header/storage-state identities revisit
+the pages discovered by the anonymous crawl. Capture is in-scope, same-origin,
+and read-method only; non-read requests triggered by page scripts are recorded
+but aborted before reaching the target. Exact observed request bodies and
+headers are kept in memory for later validators, while saved browser traffic
+redacts credential-like headers and omits bodies. Observed
+`multipart/form-data` bodies are captured the same way: exact bytes plus
+method/URL/headers stay runtime-only on the endpoint, field names become
+body parameters (file parts and credential/CSRF-like names keep an empty
+sample; no file content is invented), and persisted traffic keeps only safe
+shape metadata (field name, filename, per-part content type/size) plus body
+length. Multipart prescreen replay is implemented from retained raw
+bytes (single text-field replacement; file bytes and boundaries
+preserved exactly); multipart BOLA/BFLA write replay and stateful
+BOLA/BFLA readback remain unimplemented. This capture does not replay
+mutating requests or prove BOLA/BFLA by itself. Without Playwright installed
+the stage logs a skip.
 
 ### 3. API-spec discovery → `api_specs.json`
 
@@ -603,11 +639,13 @@ Four layers, in order:
 2. **OAST sweep** → SSRF-suspect endpoints (proxy/webhook/callback/
    import/export/download/api types with URL-like params) fired with
    callback + cloud payloads → confirmed findings (`source: oast-sweep`).
-3. **Per-finding plugins** (§48): the `sqli-mutation → sqli-sqlmap →
-   xss-mutation → xss-dalfox → ssrf-oast` chain runs through the plugin
-   registry. Each plugin returns a `TestResult`; the orchestrator maps it
-   onto the finding with the same overwrite semantics as the old direct
-   loop (prescreen first, heavy tool still runs and wins). Unsuitable
+3. **Per-finding plugins** (§48): the SQLi, XSS, SSRF, SSTI, XXE, and path
+   traversal validators
+   run through the plugin registry. Each plugin returns a `TestResult`; the
+   orchestrator maps it onto the finding using conservative evidence
+   aggregation. SQLi/XSS prescreens run before their deeper validators.
+   SSTI uses paired arithmetic checks only; XXE uses a nonce-correlated
+   external-entity callback on retained XML request material. Unsuitable
    plugins yield `skipped`, exceptions are contained as `error` (the
    finding is left untouched instead of failing the target). Outcomes
    feed the coverage tracker per test class.
@@ -649,6 +687,19 @@ harvest → swap → method sweep (`authorization/harvest.py`,
    BOLA (same object, two users), BFLA (role/method gaps, anonymous denied
    but a user succeeds on privileged endpoints), and cross-tenant reads
    (`source: authz-matrix`). Clean cells record `tested_negative`.
+4. **Write replay** (opt-in: `authorization.write_replay` plus
+   `safety.allow_state_change`, or `--authz-write-replay` with
+   `--ack-state-change`; test accounts/objects only): the MTN pattern —
+   the attacker's own observed POST/PUT/PATCH request is replayed with
+   only the victim's harvested ID swapped in, then the victim object is
+   re-read as the owner. An accepted replay whose victim ID is echoed
+   stays a candidate; only a clean readback showing the attacker's
+   values newly persisted confirms (`source: bola-write`,
+   `verified-effect`). A 200 readback identical to the pre-replay
+   baseline refutes to `inconclusive`. No observed attacker shape,
+   ambiguous shapes, multipart/binary bodies, and out-of-scope URLs send
+   nothing. At most 3 requests per (endpoint, param, victim), charged to
+   the shared budgets and the preflight reservation.
 
 Swap findings carry their invariant evaluation (`no_cross_user_read`)
 as corroboration in evidence — the swap verdict stays primary, so
@@ -839,9 +890,10 @@ they are not vulnerability outcomes and cannot map to `negative`.
 | OAST sweep / SsrfValidator | — | unique callback token observed inbound |
 | mutation SQLi prescreen | DB error marker reflected | ≥4 s delay on SLEEP/BENCHMARK payload vs baseline |
 | mutation XSS prescreen | payload reflected unfiltered | — |
-| sqlmap | — | "is vulnerable" / "available databases" in output |
+| sqlmap | — | "is vulnerable" in output |
 | dalfox | "verified"/"PoC" in output | — |
 | idor-swap (same + cross-endpoint) | victim object served to another identity, same shape | — (swap proves access; impact confirmed by human) |
+| bola-write (opt-in replay) | replay accepted with victim ID echoed (200) | clean readback shows attacker's values newly persisted on victim object |
 | authz-matrix BFLA | method treats roles/tenants identically (200s match) | — |
 | business-logic | abuse value accepted (echoed, 200) **and** invariant violated | clean re-read shows the mutated value persisted (`verified-effect`) |
 | stored-XSS | inert canary persists and renders unescaped in active sink | — (confirm script execution manually) |
@@ -851,6 +903,45 @@ Healthy authorization (user A 200 / user B 401-403, or anonymous blocked while
 an authenticated user succeeds) yields `inconclusive` with an explanatory
 note. sqlmap "not injectable" maps to `false_positive`.
 
+SQLi request fidelity (`validation/observed_sqli.py`, `validation/sqli.py`,
+`plugins/adapters.py`): when a finding's single candidate parameter matches
+exactly one retained browser request (`Endpoint.observed_requests`) for the
+in-scope endpoint, sqlmap runs once against that exact shape via its raw
+request-file interface (`-r`, private temporary directory removed after run) with
+the candidate pinned (`-p`), low-risk flags (`--level 1 --risk 1 --technique
+BEU`, one thread, no retries, 10s timeout, no enumeration). Time-based joins
+only under explicit opt-in (`sqli_time_based`, bounded `--time-sec`).
+Supported shapes:
+GET query, form-urlencoded body, JSON body (including nested names),
+textual XML bodies via the raw file, and text-only multipart bodies (one
+text part replaced byte-exact; file parts never touched), request headers,
+and individual cookie pairs (session/identity carriers excluded). The mutation
+prescreen replays multipart from retained raw bytes; sqlmap 1.8.4 parses
+the raw multipart request but finds no testable parameters there, so it
+stays inconclusive and the prescreen result stands via evidence
+aggregation. Binary/undecodable, oversized (>1 MB), malformed, and
+unsupported-method shapes are inconclusive without sending. Non-GET bodies require `safety.allow_state_change`; scope-gated URLs
+stay `blocked`; ambiguous multi-request/multi-identity matches fail closed
+instead of fanning out, and unsupported captures cannot fall through to a
+synthesized request. The subprocess is capped at 180 seconds; sqlmap's
+individual requests do not currently consume Apex's shared HTTP request
+budget. The request and sqlmap output directory use a private
+temporary directory that is removed after the run. Evidence records only the
+identity label, redacted URL, method, parameter, and a fixed result signal;
+free-form sqlmap output, headers, and body values are never persisted.
+
+XSS request fidelity (`validation/mutate.py`, `plugins/adapters.py`): the
+XSS mutation prescreen reuses the same observed-request pinning as SQLi —
+one retained browser request per finding, same scope, method, content-type,
+and fail-closed rules. Supported: GET query plus form-urlencoded, JSON
+(including nested names), textual XML leaf, text-only multipart, header,
+and cookie-pair bodies. Non-GET methods require
+`safety.allow_state_change`; GET-body, unsupported-method, and
+ambiguous shapes are inconclusive without sending. Identity and framing
+carriers (Authorization, session cookies, Host, Content-Type) are never
+mutated. Dalfox stays GET-query only; non-query Dalfox inputs are
+inconclusive.
+
 ---
 
 ## WAF-aware mutation engine
@@ -859,16 +950,31 @@ note. sqlmap "not injectable" maps to `false_positive`.
 (Cloudflare, Sucuri, Akamai, F5 BIG-IP, Imperva, AWS, Wallarm, ModSecurity;
 unknown WAFs get the default order):
 
-- **SQLi** (8): classic `' OR '1'='1`, comment-obfuscated `/**/OR/**/`,
-  `+`-joined, URL-encoded, MySQL version-comment `/*!50000UNION*/`, UNION and
-  SLEEP time-based variants.
+- **SQLi** (8, 12 at deeper `mutation_payloads`): classic `' OR '1'='1`,
+  comment-obfuscated `/**/OR/**/`, `+`-joined, URL-encoded, MySQL
+  version-comment `/*!50000UNION*/`, UNION variants, plus double-quote and
+  parenthesis-closure contexts at deeper depth. No time-delay payloads.
 - **XSS** (6): script, img-onerror, javascript-URI, svg-onload,
   URL-encoded, nested-tag `<scr<script>ipt>`.
 
 The prescreen runs before sqlmap/dalfox so WAF-blocked targets still get a
 cheap signal, and its outcome (payload, WAF, response tail) is stored as
-evidence. SQL error markers cover MySQL/MariaDB, PostgreSQL, SQLite, Oracle,
-ODBC, and generic syntax errors.
+evidence. The SQLi prescreen fetches a clean baseline first: if the baseline
+already carries a SQL error marker, error-text verdicts are skipped as unsafe
+while boolean differentials still run. Boolean controls probe numeric,
+single-quote, and double-quote contexts with a repeated true control, and
+error matches carry a DBMS family hint (MySQL/MariaDB, PostgreSQL, SQLite,
+MSSQL, Oracle, DB2, Sybase, generic). sqlmap runs boolean/error/UNION
+techniques by default; time-based joins only under explicit opt-in
+(`validation.sqli_time_based` / `--sqli-time`, bounded `--time-sec`).
+Stacked queries stay excluded by policy. The XSS prescreen covers GET query fields
+plus observed form-urlencoded, JSON (including nested names), textual XML
+leaf, text-only multipart, header, and cookie-pair fields, preserving
+method, headers, content type, and peer fields (session cookies and
+auth headers are never mutated; other cookie pairs keep the session
+pair byte-identical). Non-GET methods require `safety.allow_state_change`;
+GET-body, unsupported-method, and ambiguous observed shapes stay
+inconclusive without sending. Dalfox itself remains GET-query only.
 
 ---
 
@@ -893,6 +999,25 @@ render as pending — never as findings.
 ---
 
 ## Browser-driven discovery (agent Phase 1)
+
+Authenticated capture is separately disabled by default. When enabled, it uses
+only configured identities and pages already discovered by the anonymous crawl.
+Requests are limited to in-scope, same-origin GET/HEAD/OPTIONS; other methods
+and origins are aborted before reaching the application. Full observed request
+shapes remain in memory for later validation, while persisted browser traffic
+redacts credentials, strips URL userinfo/fragments, and records only body
+lengths without body hashes or contents. Observed `multipart/form-data`
+requests keep their exact body bytes and method/URL/headers in runtime-only
+endpoint material; the parser extracts field names, filenames, and per-part
+content types (capped at 50 parts / 1 MB, fail-closed), blanks file contents
+and credential/CSRF-like values, and persists only the safe shape metadata
+plus body length. Multipart BOLA/BFLA write replay and stateful BOLA/BFLA
+readback remain unimplemented. SQLi plugins may reuse one retained shape
+per finding through the raw-file path described under Validation semantics;
+binary shapes stay inconclusive there, and sqlmap finds no testable
+multipart parameters (prescreen covers text fields). The feature is a
+capture foundation; it does not yet perform state-changing BOLA/BFLA replay or
+readback.
 
 With `browser.enabled` (`--browser`, deep profile; needs
 `pip install "apex-fuzzer[browser]"`), Chromium crawls the target with
@@ -946,7 +1071,7 @@ Per target, `output/<host>/`:
 | `nuclei.jsonl`, `nuclei-ai.jsonl` | raw Nuclei JSONL |
 | `ai-templates/` | generated gate templates |
 | `browser_urls.txt` | in-scope URLs visited by Chromium |
-| `browser_traffic.json` | recorded browser requests + websockets |
+| `browser_traffic.json` | request metadata + websockets; credential URLs/headers redacted, bodies omitted (length only) |
 | `sessions/browser.json` | exported browser session (cookies/tokens) |
 | `findings.jsonl` | final deduped findings |
 | `hypotheses.jsonl` | AI hypotheses with validation status |
@@ -1211,8 +1336,12 @@ execution; unsuitable plugins yield `skipped`, exceptions are contained as
 `error`). Prerequisite tokens: `tool:<binary>`, `oast`, `auth:N`,
 `tech:<name>`, `net`. `plugins/adapters.py` wraps the existing engines
 (`sqli-mutation`, `sqli-sqlmap`, `xss-mutation`, `xss-dalfox`,
-`ssrf-oast`) with identical overwrite semantics to the pre-plugin loop
-(prescreen first, heavy tool still runs and wins). New scanners land as a
+`ssrf-oast`, `ssti-arithmetic`, `xxe-oast`, `path-traversal-marker`) with
+conservative evidence
+aggregation. XXE sends one external entity only for retained observed XML
+POST requests and requires `safety.allow_state_change` plus nonce-matched OAST
+confirmation; it never asks for local files.
+SQLi/XSS prescreens run before their deeper validators. New scanners land as a
 new file plus one `register()` line — no orchestrator surgery.
 
 ---
@@ -1261,12 +1390,17 @@ self-DoS and the false negatives that timeouts masquerade as.
 ## Running the tests
 
 ```bash
+python -m pip install -e '.[integration]' pytest pytest-cov
 .venv/bin/python -m pytest tests/ -q     # or: make test
 make ci                                  # lint + types + tests + security + build
 ```
 
-Last full local run: 357 passed, 4 skipped (361 collected) after the
-first-order OAST hardening. Tests cover per-probe HTTP/HTTPS canaries,
+Last full local run before CORS browser confirmation: 435 passed, 4 skipped
+with 74.07% coverage on Python 3.12.3. Afterward, six CORS unit tests passed
+and two Chromium integration cases passed. The `integration` extra enables
+loopback-only Jinja2 SSTI, lxml XXE,
+and harmless marker-file traversal application checks; CI installs this extra.
+Tests also cover per-probe HTTP/HTTPS canaries,
 stale-callback rejection, response-difference notes, OpenAPI operation
 metadata and request locations, nested-schema sink scoring, related trigger
 selection and response-ID substitution, URL normalization, endpoint
@@ -1356,6 +1490,7 @@ apex_fuzzer/
   validation/
     base.py              Candidate / ValidationOutcome / Validator
     sqli.py / xss.py     sqlmap / dalfox adapters
+    observed_sqli.py     single observed-request select + raw-file render
     ssrf.py              OAST-backed SSRF validator
     oast.py              Interactsh provider + SSRF sweep helpers
     differential.py      auth-context BOLA / broken-access engine

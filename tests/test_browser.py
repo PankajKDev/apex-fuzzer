@@ -12,7 +12,8 @@ import pytest
 from apex_fuzzer.browser.browser import (
     playwright_available, chromium_available)
 from apex_fuzzer.browser.network import (
-    NetworkRecorder, _query_names, _form_names)
+    NetworkRecorder, _query_names, _form_names,
+    authenticated_capture_request_allowed)
 from apex_fuzzer.browser.storage import (
     cookies_to_dict, build_cookie_header, parse_storage_state,
     extract_tokens, extract_csrf_from_html, read_web_storage,
@@ -22,7 +23,7 @@ from apex_fuzzer.browser.actions import (
 from apex_fuzzer.browser.sessions import (
     BrowserSession, SessionManager, looks_logged_out)
 from apex_fuzzer.browser.workflows import BrowserWorkflow
-from apex_fuzzer.config import AuthContext
+from apex_fuzzer.config import AuthContext, Config
 
 needs_browser = pytest.mark.skipif(
     not chromium_available(), reason="no launchable chromium")
@@ -139,6 +140,74 @@ def test_to_endpoints_conversion_and_scope():
     assert by_url["https://example.com/api/json"]["body"] == {"q": "hi"}
     assert rec.requests[0].status == 200
     assert rec.websockets == ["wss://example.com/ws"]
+
+
+def test_authenticated_capture_is_identity_tagged_and_artifact_redacted():
+    rec = NetworkRecorder(scope=_scope_for(["example.com"]),
+                          identity="alice")
+    rec._on_request(FakeRequest(
+        "https://user:pass@example.com/api?access_token=url-secret"
+        "#access_token=fragment-secret", method="POST",
+        headers={"Authorization": "Bearer header-secret",
+                 "X-CSRF-Token": "csrf-secret",
+                 "Content-Type": "application/json"},
+        post_data='{"password":"body-secret"}'))
+    endpoints = rec.to_endpoints()
+    observed = endpoints[0]["observed_requests"][0]
+    assert observed["identity"] == "alice"
+    assert observed["method"] == "POST"
+    assert observed["post_data"] == '{"password":"body-secret"}'
+    assert observed["content_type"] == "application/json"
+    assert endpoints[0]["body"]["password"] == ""
+
+    persisted = json.dumps(rec.to_dict())
+    for secret in ("header-secret", "csrf-secret", "body-secret",
+                   "url-secret", "user:pass", "fragment-secret"):
+        assert secret not in persisted
+    assert '"post_data": null' in persisted
+    assert "post_data_length" in persisted
+    assert "post_data_sha256" not in persisted
+
+
+def test_authenticated_capture_allows_only_in_scope_same_origin_reads():
+    scope = _scope_for(["example.com"])
+    assert authenticated_capture_request_allowed(
+        "GET", "https://example.com/api", "https://example.com/home", scope)
+    assert authenticated_capture_request_allowed(
+        "OPTIONS", "https://example.com/api", "https://example.com/home",
+        scope)
+    assert not authenticated_capture_request_allowed(
+        "POST", "https://example.com/api", "https://example.com/home", scope)
+    assert not authenticated_capture_request_allowed(
+        "GET", "https://other.com/api", "https://example.com/home", scope)
+    assert not authenticated_capture_request_allowed(
+        "GET", "https://sub.example.com/api", "https://example.com/home",
+        scope)
+    assert Config().browser.capture_authenticated_requests is False
+
+
+def test_authenticated_capture_request_material_is_runtime_only():
+    from apex_fuzzer.models import Endpoint
+    from apex_fuzzer.orchestrator import Orchestrator
+    from apex_fuzzer.discovery.url_normalizer import normalize_url
+
+    url = ("https://user:pass@example.com/api?access_token=stored-secret"
+           "&page=2#session=fragment-secret")
+    endpoint = Endpoint(url=url, normalized_url=normalize_url(url))
+    entry = {"url": url, "method": "POST", "params": [], "body": {},
+             "observed_requests": [{
+                 "identity": "alice", "method": "POST", "url": url,
+                 "headers": {"X-Trace": "captured"},
+                 "post_data": '{"id":1}'}]}
+    Orchestrator._merge_browser_entry(
+        {normalize_url(url): endpoint}, "example.com", entry)
+    assert endpoint.observed_requests[0]["identity"] == "alice"
+    assert endpoint.observed_requests[0]["post_data"] == '{"id":1}'
+    assert "observed_requests" not in endpoint.to_dict()
+    serialized = json.dumps(endpoint.to_dict())
+    for secret in ("stored-secret", "user:pass", "fragment-secret"):
+        assert secret not in serialized
+    assert "page=2" in serialized
 
 
 def test_recorder_request_cap_and_bad_events():

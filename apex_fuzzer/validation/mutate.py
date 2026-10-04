@@ -13,6 +13,7 @@ import time
 import re
 from typing import Dict, List, Optional
 from ..discovery import technologies as tech_mod
+from ..budgets import BudgetExceeded
 from ..models import ValidationStatus, Confidence
 from ..logging_setup import get_logger
 from .base import Candidate, ValidationOutcome
@@ -28,6 +29,13 @@ SQLI_MUTATIONS = [
     "'+OR+'1'='1",
     "%27%20OR%201%3D1--",
     "' OR 1=1/*!50000UNION*/-- -",
+    # Deeper ladder (needs mutation_payloads > 8): double-quote string
+    # context plus parenthesis closures, the contexts real testers hit
+    # after the classics fail.
+    '" OR "1"="1',
+    "') OR ('1'='1",
+    '" UNION SELECT NULL-- -',
+    "') UNION SELECT NULL-- -",
 ]
 
 XSS_MUTATIONS = [
@@ -61,19 +69,42 @@ WAF_PRIORITY: Dict[str, Dict[str, List[int]]] = {
                     "xss": [5, 4, 0, 1, 3, 2]},
 }
 
-_SQLI_ERROR_MARKERS = [
-    r"sqlexception", r"sqlsyntax", r"syntax error",
-    r"error in your sql syntax",
-    r"mysql_fetch", r"mysql_query", r"mysql_num_rows", r"mysql_result",
-    r"warning in mysql", r"invalid use of cluster key",
-    r"unterminated quotation", r"quoted identifier",
-    r"postgresql", r"pg_query", r"pg_exec",
-    r"sqlite3\.databaseerror", r"sqlite error",
-    r"oracledb", r"ora-\d{5}", r"odbc driver",
-    r"near '\w+' at position", r"unclosed quotation mark",
-    r"conversion failed when converting",
+# (family, pattern) pairs. Families label DBMS hints in evidence, the way
+# testers fingerprint the backend from error text. Every match stays
+# candidate-level: error text alone never confirms injection.
+_SQLI_ERROR_FAMILIES = [
+    ("mysql", r"error in your sql syntax"),
+    ("mysql", r"mysql_fetch|mysql_query|mysql_num_rows|mysql_result"),
+    ("mysql", r"warning in mysql|warning.*mysqli|mysqli_fetch"),
+    ("mysql", r"mysqlnd|valid mysql result|com\.mysql\.jdbc|mysqlexception"),
+    ("mysql", r"invalid use of cluster key"),
+    ("mysql", r"truncated incorrect|data too long for column"),
+    ("mariadb", r"mariadb"),
+    ("postgresql", r"postgresql|postgres|psqlexception|pg::"),
+    ("postgresql", r"pg_query|pg_exec|pg_fetch|warning.*\bpg_"),
+    ("sqlite", r"sqlite error|sqlite3\.databaseerror|sqlite3::|sqlite_error"),
+    ("mssql", r"microsoft ole db.*sql server|sqlserver jdbc"),
+    ("mssql", r"system\.data\.sqlclient|sqlexception"),
+    ("mssql", r"unclosed quotation mark after the character string"),
+    ("mssql", r"unclosed quotation mark"),
+    ("mssql", r"quoted string not properly terminated|conversion failed"),
+    ("mssql", r"microsoft.*odbc.*sql|odbc.*sql server"),
+    ("oracle", r"ora-\d{5}|oracledb|oracle.*driver|oracle error|pls-"),
+    ("db2", r"db2 sql error|sqlcode"),
+    ("sybase", r"sybase|adaptive server"),
+    ("informix", r"informix"),
+    ("hsqldb", r"hsqldb"),
+    ("generic", r"sqlexception|sqlsyntax|syntax error"),
+    ("generic", r"sqlstate|\bjdbc\b|odbc driver|javax\.persistence|hibernate"),
+    ("generic", r"unterminated quotation|quoted identifier"),
+    ("generic", r"near '\w+' at position"),
+    ("generic", r"activerecord::statementinvalid|doctrine\\dbal"),
+    ("generic", r"\badodb\b|\bcfquery\b|coldfusion"),
+    ("generic", r"different number of columns|column count doesn't match"),
+    ("generic", r"unknown column|table .* doesn't exist"),
 ]
-_SQLI_MARKER_RE = re.compile("|".join(_SQLI_ERROR_MARKERS), re.I)
+_SQLI_MARKER_RES = [(family, re.compile(pattern, re.I))
+                    for family, pattern in _SQLI_ERROR_FAMILIES]
 
 def fingerprint_waf(headers: Dict[str, str]) -> Optional[str]:
     """Best-effort WAF identification from response headers."""
@@ -101,7 +132,16 @@ def mutations_for(waf: Optional[str], test_class: str) -> List[str]:
 
 
 def sqli_error_signal(text: str) -> bool:
-    return bool(text) and bool(_SQLI_MARKER_RE.search(text[:200_000]))
+    return bool(sqli_error_families(text))
+
+
+def sqli_error_families(text: str) -> List[str]:
+    """Return sorted DBMS family labels whose error markers appear."""
+    if not text:
+        return []
+    window = text[:200_000]
+    return sorted({family for family, rx in _SQLI_MARKER_RES
+                   if rx.search(window)})
 
 
 def _inject(url: str, param: str, payload: str) -> str:
@@ -149,28 +189,89 @@ class MutationEngine:
                 status=ValidationStatus.INCONCLUSIVE.value,
                 confidence=Confidence.UNKNOWN.value,
                 notes="SQLi body probe skipped: GET body shape is unsupported")
+        # Multipart bodies replay only from retained raw bytes with one
+        # text part replaced (validation/multipart.py); file parts are
+        # never touched and metadata-only shapes fail closed in
+        # body_parameter_value below.
 
-        # Paired, bounded boolean controls are a useful differential signal,
-        # but never proof by themselves. Run the true condition twice to
-        # reject ordinary response instability before comparing against false.
+        # Identity and framing carriers are never probed: testing them
+        # would break the tester's own session, not the application.
+        from .request_shape import is_protected_parameter
+        location = (candidate.parameter_location or "query").lower()
+        if location in ("header", "cookie") and is_protected_parameter(
+                location, param):
+            return ValidationOutcome(
+                status=ValidationStatus.INCONCLUSIVE.value,
+                confidence=Confidence.UNKNOWN.value,
+                notes=f"SQLi {location} probe skipped: {param!r} carries "
+                      f"identity or framing and is never mutated")
+
+        # Baseline first, the way testers work: one clean request with the
+        # original value. If the baseline already carries a SQL error
+        # marker, error-text verdicts are unsafe (the page always errors),
+        # so the error-marker stage is skipped while boolean differentials
+        # still run.
         from urllib.parse import parse_qsl, urlsplit
-        if candidate.parameter_location == "body":
-            base_value = self._body_sample(candidate, param)
+        if location == "body":
+            try:
+                base_value = self._body_sample(candidate, param)
+            except ValueError as exc:
+                return ValidationOutcome(
+                    status=ValidationStatus.INCONCLUSIVE.value,
+                    confidence=Confidence.UNKNOWN.value,
+                    notes=f"SQLi body shape unsupported: {exc}")
+        elif location == "header":
+            from .request_shape import header_parameter_value
+            try:
+                base_value = header_parameter_value(candidate, param) or "1"
+            except ValueError as exc:
+                return ValidationOutcome(
+                    status=ValidationStatus.INCONCLUSIVE.value,
+                    confidence=Confidence.UNKNOWN.value,
+                    notes=f"SQLi header shape unsupported: {exc}")
+        elif location == "cookie":
+            from .request_shape import cookie_parameter_value
+            try:
+                base_value = cookie_parameter_value(
+                    candidate.request_headers or {}, param) or "1"
+            except ValueError as exc:
+                return ValidationOutcome(
+                    status=ValidationStatus.INCONCLUSIVE.value,
+                    confidence=Confidence.UNKNOWN.value,
+                    notes=f"SQLi cookie shape unsupported: {exc}")
         else:
             base_value = next((value for key, value in parse_qsl(
                 urlsplit(candidate.endpoint_url).query, keep_blank_values=True)
                 if key == param), "1")
+        baseline = self._fetch_candidate(candidate, param, str(base_value))
+        baseline_has_error = (
+            baseline is not None
+            and sqli_error_signal(baseline.get("text") or ""))
+
+        # Paired, bounded boolean controls are a useful differential signal,
+        # but never proof by themselves. Run the true condition twice to
+        # reject ordinary response instability before comparing against
+        # false. Quote contexts are probed in turn (numeric, single-quote,
+        # double-quote) since the parameter's real SQL context is unknown.
         pairs = []
         if re.fullmatch(r"[-+]?\d+(?:\.\d+)?", str(base_value or "")):
             pairs.append((f"{base_value} AND 1=1", f"{base_value} AND 1=2"))
-        else:
-            pairs.append((f"{base_value}' AND '1'='1",
-                          f"{base_value}' AND '1'='2"))
+        pairs.append((f"{base_value}' AND '1'='1",
+                      f"{base_value}' AND '1'='2"))
+        pairs.append((f'{base_value}" AND "1"="1',
+                      f'{base_value}" AND "1"="2'))
         for true_payload, false_payload in pairs:
             true_first = self._fetch_candidate(candidate, param, true_payload)
             false = self._fetch_candidate(candidate, param, false_payload)
             true_repeat = self._fetch_candidate(candidate, param, true_payload)
             if not (true_first and false and true_repeat):
+                continue
+            # Reflection guard: pages that echo the search term (docs,
+            # search results) produce text differences from the echoed
+            # payload alone. A echoed injection string makes the
+            # differential unreliable, so that pair is skipped.
+            if true_payload in (true_first.get("text") or "") or \
+                    false_payload in (false.get("text") or ""):
                 continue
             true_sig = self._normalized_signature(true_first)
             false_sig = self._normalized_signature(false)
@@ -193,12 +294,24 @@ class MutationEngine:
                     notes="repeatable true/false SQLi response difference; "
                           "candidate only, requires independent validation")
 
+        if baseline_has_error:
+            return None
         for payload in mutations_for(self.waf, "sqli")[:self.max_payloads]:
-            r = self._fetch_candidate(candidate, param, payload)
+            try:
+                r = self._fetch_candidate(candidate, param, payload)
+            except BudgetExceeded:
+                raise
+            except ValueError:
+                return ValidationOutcome(
+                    status=ValidationStatus.INCONCLUSIVE.value,
+                    confidence=Confidence.UNKNOWN.value,
+                    notes="SQLi body shape unsupported: cannot build "
+                          "request safely")
             if r is None:
                 continue
             text = r.get("text") or ""
-            if sqli_error_signal(text):
+            families = sqli_error_families(text)
+            if families:
                 return ValidationOutcome(
                     status=ValidationStatus.STRONG_CANDIDATE.value,
                     confidence=Confidence.PROBABLE.value,
@@ -206,10 +319,12 @@ class MutationEngine:
                         "waf": self.waf,
                         "param": param,
                         "payload": payload,
+                        "dbms_hint": families,
                         "response_tail": redact_tail(text),
                     },
                     notes=f"SQL error marker reflected after payload "
-                          f"{payload!r} (WAF: {self.waf or 'unknown'})")
+                          f"{payload!r} (WAF: {self.waf or 'unknown'}; "
+                          f"backend hint: {', '.join(families)})")
         return None
 
     @staticmethod
@@ -219,19 +334,45 @@ class MutationEngine:
 
     def _fetch_candidate(self, candidate: Candidate, parameter: str,
                          payload: str) -> Optional[Dict]:
-        if candidate.parameter_location != "body":
+        location = (candidate.parameter_location or "query").lower()
+        if location in ("header", "cookie"):
+            from .request_shape import cookie_with_parameter
+            method = (candidate.method or "GET").upper()
+            headers = dict(self.client_headers)
+            headers.update(candidate.request_headers or {})
+            if location == "header":
+                headers[parameter] = payload
+            else:
+                try:
+                    headers["Cookie"] = cookie_with_parameter(
+                        candidate.request_headers or {}, parameter, payload)
+                except ValueError:
+                    return None
+            kwargs = {"headers": headers, "timeout": 15}
+        elif location != "body":
             url = _inject(candidate.endpoint_url, parameter, payload)
             method = (candidate.method or "GET").upper()
             if method == "GET":
                 return self._fetch(url)
             kwargs = {"headers": self.client_headers, "timeout": 15}
         else:
-            from .request_shape import body_with_parameter, is_json
+            from .request_shape import (body_with_parameter, is_json,
+                                        is_multipart)
             body = body_with_parameter(candidate, parameter, payload)
             method = (candidate.method or "POST").upper()
-            headers = dict(candidate.request_headers or self.client_headers)
+            headers = dict(self.client_headers)
+            headers.update(candidate.request_headers or {})
+            if candidate.request_content_type and not any(
+                    k.lower() == "content-type" for k in headers):
+                headers["Content-Type"] = candidate.request_content_type
             kwargs = {"headers": headers, "timeout": 15}
-            if is_json(candidate):
+            if is_multipart(candidate):
+                # exact observed bytes with one text part replaced;
+                # the original Content-Type (with boundary) is preserved
+                if not isinstance(body, (bytes, bytearray)):
+                    raise ValueError("multipart replay must stay byte-exact")
+                kwargs["data"] = bytes(body)
+            elif is_json(candidate):
                 kwargs["json"] = body
                 if not any(k.lower() == "content-type" for k in headers):
                     kwargs["headers"]["Content-Type"] = "application/json"
@@ -250,6 +391,8 @@ class MutationEngine:
             return {"status": response.status_code,
                     "text": response.text or "",
                     "elapsed_ms": (time.time() - t0) * 1000}
+        except BudgetExceeded:
+            raise
         except Exception as e:
             log.debug("mutation request failed %s: %s",
                       candidate.endpoint_url, e)
@@ -273,8 +416,70 @@ class MutationEngine:
         param = candidate.parameter or self._guess_param(candidate.endpoint_url)
         if not param:
             return None
+
+        method = (candidate.method or "GET").upper()
+        if method not in {"GET", "POST", "PUT", "PATCH"}:
+            return ValidationOutcome(
+                status=ValidationStatus.INCONCLUSIVE.value,
+                confidence=Confidence.UNKNOWN.value,
+                notes=f"XSS prescreen skipped: unsupported method {method}")
+        if method != "GET" and not getattr(
+                getattr(self.cfg, "safety", None), "allow_state_change", False):
+            return ValidationOutcome(
+                status=ValidationStatus.INCONCLUSIVE.value,
+                confidence=Confidence.UNKNOWN.value,
+                notes="XSS body probes skipped: state-changing requests "
+                      "require allow_state_change")
+        if candidate.parameter_location == "body" and method == "GET":
+            return ValidationOutcome(
+                status=ValidationStatus.INCONCLUSIVE.value,
+                confidence=Confidence.UNKNOWN.value,
+                notes="XSS body probe skipped: GET body shape is unsupported")
+        if getattr(candidate, "observed_ambiguous", None):
+            return ValidationOutcome(
+                status=ValidationStatus.INCONCLUSIVE.value,
+                confidence=Confidence.UNKNOWN.value,
+                notes="XSS probe skipped: ambiguous observed requests; "
+                      "fail closed without guessing")
+        from .request_shape import is_protected_parameter
+        location = (candidate.parameter_location or "query").lower()
+        if location in ("header", "cookie") and is_protected_parameter(
+                location, param):
+            return ValidationOutcome(
+                status=ValidationStatus.INCONCLUSIVE.value,
+                confidence=Confidence.UNKNOWN.value,
+                notes=f"XSS {location} probe skipped: {param!r} carries "
+                      f"identity or framing and is never mutated")
+        if candidate.parameter_location == "body":
+            try:
+                self._body_sample(candidate, param)
+            except ValueError as exc:
+                return ValidationOutcome(
+                    status=ValidationStatus.INCONCLUSIVE.value,
+                    confidence=Confidence.UNKNOWN.value,
+                    notes=f"XSS body shape unsupported: {exc}")
+        if location == "cookie":
+            from .request_shape import cookie_parameter_value
+            try:
+                cookie_parameter_value(
+                    candidate.request_headers or {}, param)
+            except ValueError as exc:
+                return ValidationOutcome(
+                    status=ValidationStatus.INCONCLUSIVE.value,
+                    confidence=Confidence.UNKNOWN.value,
+                    notes=f"XSS cookie shape unsupported: {exc}")
+
         for payload in mutations_for(self.waf, "xss")[:self.max_payloads]:
-            r = self._fetch(_inject(candidate.endpoint_url, param, payload))
+            try:
+                r = self._fetch_candidate(candidate, param, payload)
+            except BudgetExceeded:
+                raise
+            except ValueError:
+                return ValidationOutcome(
+                    status=ValidationStatus.INCONCLUSIVE.value,
+                    confidence=Confidence.UNKNOWN.value,
+                    notes="XSS body shape unsupported: cannot build "
+                          "request safely")
             if r is None:
                 continue
             text = r.get("text") or ""
@@ -284,6 +489,8 @@ class MutationEngine:
                     confidence=Confidence.PROBABLE.value,
                     evidence={
                         "waf": self.waf, "param": param, "payload": payload,
+                        "parameter_location":
+                            candidate.parameter_location,
                         "response_tail": redact_tail(text),
                     },
                     notes=f"payload {payload!r} reflected unfiltered "
@@ -294,9 +501,10 @@ class MutationEngine:
     def _reflected_unfiltered(text: str, payload: str) -> bool:
         if not text:
             return False
-        # script/tag payloads that survive HTML escaping
-        dangerous = ("<script", "onerror=", "onload=", "javascript:",
-                     "<img", "<svg")
+        # Only tag/event-handler markers count: a bare `javascript:`
+        # string reflected in body text has no execution sink, so it
+        # must not fire without an accompanying tag marker.
+        dangerous = ("<script", "onerror=", "onload=", "<img", "<svg")
         low = text.lower()
         hit = any(d in low for d in dangerous)
         return hit and (payload.lower() in low or

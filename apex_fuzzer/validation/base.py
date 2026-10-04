@@ -20,6 +20,15 @@ class Candidate:
     parameter_location: str = "query"
     request_content_type: str = ""
     body_parameters: List[Any] = field(default_factory=list)
+    # Exact retained browser-captured request backing this candidate.
+    # Runtime-only: never persisted; findings/evidence keep only the
+    # identity name, never header/body values.
+    observed_request: Optional[Dict[str, Any]] = None
+    observed_identity: Optional[str] = None
+    # Set when several captured requests match one endpoint+parameter and
+    # no single identity/request can be chosen safely. Validators treat
+    # this as fail-closed (inconclusive, no send) instead of guessing.
+    observed_ambiguous: Optional[str] = None
 
 
 @dataclass

@@ -3,8 +3,8 @@
 The check sends one unique, non-resolving Origin value with each configured
 cookie-authenticated identity. A reflected origin is only a lead: Apex emits a
 candidate when the server also permits credentials and returns a non-empty
-successful response. Browser cookie policy (including SameSite) still needs
-manual/browser confirmation.
+successful response. Optional Chromium verification proves that the
+configured cookie is sent and page JavaScript can read a successful response.
 """
 from __future__ import annotations
 
@@ -70,7 +70,10 @@ def probe_cors(endpoints: Iterable[Endpoint], http: Any, evidence: Any,
     errors = 0
     for endpoint in candidates:
         for identity, auth_headers in contexts:
-            marker_origin = f"https://apex-{uuid.uuid4().hex}.invalid"
+            scheme = urlparse(endpoint.url).scheme.lower()
+            marker_origin = (f"{scheme}://apex-{uuid.uuid4().hex}.invalid"
+                             if scheme in {"http", "https"} else
+                             f"https://apex-{uuid.uuid4().hex}.invalid")
             request_headers = {k: v for k, v in auth_headers.items()
                                if k.lower() != "origin"}
             request_headers["Origin"] = marker_origin

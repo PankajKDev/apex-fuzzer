@@ -47,15 +47,29 @@ class ValidationConfig:
     enabled: bool = False
     ssrf: bool = False
     differential: bool = False
+    ssti: bool = True
+    xxe: bool = True
+    path_traversal: bool = True
+    path_traversal_marker_path: str = ""
+    path_traversal_marker_content: str = ""
+    path_traversal_max_depth: int = 4
     mutation: bool = True
     mutation_payloads: int = 8
     differential_max_endpoints: int = 30
+    # Time-based sqlmap confirmation is a separate opt-in: delay payloads
+    # hold DB connections open and are the load-heaviest check in the
+    # suite. Off by default; the mutation prescreen never sends delays.
+    sqli_time_based: bool = False
+    sqli_time_sec: int = 2
     # Safe, non-following GET checks against observed redirect-like query
     # parameters. Runs only as part of an explicitly enabled validation pass.
     open_redirect: bool = True
     open_redirect_max_endpoints: int = 10
     open_redirect_max_params: int = 3
     cors: bool = True
+    # Real Chromium fetch confirmation is opt-in because it performs one
+    # additional credentialed GET for each arbitrary-origin candidate.
+    cors_browser: bool = False
     cors_max_endpoints: int = 10
     cors_max_identities: int = 3
     # stored-XSS correlation writes canary data: opt-in only
@@ -76,6 +90,11 @@ class AuthorizationConfig:
         default_factory=lambda: ["GET", "POST", "PUT", "PATCH", "DELETE"])
     max_endpoints: int = 20
     max_ids_per_endpoint: int = 3
+    # MTN-pattern write replay: replays the attacker's own observed
+    # mutating request with the victim's ID, verified via readback.
+    # Opt-in only (test accounts/objects required) and additionally
+    # requires safety.allow_state_change.
+    write_replay: bool = False
     # identifier fields that prove object ownership when equal in
     # owner and tester responses (Terra M2.5)
     ownership_fields: List[str] = field(
@@ -151,12 +170,15 @@ class BrowserConfig:
     """Browser-driven discovery + sessions (agent Phase 1)."""
     enabled: bool = False
     headless: bool = True
+    chromium_executable_path: str = ""
     max_pages: int = 100
     max_depth: int = 5
     capture_network: bool = True
     capture_websocket: bool = True
     capture_storage: bool = True
     capture_dom: bool = True
+    # Separate, read-only capture pass for explicitly configured identities.
+    capture_authenticated_requests: bool = False
     navigation_timeout_ms: int = 30000
 
 
@@ -435,8 +457,12 @@ def apply_cli_overrides(cfg: Config, args) -> Config:
         cfg.oast.enabled = True
     if getattr(args, "business_logic", False):
         cfg.business.enabled = True
+    if getattr(args, "sqli_time", False):
+        cfg.validation.sqli_time_based = True
     if getattr(args, "race", False):
         cfg.race.enabled = True
+    if getattr(args, "authz_write_replay", False):
+        cfg.authorization.write_replay = True
     if getattr(args, "browser", False):
         cfg.browser.enabled = True
     if getattr(args, "no_browser", False):

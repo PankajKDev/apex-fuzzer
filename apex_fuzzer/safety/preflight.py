@@ -101,11 +101,14 @@ def plan_differential(n_endpoints: int, n_contexts: int) -> RequestPlan:
 
 
 def plan_authz_matrix(n_endpoints: int, n_identities: int,
-                      n_methods: int, max_ids: int) -> RequestPlan:
+                      n_methods: int, max_ids: int,
+                      write_replays: int = 0) -> RequestPlan:
     harvest = n_endpoints * n_identities
     swap = n_endpoints * max_ids * max(0, n_identities - 1) * 2
     sweep = n_endpoints * n_methods * n_identities
-    return RequestPlan("authz_matrix", "*", harvest, swap + sweep)
+    # write replay: baseline + replay + readback per attempt
+    write = write_replays * 3
+    return RequestPlan("authz_matrix", "*", harvest, swap + sweep + write)
 
 
 def plan_race(n_endpoints: int, concurrency: int,
@@ -176,10 +179,14 @@ def dry_run_plan(target: str, cfg, profile,
             len(endpoints) or cfg.validation.differential_max_endpoints,
             n_identities))
     if "authz_matrix" in names:
+        n_eps = len(endpoints) or cfg.authorization.max_endpoints
+        writes = 0
+        if getattr(cfg.authorization, "write_replay", False):
+            writes = (n_eps * cfg.authorization.max_ids_per_endpoint *
+                      max(0, n_identities - 1))
         plans.append(plan_authz_matrix(
-            len(endpoints) or cfg.authorization.max_endpoints,
-            n_identities, len(cfg.authorization.methods),
-            cfg.authorization.max_ids_per_endpoint))
+            n_eps, n_identities, len(cfg.authorization.methods),
+            cfg.authorization.max_ids_per_endpoint, writes))
     if "race" in names:
         plans.append(plan_race(cfg.race.max_endpoints,
                                cfg.race.concurrency, cfg.race.rounds))

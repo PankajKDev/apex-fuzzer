@@ -15,6 +15,10 @@ from apex_fuzzer.shell import AdaptiveRateLimiter
 from apex_fuzzer.config import Config
 from apex_fuzzer.validation.base import Candidate
 from apex_fuzzer.validation import sqli as sqli_mod
+from apex_fuzzer.validation import request_shape as request_shape_mod
+from apex_fuzzer.plugins.base import TestTarget, TestContext
+from apex_fuzzer.plugins.adapters import _candidate_from, SqliMutationPlugin
+from apex_fuzzer.budgets import BudgetExceeded
 
 
 # ── arjun JSON parsing ────────────────────────────────────────────────
@@ -29,6 +33,14 @@ def test_parse_arjun_json_empty():
     assert param_miner.parse_arjun_json("", "https://a.com/") == []
     assert param_miner.parse_arjun_json("not json", "https://a.com/") == []
     assert param_miner.parse_arjun_json("{}", "https://a.com/") == []
+
+
+def test_nuclei_protocol_type_is_not_mistaken_for_http_method():
+    assert nuclei_mod._observed_http_method({"type": "http"}) == "GET"
+    assert nuclei_mod._observed_http_method({"method": "POST",
+                                             "type": "http"}) == "POST"
+    assert nuclei_mod._observed_http_method({
+        "request": "PATCH /api/item HTTP/1.1\r\n\r\n{}"}) == "PATCH"
 
 
 # ── technology gating ─────────────────────────────────────────────────
@@ -185,7 +197,9 @@ def test_sqli_boolean_pair_is_repeatable_candidate_and_has_no_delay_payload():
     assert outcome and outcome.status == "strong_candidate"
     assert outcome.evidence["control_pair"]["true_first"] == \
         outcome.evidence["control_pair"]["true_repeat"]
-    assert len(http.urls) == 3
+    assert len(http.urls) == 4
+    # first request is the clean baseline with the original value
+    assert "AND" not in http.urls[0]
     assert all("SLEEP" not in url.upper() and "PG_SLEEP" not in url.upper()
                for url in http.urls)
 
@@ -203,9 +217,9 @@ def test_sqlmap_is_parameter_pinned_and_does_not_enumerate(monkeypatch):
     result = sqli_mod.SqliValidator(Config()).validate(candidate)
     assert result.status == "inconclusive"
     args, timeout = calls[0]
-    assert "-p=id" in args
+    assert args[args.index("-p") + 1] == "id"
     assert "--dbs" not in args
-    assert args[args.index("--technique") + 1] == "BE"
+    assert args[args.index("--technique") + 1] == "BEU"
     assert timeout == 180
 
 
@@ -253,7 +267,7 @@ def test_sqli_form_body_boolean_pair_requires_and_uses_state_change_ack():
                                    sample_value="7")])
     outcome = mut_mod.MutationEngine(cfg, http).prescreen_sqli(candidate)
     assert outcome and outcome.status == "strong_candidate"
-    assert len(http.calls) == 3
+    assert len(http.calls) == 4
     assert all(call[0] == "POST" and call[1] == candidate.endpoint_url
                for call in http.calls)
     assert all("id" in call[2]["data"] for call in http.calls)
@@ -305,7 +319,7 @@ def test_sqli_json_body_supports_nested_observed_parameter():
                                    sample_value="7")])
     outcome = mut_mod.MutationEngine(cfg, http).prescreen_sqli(candidate)
     assert outcome and outcome.status == "strong_candidate"
-    assert len(http.calls) == 3
+    assert len(http.calls) == 4
     assert all("user" in call and "id" in call["user"]
                for call in http.calls)
 
@@ -328,12 +342,153 @@ def test_sqlmap_supports_json_body_with_parameter_pin(monkeypatch):
     result = sqli_mod.SqliValidator(cfg).validate(candidate)
     assert result.status == "inconclusive"
     args, _ = calls[0]
-    assert "-p=user.id" in args
+    assert args[args.index("-p") + 1] == "user.id"
     assert args[args.index("--method") + 1] == "POST"
     data = args[args.index("--data") + 1]
     assert '"user":{"id":"7"}' in data
     assert args[args.index("--headers") + 1] == \
         "Content-Type: application/json"
+
+
+def test_xml_request_shape_replaces_only_unique_observed_text_element():
+    body = ('<?xml version="1.0"?><search mode="exact">'
+            '<id>7</id><filter><active>true</active></filter></search>')
+    candidate = Candidate(
+        finding=Finding(id="xml1", source="test"), test_class="sqli",
+        endpoint_url="https://example.test/search", parameter="id",
+        method="POST", parameter_location="body",
+        request_content_type="application/xml; charset=utf-8",
+        request_body=body)
+    changed = request_shape_mod.body_with_parameter(
+        candidate, "id", "7' AND '1'='1")
+    assert changed == body.replace("<id>7</id>",
+                                   "<id>7' AND '1'='1</id>")
+    assert request_shape_mod.body_parameter_value(candidate, "id") == "7"
+    assert "mode=\"exact\"" in changed
+    assert "<active>true</active>" in changed
+
+
+def test_xml_request_shape_rejects_malformed_duplicate_and_dtd():
+    def candidate(body):
+        return Candidate(
+            finding=Finding(id="xml2", source="test"), test_class="sqli",
+            endpoint_url="https://example.test/search", parameter="id",
+            method="POST", parameter_location="body",
+            request_content_type="text/xml", request_body=body)
+
+    invalid = ["<search><id>7</search>",
+               "<search><id>7</id><id>8</id></search>",
+               "<!DOCTYPE search [<!ENTITY x '7'>]>"
+               "<search><id>&x;</id></search>"]
+    for body in invalid:
+        try:
+            request_shape_mod.body_with_parameter(candidate(body), "id", "8")
+        except ValueError:
+            pass
+        else:
+            raise AssertionError("unsafe or ambiguous XML must fail closed")
+
+
+def test_xml_sqli_prescreen_preserves_request_and_requires_state_ack():
+    class Http:
+        def __init__(self):
+            self.calls = []
+
+        def request(self, method, url, **kwargs):
+            self.calls.append((method, url, kwargs))
+            payload = kwargs["data"]
+            body = ('{"rows":[1]}' if "1=1" in payload else
+                    '{"rows":[]}')
+            return SimpleNamespace(status_code=200, text=body)
+
+    candidate = Candidate(
+        finding=Finding(id="xml3", source="test"), test_class="sqli",
+        endpoint_url="https://example.test/search", parameter="id",
+        method="POST", parameter_location="body",
+        request_content_type="application/soap+xml",
+        request_headers={"X-Request-Mode": "exact"},
+        request_body="<search><id>7</id><page>2</page></search>")
+    http = Http()
+    blocked = mut_mod.MutationEngine(Config(), http).prescreen_sqli(candidate)
+    assert blocked and blocked.status == "inconclusive"
+    assert not http.calls
+
+    cfg = Config()
+    cfg.safety.allow_state_change = True
+    outcome = mut_mod.MutationEngine(cfg, http).prescreen_sqli(candidate)
+    assert outcome and outcome.status == "strong_candidate"
+    assert len(http.calls) == 4
+    for method, url, kwargs in http.calls:
+        assert method == "POST" and url == candidate.endpoint_url
+        assert kwargs["headers"]["Content-Type"] == \
+            "application/soap+xml"
+        assert kwargs["headers"]["X-Request-Mode"] == "exact"
+        sent = kwargs["data"]
+        assert "<page>2</page>" in sent
+        assert sent.startswith("<search>") and sent.endswith("</search>")
+
+
+def test_sqlmap_leaves_xml_inconclusive_without_flattening(monkeypatch):
+    called = []
+    monkeypatch.setattr(sqli_mod, "which", lambda _: "/usr/bin/sqlmap")
+    monkeypatch.setattr(sqli_mod, "run", lambda *a, **kw: called.append(a))
+    cfg = Config()
+    cfg.safety.allow_state_change = True
+    candidate = Candidate(
+        finding=Finding(id="xml4", source="test"), test_class="sqli",
+        endpoint_url="https://example.test/search", parameter="id",
+        method="POST", parameter_location="body",
+        request_content_type="application/xml",
+        request_body="<search><id>7</id></search>")
+    result = sqli_mod.SqliValidator(cfg).validate(candidate)
+    assert result.status == "inconclusive"
+    assert "XML" in result.notes
+    assert not called
+
+
+def test_adapter_builds_xml_candidate_from_retained_raw_request():
+    finding = Finding(
+        id="xml5", source="nuclei", method="POST", parameter="id",
+        endpoint_url="https://example.test/search",
+        raw={"request": "POST /search HTTP/1.1\r\n"
+                         "Host: example.test\r\n"
+                         "Content-Type: application/xml\r\n"
+                         "X-Mode: exact\r\n\r\n"
+                         "<search><id>7</id><page>2</page></search>"})
+    endpoint = Endpoint(
+        url=finding.endpoint_url, normalized_url=finding.endpoint_url,
+        method="POST", request_content_types=["application/xml"],
+        body_parameters=[Parameter(name="id", location="body")])
+    target = TestTarget(
+        finding.endpoint_url, parameter="id", method="POST", finding=finding,
+        endpoint=endpoint, test_class="sqli")
+    candidate = _candidate_from(target, "sqli")
+    assert candidate.parameter_location == "body"
+    assert candidate.request_content_type == "application/xml"
+    assert candidate.request_body == "<search><id>7</id><page>2</page></search>"
+    assert candidate.request_headers["X-Mode"] == "exact"
+
+
+def test_sqli_mutation_budget_exhaustion_is_reported_as_blocked():
+    class Http:
+        def request(self, _method, _url, **_kwargs):
+            raise BudgetExceeded("request budget exhausted")
+
+    cfg = Config()
+    cfg.safety.allow_state_change = True
+    finding = Finding(id="budget1", source="test", method="POST",
+                      parameter="id", request_body="id=7")
+    endpoint = Endpoint(
+        url="https://example.test/search",
+        normalized_url="https://example.test/search", method="POST",
+        request_content_types=["application/x-www-form-urlencoded"],
+        body_parameters=[Parameter(name="id", location="body")])
+    target = TestTarget(
+        endpoint.url, parameter="id", method="POST", finding=finding,
+        endpoint=endpoint, test_class="sqli")
+    result = SqliMutationPlugin().run(target, TestContext(cfg, http=Http()))
+    assert result.status == "blocked"
+    assert "request budget exhausted" in result.observations[0]
 
 
 def test_fingerprint_waf_none():

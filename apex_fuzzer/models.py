@@ -4,6 +4,8 @@ from typing import List, Dict, Any, Optional
 from enum import Enum
 import hashlib
 import json
+import re
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 
 def stable_finding_id(prefix: str, *parts: str) -> str:
@@ -17,6 +19,25 @@ def stable_finding_id(prefix: str, *parts: str) -> str:
     canonical = "\x1f".join(str(p) for p in parts)
     digest = hashlib.sha256(canonical.encode("utf-8")).hexdigest()[:16]
     return f"{prefix}-{digest}"
+
+
+_SENSITIVE_FIELD = re.compile(
+    r"(?:authorization|cookie|token|secret|password|api[-_]?key|csrf|session)",
+    re.I)
+
+
+def _redact_url_values(url: str) -> str:
+    """Keep endpoint paths while removing common URL credential material."""
+    try:
+        parts = urlsplit(url)
+        netloc = parts.netloc.rsplit("@", 1)[-1]
+        query = [(key, "[REDACTED]" if _SENSITIVE_FIELD.search(key) else value)
+                 for key, value in
+                 parse_qsl(parts.query, keep_blank_values=True)]
+        return urlunsplit((parts.scheme, netloc, parts.path,
+                           urlencode(query, doseq=True), ""))
+    except (TypeError, ValueError):
+        return "[INVALID URL]"
 
 
 class EndpointType(str, Enum):
@@ -115,6 +136,8 @@ class Endpoint:
 
     def to_dict(self) -> Dict[str, Any]:
         d = asdict(self)
+        d["url"] = _redact_url_values(self.url)
+        d["normalized_url"] = _redact_url_values(self.normalized_url)
         d["query_parameters"] = [p.to_dict() for p in self.query_parameters]
         d["body_parameters"] = [p.to_dict() for p in self.body_parameters]
         d["header_parameters"] = [p.to_dict() for p in self.header_parameters]
