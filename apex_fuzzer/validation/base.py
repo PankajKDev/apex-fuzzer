@@ -1,6 +1,6 @@
 """Generic validation framework."""
 from dataclasses import dataclass, field
-from typing import Optional, Dict, Any
+from typing import Optional, Dict, Any, List
 from ..models import Finding
 from ..logging_setup import get_logger
 
@@ -16,7 +16,10 @@ class Candidate:
     method: str = "GET"
     baseline_response: Optional[Dict[str, Any]] = None
     request_headers: Dict[str, str] = field(default_factory=dict)
-    request_body: Optional[str] = None
+    request_body: Optional[Any] = None
+    parameter_location: str = "query"
+    request_content_type: str = ""
+    body_parameters: List[Any] = field(default_factory=list)
 
 
 @dataclass

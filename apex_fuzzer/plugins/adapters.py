@@ -4,10 +4,10 @@ These change *how* engines are invoked (registry + TestResult), not
 *what* they do. Preserved semantics from the pre-plugin loop:
 
 - mutation prescreen runs before the heavy validator of the same class;
-- a prescreen hit does NOT suppress the heavy validator — when the
-  heavy tool is available it runs too and its outcome wins (last write);
-- prescreen outcomes record evidence without pre-allocating a proof dir;
-  heavy validators allocate first.
+- a prescreen hit does NOT suppress the heavy validator — when available it
+  runs too, and per-finding aggregation combines both outcomes;
+- each tool's evidence is retained; conflicting positive and negative
+  results resolve to inconclusive instead of last-write-wins.
 """
 from typing import Optional, Tuple
 from .base import (SecurityTest, TestTarget, TestContext, register)
@@ -22,10 +22,30 @@ from ..validation.ssrf import SsrfValidator
 
 
 def _candidate_from(target: TestTarget, test_class: str) -> Candidate:
+    from urllib.parse import parse_qsl, urlsplit
+    endpoint = target.endpoint
+    body_parameters = list(getattr(endpoint, "body_parameters", []) or [])
+    parameter = target.parameter
+    in_body = parameter and any(
+        getattr(p, "name", "") == parameter for p in body_parameters)
+    in_request_query = parameter and any(
+        name == parameter for name, _ in parse_qsl(
+            urlsplit(target.endpoint_url).query, keep_blank_values=True))
+    location = "body" if in_body and not in_request_query else "query"
+    content_types = list(getattr(endpoint, "request_content_types", []) or [])
+    content_type = ((content_types[0] if content_types else "") or
+                    getattr(endpoint, "content_type", ""))
+    finding = target.finding
     return Candidate(finding=target.finding, test_class=test_class,
                      endpoint_url=target.endpoint_url,
                      method=target.method or "GET",
-                     parameter=target.parameter)
+                     parameter=parameter,
+                     request_headers=dict(getattr(
+                         finding, "request_headers", {}) or {}),
+                     request_body=getattr(finding, "request_body", None),
+                     parameter_location=location,
+                     request_content_type=content_type,
+                     body_parameters=body_parameters)
 
 
 class _ClassGated(SecurityTest):
@@ -123,9 +143,12 @@ class XssPlugin(_ClassGated):
         gated = self._class_ok(target)
         if gated:
             return gated
-        outcome = XssValidator(ctx.cfg).validate(
+        outcome = XssValidator(
+            ctx.cfg, browser_enabled=ctx.browser_enabled).validate(
             _candidate_from(target, "xss"))
-        if outcome.status == ValidationStatus.STRONG_CANDIDATE.value:
+        if outcome.status == ValidationStatus.CONFIRMED.value:
+            st = RESULT_CONFIRMED
+        elif outcome.status == ValidationStatus.STRONG_CANDIDATE.value:
             st = RESULT_CANDIDATE
         elif outcome.status == ValidationStatus.FALSE_POSITIVE.value:
             st = RESULT_NEGATIVE

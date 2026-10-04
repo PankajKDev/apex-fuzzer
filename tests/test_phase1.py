@@ -544,6 +544,51 @@ def test_apply_plugin_result_mappings(tmp_path):
     assert cov.summary()["ssrf"] == "tested_negative"
 
 
+def test_apply_plugin_results_aggregates_and_retains_each_tool(tmp_path):
+    from apex_fuzzer.validation.evidence import EvidenceStore
+    orch, out = _orch()
+    evidence = EvidenceStore(out / "proofs")
+    coverage = CoverageTracker()
+
+    class Pre:
+        name = "prescreen"
+        allocates_evidence = False
+
+    class Heavy:
+        name = "heavy"
+        allocates_evidence = True
+
+    candidate = Finding(id="agg-1", source="nuclei",
+                        matched_at="https://a.com/?id=1",
+                        raw={"template": "kept"})
+    orch._apply_plugin_results(
+        candidate,
+        [(Pre(), TestResult(status="candidate", evidence={"marker": "sql"},
+                            observations=["candidate signal"])),
+         (Heavy(), TestResult(status="inconclusive",
+                              evidence={"tool": "no verdict"},
+                              observations=["validator inconclusive"]))],
+        evidence, "sqli", coverage)
+    assert candidate.result_status == "candidate"
+    assert candidate.raw["template"] == "kept"
+    assert [item["plugin"] for item in candidate.raw["validator_results"]] \
+        == ["prescreen", "heavy"]
+    assert candidate.raw["validator_results"][0]["evidence"] == {
+        "marker": "sql"}
+    assert coverage.summary()["sqli"] == "candidate"
+
+    conflict = Finding(id="agg-2", source="nuclei",
+                       matched_at="https://a.com/?id=2")
+    conflict_coverage = CoverageTracker()
+    orch._apply_plugin_results(
+        conflict,
+        [(Pre(), TestResult(status="candidate")),
+         (Heavy(), TestResult(status="negative"))],
+        evidence, "sqli", conflict_coverage)
+    assert conflict.result_status == "inconclusive"
+    assert conflict_coverage.summary()["sqli"] == "inconclusive"
+
+
 def test_finding_endpoint_lookup():
     orch, _ = _orch()
     eps = [_ep("https://a.com/api/u?id=1", ["id"])]

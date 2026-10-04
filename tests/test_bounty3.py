@@ -538,8 +538,13 @@ def test_second_order_ssrf_selects_url_fields_and_builds_unique_callback():
     one = make_ssrf_canary("registered.oast.pro")
     two = make_ssrf_canary("registered.oast.pro")
     from urllib.parse import urlparse
-    assert urlparse(one).hostname.startswith("registered.so")
+    one_parts = urlparse(one)
+    two_parts = urlparse(two)
+    assert one_parts.hostname.startswith("registered")
+    assert one_parts.hostname.endswith(".oast.pro")
+    assert two_parts.hostname != one_parts.hostname
     assert one != two
+    assert one_parts.path.split("/")[-1] in one_parts.hostname
 
 
 def test_second_order_ssrf_candidate_scoring_uses_operation_context():

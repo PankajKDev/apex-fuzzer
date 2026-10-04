@@ -2,16 +2,19 @@
 differential auth, mutation engine, OAST helpers, nuclei gen, limiter."""
 import json
 import time
+from types import SimpleNamespace
 
 from apex_fuzzer.discovery import param_miner, technologies as tech_mod
 from apex_fuzzer.discovery.javascript import chunk_js, parse_source_map
-from apex_fuzzer.models import Parameter, Hypothesis, Endpoint
+from apex_fuzzer.models import Parameter, Hypothesis, Endpoint, Finding
 from apex_fuzzer.validation import differential as diff_mod
 from apex_fuzzer.validation import mutate as mut_mod
 from apex_fuzzer.validation import oast as oast_mod
 from apex_fuzzer.detection import nuclei as nuclei_mod
 from apex_fuzzer.shell import AdaptiveRateLimiter
 from apex_fuzzer.config import Config
+from apex_fuzzer.validation.base import Candidate
+from apex_fuzzer.validation import sqli as sqli_mod
 
 
 # ── arjun JSON parsing ────────────────────────────────────────────────
@@ -163,6 +166,176 @@ def test_sqli_error_signal():
     assert not mut_mod.sqli_error_signal("welcome to our homepage")
 
 
+def test_sqli_boolean_pair_is_repeatable_candidate_and_has_no_delay_payload():
+    class Http:
+        def __init__(self):
+            self.urls = []
+
+        def get(self, url, **kwargs):
+            self.urls.append(url)
+            body = ('{"items":[1,2]}' if "AND+1%3D1" in url else
+                    '{"items":[]}')
+            return SimpleNamespace(status_code=200, text=body)
+
+    http = Http()
+    candidate = Candidate(
+        finding=Finding(id="f1", source="test"), test_class="sqli",
+        endpoint_url="https://example.test/items?id=7", parameter="id")
+    outcome = mut_mod.MutationEngine(Config(), http).prescreen_sqli(candidate)
+    assert outcome and outcome.status == "strong_candidate"
+    assert outcome.evidence["control_pair"]["true_first"] == \
+        outcome.evidence["control_pair"]["true_repeat"]
+    assert len(http.urls) == 3
+    assert all("SLEEP" not in url.upper() and "PG_SLEEP" not in url.upper()
+               for url in http.urls)
+
+
+def test_sqlmap_is_parameter_pinned_and_does_not_enumerate(monkeypatch):
+    calls = []
+    monkeypatch.setattr(sqli_mod, "which", lambda _: "/usr/bin/sqlmap")
+    monkeypatch.setattr(sqli_mod, "run", lambda args, timeout: (
+        calls.append((args, timeout)) or
+        SimpleNamespace(stdout="", stderr="")))
+    candidate = Candidate(
+        finding=Finding(id="f2", source="test"), test_class="sqli",
+        endpoint_url="https://example.test/items?id=7&view=full",
+        parameter="id")
+    result = sqli_mod.SqliValidator(Config()).validate(candidate)
+    assert result.status == "inconclusive"
+    args, timeout = calls[0]
+    assert "-p=id" in args
+    assert "--dbs" not in args
+    assert args[args.index("--technique") + 1] == "BE"
+    assert timeout == 180
+
+
+def test_sqlmap_skips_without_a_query_candidate(monkeypatch):
+    monkeypatch.setattr(sqli_mod, "which", lambda _: "/usr/bin/sqlmap")
+    candidate = Candidate(
+        finding=Finding(id="f3", source="test"), test_class="sqli",
+        endpoint_url="https://example.test/items")
+    result = sqli_mod.SqliValidator(Config()).validate(candidate)
+    assert result.status == "inconclusive"
+    assert "no candidate parameter" in result.notes
+
+
+def test_sqlmap_skips_unimplemented_post_body_shape(monkeypatch):
+    monkeypatch.setattr(sqli_mod, "which", lambda _: "/usr/bin/sqlmap")
+    candidate = Candidate(
+        finding=Finding(id="f4", source="test"), test_class="sqli",
+        endpoint_url="https://example.test/items", parameter="id",
+        method="POST", request_body="id=7")
+    result = sqli_mod.SqliValidator(Config()).validate(candidate)
+    assert result.status == "inconclusive"
+    assert "allow_state_change" in result.notes
+
+
+def test_sqli_form_body_boolean_pair_requires_and_uses_state_change_ack():
+    class Http:
+        def __init__(self):
+            self.calls = []
+
+        def request(self, method, url, **kwargs):
+            self.calls.append((method, url, kwargs))
+            body = ("{\"rows\":[1]}" if "1=1" in
+                    kwargs["data"]["id"] else "{\"rows\":[]}")
+            return SimpleNamespace(status_code=200, text=body)
+
+    cfg = Config()
+    cfg.safety.allow_state_change = True
+    http = Http()
+    candidate = Candidate(
+        finding=Finding(id="f5", source="test"), test_class="sqli",
+        endpoint_url="https://example.test/search", parameter="id",
+        method="POST", parameter_location="body",
+        request_content_type="application/x-www-form-urlencoded",
+        body_parameters=[Parameter(name="id", location="body",
+                                   sample_value="7")])
+    outcome = mut_mod.MutationEngine(cfg, http).prescreen_sqli(candidate)
+    assert outcome and outcome.status == "strong_candidate"
+    assert len(http.calls) == 3
+    assert all(call[0] == "POST" and call[1] == candidate.endpoint_url
+               for call in http.calls)
+    assert all("id" in call[2]["data"] for call in http.calls)
+
+
+def test_sqli_body_mutations_stay_off_without_state_change_ack():
+    class Http:
+        def __init__(self):
+            self.calls = 0
+
+        def request(self, method, url, **kwargs):
+            self.calls += 1
+            return SimpleNamespace(status_code=200, text="ok")
+
+    http = Http()
+    candidate = Candidate(
+        finding=Finding(id="f8", source="test"), test_class="sqli",
+        endpoint_url="https://example.test/search", parameter="id",
+        method="POST", parameter_location="body",
+        request_content_type="application/x-www-form-urlencoded",
+        body_parameters=[Parameter(name="id", location="body",
+                                   sample_value="7")])
+    outcome = mut_mod.MutationEngine(Config(), http).prescreen_sqli(candidate)
+    assert outcome and outcome.status == "inconclusive"
+    assert http.calls == 0
+
+
+def test_sqli_json_body_supports_nested_observed_parameter():
+    class Http:
+        def __init__(self):
+            self.calls = []
+
+        def request(self, method, url, **kwargs):
+            self.calls.append(kwargs["json"])
+            true_case = "1=1" in kwargs["json"]["user"]["id"]
+            return SimpleNamespace(
+                status_code=200,
+                text='{"rows":[1]}' if true_case else '{"rows":[]}')
+
+    cfg = Config()
+    cfg.safety.allow_state_change = True
+    http = Http()
+    candidate = Candidate(
+        finding=Finding(id="f6", source="test"), test_class="sqli",
+        endpoint_url="https://example.test/search", parameter="user.id",
+        method="PATCH", parameter_location="body",
+        request_content_type="application/json",
+        body_parameters=[Parameter(name="user.id", location="body",
+                                   sample_value="7")])
+    outcome = mut_mod.MutationEngine(cfg, http).prescreen_sqli(candidate)
+    assert outcome and outcome.status == "strong_candidate"
+    assert len(http.calls) == 3
+    assert all("user" in call and "id" in call["user"]
+               for call in http.calls)
+
+
+def test_sqlmap_supports_json_body_with_parameter_pin(monkeypatch):
+    calls = []
+    monkeypatch.setattr(sqli_mod, "which", lambda _: "/usr/bin/sqlmap")
+    monkeypatch.setattr(sqli_mod, "run", lambda args, timeout: (
+        calls.append((args, timeout)) or
+        SimpleNamespace(stdout="", stderr="")))
+    cfg = Config()
+    cfg.safety.allow_state_change = True
+    candidate = Candidate(
+        finding=Finding(id="f7", source="test"), test_class="sqli",
+        endpoint_url="https://example.test/search", parameter="user.id",
+        method="POST", parameter_location="body",
+        request_content_type="application/json",
+        body_parameters=[Parameter(name="user.id", location="body",
+                                   sample_value="7")])
+    result = sqli_mod.SqliValidator(cfg).validate(candidate)
+    assert result.status == "inconclusive"
+    args, _ = calls[0]
+    assert "-p=user.id" in args
+    assert args[args.index("--method") + 1] == "POST"
+    data = args[args.index("--data") + 1]
+    assert '"user":{"id":"7"}' in data
+    assert args[args.index("--headers") + 1] == \
+        "Content-Type: application/json"
+
+
 def test_fingerprint_waf_none():
     assert mut_mod.fingerprint_waf({}) is None
 
@@ -217,21 +390,25 @@ def test_static_callback_collector_tokens_and_poll(monkeypatch):
 
 def test_static_callback_collector_confirms_probe(monkeypatch):
     from types import SimpleNamespace
+    from urllib.parse import parse_qs, urlsplit
     from apex_fuzzer.validation.oast import probe_endpoint
 
     provider = oast_mod.InteractshProvider(
         callback_url="http://localhost:9001")
     assert provider.register()
 
+    callback_urls = []
+
     class CollectorResponse:
         def json(self):
-            return [{"path": f"/{provider.token}/stored/canary"}]
+            return [{"path": urlsplit(url).path} for url in callback_urls]
 
-    monkeypatch.setattr("requests.get",
-                        lambda *args, **kwargs: CollectorResponse())
+    monkeypatch.setattr("requests.get", lambda *args, **kwargs:
+                        CollectorResponse())
 
     class Http:
         def request(self, method, url, **kwargs):
+            callback_urls.extend(parse_qs(urlsplit(url).query).get("url", []))
             return SimpleNamespace(status_code=202, text="queued")
 
     endpoint = Endpoint(

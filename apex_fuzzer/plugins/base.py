@@ -63,7 +63,8 @@ class TestContext:
                  oast_provider=None, waf: Optional[str] = None,
                  technologies: Optional[List] = None,
                  identities: Optional[List] = None,
-                 evidence=None, timeout: int = 10):
+                 evidence=None, timeout: int = 10,
+                 browser_enabled: bool = False):
         self.cfg = cfg
         self.http = http
         self.scope = scope
@@ -74,6 +75,7 @@ class TestContext:
         self.identities = identities or []
         self.evidence = evidence
         self.timeout = timeout
+        self.browser_enabled = browser_enabled
 
     @property
     def authenticated_identities(self) -> List:
