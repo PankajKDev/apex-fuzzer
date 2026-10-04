@@ -173,3 +173,70 @@ def test_adapter_extracts_observed_xml_request_method_body_and_content_type():
 def test_finding_names_route_to_class_validators(name, expected):
     assert _classify_finding(Finding(id="classification", source="fixture",
                                      name=name)) == expected
+
+
+SVG = ('<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">'
+       '<rect width="1" height="1"/></svg>')
+SOAP = ('<soap:Envelope xmlns:soap="http://schemas.xmlsoap.org/soap/envelope/">'
+        '<soap:Body><GetUser><id>7</id></GetUser></soap:Body></soap:Envelope>')
+XMP = ('<x:xmpmeta xmlns:x="adobe:ns:meta/">'
+       '<rdf:RDF xmlns:rdf="http://www.w3.org/1999/02/22-rdf-syntax-ns#">'
+       '<rdf:Description rdf:about=""/></rdf:RDF></x:xmpmeta>')
+
+
+def test_svg_body_probed_with_callback():
+    from apex_fuzzer.validation.xxe import sniff_xml_shape
+    assert sniff_xml_shape(SVG, "image/svg+xml") == "xml"
+    result, http, _ = run(SVG, content_type="image/svg+xml")
+    assert result.status == "confirmed"
+    assert http.calls and http.calls[0][0] == "POST"
+
+
+def test_soap_namespaced_body_probed_with_callback():
+    result, _, _ = run(SOAP, content_type="application/soap+xml")
+    assert result.status == "confirmed"
+
+
+def test_sniffed_svg_without_xml_content_type():
+    from apex_fuzzer.validation.xxe import sniff_xml_shape
+    assert sniff_xml_shape(SVG, "application/octet-stream") == "xml"
+    assert sniff_xml_shape("<?xml version='1.0'?><r/>",
+                           "text/plain") == "xml"
+    result, _, _ = run(SVG, content_type="application/octet-stream")
+    assert result.status == "confirmed"
+
+
+def test_office_containers_fail_closed_with_note():
+    from apex_fuzzer.validation.xxe import sniff_xml_shape, container_note
+    assert sniff_xml_shape(b"\x50\x4b\x03\x04docx", "application/vnd.x") == \
+        "container"
+    assert "isolated" in container_note(b"\x50\x4b\x03\x04x")
+    docx = Candidate(
+        finding=Finding(id="xxe-docx", source="fixture", method="POST",
+                        request_body=b"\x50\x4b\x03\x04docx"),
+        test_class="xxe", endpoint_url="https://app.example.test/import",
+        method="POST", request_body=b"\x50\x4b\x03\x04docx",
+        request_content_type="application/vnd.x")
+    cfg = Config()
+    cfg.safety.allow_state_change = True
+    result = XxeValidator(cfg, XmlParserFixture(OastFixture()),
+                          OastFixture(), timeout=3).validate(docx)
+    assert result.status == "inconclusive"
+    assert "isolated" in result.notes
+
+
+def test_html_and_json_are_not_xml():
+    from apex_fuzzer.validation.xxe import sniff_xml_shape
+    assert sniff_xml_shape("<html><body>hi</body></html>",
+                           "text/html") == "other"
+    assert sniff_xml_shape('{"a": 1}', "application/json") == "other"
+    assert sniff_xml_shape("", "text/plain") == "other"
+    # XMP metadata text is XML and stays probeable
+    assert sniff_xml_shape(XMP, "application/rdf+xml") == "xml"
+
+
+def test_bom_prefixed_xml_is_sniffed():
+    from apex_fuzzer.validation.xxe import sniff_xml_shape
+    assert sniff_xml_shape('\ufeff<?xml version="1.0"?><r/>',
+                           "text/plain") == "xml"
+    assert sniff_xml_shape('\ufeff<svg/>', "text/plain") == "xml"

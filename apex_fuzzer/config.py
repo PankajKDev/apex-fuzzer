@@ -61,6 +61,10 @@ class ValidationConfig:
     # suite. Off by default; the mutation prescreen never sends delays.
     sqli_time_based: bool = False
     sqli_time_sec: int = 2
+    # Web-cache deception checks run read-only GETs under unique cache
+    # keys during validation passes; poisoning probes are out of scope.
+    cache: bool = True
+    cache_max_endpoints: int = 10
     # Safe, non-following GET checks against observed redirect-like query
     # parameters. Runs only as part of an explicitly enabled validation pass.
     open_redirect: bool = True

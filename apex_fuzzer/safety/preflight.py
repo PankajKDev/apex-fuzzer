@@ -137,6 +137,11 @@ def plan_second_order_ssrf(n_injections: int,
                        verification_requests=n_injections * n_triggers)
 
 
+def plan_cache(n_endpoints: int) -> RequestPlan:
+    # anonymous baseline + victim fetch + anonymous re-read per endpoint
+    return RequestPlan("cache", "*", 0, n_endpoints * 3)
+
+
 def plan_oast(n_endpoints: int, max_params: int) -> RequestPlan:
     # direct HTTP+HTTPS callbacks plus bounded parser-bypass variants
     # (up to 5 per scheme) for params that miss
@@ -215,6 +220,9 @@ def dry_run_plan(target: str, cfg, profile,
     if "oast" in names:
         plans.append(plan_oast(cfg.oast.max_endpoints,
                                cfg.oast.max_params_per_endpoint))
+    if cfg.validation.cache and (getattr(profile, "run_validation", False)
+                                 or cfg.validation.enabled):
+        plans.append(plan_cache(cfg.validation.cache_max_endpoints))
     total = sum(p.total for p in plans)
     fit, fit_reasons = check_fit(cfg, total)
     return {"target": target, "host": host, "strict": strict,

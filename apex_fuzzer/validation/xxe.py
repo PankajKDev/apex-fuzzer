@@ -23,6 +23,57 @@ _MAX_XML_BYTES = 64 * 1024
 _FORBIDDEN_DTD = re.compile(r"<!\s*(?:DOCTYPE|ENTITY)\b", re.I)
 _ROOT_TAG = re.compile(r"<([A-Za-z_:][\w:.-]*)(?=[\s/>])[^<>]*>")
 
+# container formats: only XML-text shapes are probed in normal scans.
+# Zip/office and binary image metadata need isolated document tooling;
+# they fail closed here with an explicit note.
+_CONTAINER_MAGIC = (b"\x50\x4b\x03\x04",  # zip: docx/xlsx/odt/jar
+                    b"\xd0\xcf\x11\xe0",  # OLE: doc/xls/ppt
+                    b"\xff\xd8\xff",  # JPEG (EXIF/XMP lives here)
+                    b"\x89PNG",  # PNG (iTXt/tEXt metadata)
+                    b"GIF8",  # GIF comment blocks
+                    b"%PDF-")  # PDF (embedded XML/XMP)
+_XML_PROLOG_RE = re.compile(r"<\?xml\b", re.I)
+_CONTAINER_ROOT_RE = re.compile(r"<(?:\w+:)?(?:svg|Envelope)\b", re.I)
+
+
+def sniff_xml_shape(raw: Any, content_type: str) -> str:
+    """Classify an observed body for XXE probing.
+
+    Returns "xml" (declared or sniffed XML text: prolog, svg root, or
+    Envelope root), "container" (office/binary formats needing isolated
+    document tooling), or "other".
+    """
+    lowered = (content_type or "").lower()
+    if "xml" in lowered or "svg" in lowered:
+        return "xml"
+    if isinstance(raw, (bytes, bytearray)):
+        blob = bytes(raw)
+        if blob.startswith(_CONTAINER_MAGIC):
+            return "container"
+        try:
+            head = blob[:2000].decode("utf-8")
+        except (UnicodeDecodeError, ValueError):
+            return "container"
+    elif isinstance(raw, str):
+        head = raw.lstrip("\ufeff \t\r\n")[:2000]
+    else:
+        return "other"
+    if _XML_PROLOG_RE.match(head) or _CONTAINER_ROOT_RE.match(head):
+        return "xml"
+    return "other"
+
+
+def container_note(raw: Any) -> str:
+    """Explain why a container/binary body stays out of normal scans."""
+    if isinstance(raw, (bytes, bytearray)) and bytes(raw)[:4] in (
+            b"\x50\x4b\x03\x04", b"\xd0\xcf\x11\xe0"):
+        return ("office document container (zip/OLE): XXE inside document "
+                "parts needs isolated document tooling with established "
+                "format libraries; not replayed in normal scans")
+    return ("binary or container format: XXE inside image metadata, PDF, "
+            "or office parts needs isolated fixtures; not replayed in "
+            "normal scans")
+
 
 class XxeValidator(Validator):
     name = "xxe-oast"
@@ -46,13 +97,18 @@ class XxeValidator(Validator):
                 "XML POST probe requires safety.allow_state_change")
 
         body = candidate.request_body
+        if isinstance(body, (bytes, bytearray)) and \
+                bytes(body)[:4] in (b"\x50\x4b\x03\x04", b"\xd0\xcf\x11\xe0"):
+            return self._inconclusive(container_note(body))
         if not isinstance(body, str) or not body.strip():
             return self._inconclusive("no observed XML request body")
         raw = body.strip()
         if len(raw.encode("utf-8", "replace")) > _MAX_XML_BYTES:
             return self._inconclusive("observed XML body exceeds 64 KiB cap")
-        content_type = (candidate.request_content_type or "").lower()
-        if "xml" not in content_type:
+        shape = sniff_xml_shape(raw, candidate.request_content_type or "")
+        if shape == "container":
+            return self._inconclusive(container_note(raw))
+        if shape != "xml":
             return self._inconclusive("observed request body is not XML")
         if _FORBIDDEN_DTD.search(raw):
             return self._inconclusive(

@@ -43,6 +43,10 @@ validation:
   # payloads hold DB connections open and are the heaviest SQLi check.
   sqli_time_based: false
   sqli_time_sec: 2
+  # Web-cache deception runs read-only GETs under unique cache keys
+  # during validation passes. Cache poisoning is out of scope.
+  cache: true
+  cache_max_endpoints: 10
   differential_max_endpoints: 30
   min_severity: medium
   # Stored-XSS correlation persists canary data server-side: opt-in only.

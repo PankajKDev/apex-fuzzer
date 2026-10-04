@@ -1474,6 +1474,12 @@ class Orchestrator:
                 endpoints, evidence, metrics, budgets, coverage, client,
                 identities)
 
+        # 1b) web-cache deception (unique keys, read-only) ─────────
+        if ((self.profile.run_validation or self.cfg.validation.enabled)
+                and self.cfg.validation.cache):
+            out += self._cache_probe(endpoints, evidence, metrics,
+                                     budgets, coverage, client, identities)
+
         # 1b) authz matrix: harvest → swap → per-method sweep (#1–2)
         if (self.profile.authz_matrix or self.cfg.authorization.enabled):
             out += self._authz_matrix_probe(endpoints, evidence,
@@ -2225,6 +2231,96 @@ class Orchestrator:
             evidence.record(
                 f, request_text=f"GET {f.endpoint_url}",
                 response_text=(f.description or "")[:2000])
+        return findings
+
+    # ── WEB-CACHE DECEPTION (unique keys, read-only) ───────────────
+    def _cache_probe(self, endpoints: List[Endpoint],
+                     evidence: EvidenceStore, metrics: Metrics,
+                     budgets: BudgetTracker,
+                     coverage: CoverageTracker, client,
+                     identities) -> List[Finding]:
+        """Detect personalized bodies served from cache to anonymous."""
+        from .safety.preflight import plan_cache
+        from .validation.cache import probe_deception
+        cfg_v = self.cfg.validation
+        victims = [i for i in identities or []
+                   if getattr(i, "name", "") != "anonymous"
+                   and dict(getattr(i, "auth_headers", None) or {})]
+        if not victims:
+            return []
+        targets = [e for e in endpoints
+                   if (getattr(e, "method", "GET") or "GET").upper()
+                   == "GET"
+                   and (e.endpoint_type in PRIVILEGED_TYPES
+                        or (has_idor_params(e)
+                            and e.endpoint_type != "static"))]
+        targets = targets[:max(0, cfg_v.cache_max_endpoints)]
+        if not targets:
+            return []
+        log.info("cache: probing %d endpoints", len(targets))
+        if not self._reserve_or_block(
+                budgets, coverage, "cache", plan_cache(len(targets))):
+            return []
+        findings: List[Finding] = []
+        victim = victims[0]
+        victim_headers = dict(getattr(victim, "auth_headers", None) or {})
+        victim_name = getattr(victim, "name", "tester")
+        for ep in targets:
+            if self._halted():
+                log.info("cache: halted by stop control")
+                break
+            if not self.scope.active_test_allowed(ep.url):
+                continue
+            self._paced()
+            try:
+                res = probe_deception(
+                    client, ep.url, victim_headers, victim_name,
+                    timeout=self.cfg.scan.http_timeout)
+            except BudgetExceeded:
+                coverage.record("cache", "blocked",
+                                f"budget: {ep.normalized_url}")
+                continue
+            if res.verdict == "confirmed":
+                metrics.validated_confirmed += 1
+                self._note_candidate()
+                coverage.record("cache", "confirmed", res.notes)
+                f = Finding(
+                    id=stable_finding_id("cache", ep.normalized_url,
+                                         victim_name),
+                    source="cache-deception",
+                    name=(f"Web-cache deception: anonymous reads "
+                          f"'{victim_name}''s cached response ({ep.path})"),
+                    severity="high",
+                    confidence=Confidence.CONFIRMED.value,
+                    validation_status=ValidationStatus.CONFIRMED.value,
+                    host=ep.host, matched_at=ep.url,
+                    endpoint_url=ep.url, method="GET",
+                    description=res.notes + " Every probe used a unique "
+                                    "cache key; no shared entry was written.",
+                    tags=["cache", "cache-deception", "authz",
+                          ep.endpoint_type, "verified-effect"],
+                    raw={"cache": res.to_dict()},
+                    false_positive_notes=(
+                        "Anonymous baseline, victim fetch, and anonymous "
+                        "re-read all completed; the re-read carried a "
+                        "cache HIT for the victim body. Confirm the cached "
+                        "content is actually sensitive before reporting."),
+                    identity=victim_name,
+                )
+                evidence.allocate(f)
+                evidence.record(
+                    f,
+                    request_text=(f"GET {res.cache_key_url}\n(as "
+                                  f"{victim_name}, then anonymous)"),
+                    response_text=res.notes)
+                findings.append(f)
+                log.info("cache: %s", res.notes)
+            elif res.verdict == "tested_negative":
+                coverage.record("cache", "tested_negative",
+                                f"{ep.normalized_url}: {res.notes}")
+            else:
+                coverage.record("cache", "inconclusive",
+                                f"{ep.normalized_url}: {res.notes}")
         return findings
 
     # ── AUTHZ MATRIX: harvest → swap → per-method sweep (#1–2) ──────

@@ -297,6 +297,8 @@ validation:
   mutation_payloads: 8    # ladder depth per class
   sqli_time_based: false  # opt-in sqlmap delay confirmation (holds DB conns)
   sqli_time_sec: 2        # per-delay seconds when sqli_time_based is true
+  cache: true             # deception checks in validation runs (read-only)
+  cache_max_endpoints: 10
   differential_max_endpoints: 30
   min_severity: medium     # reserved
   # Stored-XSS correlation persists canary data server-side: opt-in only.
@@ -395,6 +397,12 @@ scope:
   # crawl_exclude_exts / active_test_exclude_exts default to image, font,
   # media and archive extensions
 ```
+
+XXE probes XML-text bodies including SVG, SOAP envelopes, and XMP
+metadata (declared or sniffed: prolog, `svg`, or `Envelope` roots, any
+namespaces). Office/OLE containers and binary image/PDF bodies fail closed
+with an explicit note: document-part XXE needs isolated fixtures with
+established format tooling, and file reads stay out of normal scans.
 
 Path-traversal validation stays idle until both marker values are configured.
 Use an owner-approved, harmless canary file at a relative application path and
@@ -984,6 +992,16 @@ mutated. Dalfox stays GET-query only; non-query Dalfox inputs are
 inconclusive.
 
 ---
+
+## Web-cache deception
+
+`validation/cache.py` runs an anonymous-baseline / victim / anonymous-re-read
+triple under a unique `apexcb<hex>` query token per endpoint: only the
+probe's own entries are created, shared keys are never touched. A finding
+needs all three legs — personalized content (victim differs from baseline),
+a cache HIT signal on the re-read, and a re-read body equal to the victim
+body. Completed comparisons otherwise are genuine negatives; poisoning
+probes are out of scope and stay manual.
 
 ## WAF-aware mutation engine
 
