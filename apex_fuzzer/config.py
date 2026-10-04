@@ -291,6 +291,10 @@ class AuthContext:
     roles: List[str] = field(default_factory=list)
     tenant: str = ""
     storage_state: Optional[str] = None
+    # Marks a test session that has authenticated but not yet completed
+    # MFA. Used only by the MFA session-transition check, which verifies
+    # the pre-MFA session cannot reach privileged resources.
+    mfa_pending: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
@@ -397,7 +401,8 @@ class Config:
                     identity=str(item.get("identity") or ""),
                     roles=roles,
                     tenant=str(item.get("tenant") or ""),
-                    storage_state=item.get("storage_state")))
+                    storage_state=item.get("storage_state"),
+                    mfa_pending=bool(item.get("mfa_pending", False))))
             login_raw = data["auth"].get("login") or {}
             login = LoginConfig(
                 enabled=bool(login_raw.get("enabled", False)),

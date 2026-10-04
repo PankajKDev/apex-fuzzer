@@ -1466,6 +1466,14 @@ class Orchestrator:
             out += self._differential_probe(endpoints, diff, evidence,
                                             metrics, budgets, coverage)
 
+        # 1b) MFA session transitions (pre- vs post-MFA test sessions)
+        if (self.profile.differential or self.cfg.validation.differential
+                or self.profile.authz_matrix
+                or self.cfg.authorization.enabled):
+            out += self._mfa_transition_probe(
+                endpoints, evidence, metrics, budgets, coverage, client,
+                identities)
+
         # 1b) authz matrix: harvest → swap → per-method sweep (#1–2)
         if (self.profile.authz_matrix or self.cfg.authorization.enabled):
             out += self._authz_matrix_probe(endpoints, evidence,
@@ -1484,6 +1492,15 @@ class Orchestrator:
                 out += self._oast_sweep(endpoints, oast_provider,
                                         evidence, metrics, client, out_dir,
                                         budgets, coverage)
+
+            # 2b) OAuth transitions (passive analysis + bounded probes)
+            if (self.profile.differential
+                    or self.cfg.validation.differential
+                    or self.profile.authz_matrix
+                    or self.cfg.authorization.enabled):
+                out += self._oauth_probe(
+                    endpoints, out_dir, evidence, metrics, budgets,
+                    coverage, client, identities, oast_provider)
 
             # 3) per-finding plugins (§48: registry + TestResult)
             test_ctx = TestContext(
@@ -1929,6 +1946,287 @@ class Orchestrator:
                      ep.url, res.notes)
         return findings
 
+    # ── MFA SESSION TRANSITIONS (test sessions only) ────────────────
+    def _mfa_transition_probe(self, endpoints: List[Endpoint],
+                              evidence: EvidenceStore, metrics: Metrics,
+                              budgets: BudgetTracker,
+                              coverage: CoverageTracker, client,
+                              identities) -> List[Finding]:
+        """Compare privileged URLs under pre- vs post-MFA test sessions."""
+        from .auth.mfa_checks import check_transition
+        pending_names = {c.name for c in self.cfg.auth.contexts
+                         if getattr(c, "mfa_pending", False)}
+        pres = [i for i in identities or []
+                if getattr(i, "name", "") in pending_names
+                and dict(getattr(i, "auth_headers", None) or {})]
+        fulls = [i for i in identities or []
+                 if getattr(i, "name", "") not in pending_names
+                 and getattr(i, "name", "") != "anonymous"
+                 and dict(getattr(i, "auth_headers", None) or {})]
+        if not pres or not fulls:
+            return []
+        targets = [e for e in endpoints
+                   if e.endpoint_type in PRIVILEGED_TYPES
+                   or (has_idor_params(e)
+                       and e.endpoint_type != "static")][:10]
+        if not targets:
+            return []
+        log.info("mfa-transition: %d endpoints (%s vs %s)",
+                 len(targets), pres[0].name, fulls[0].name)
+        if not self._reserve_or_block(
+                budgets, coverage, "mfa",
+                plan_differential(len(targets), 2)):
+            return []
+        findings: List[Finding] = []
+        pre, post = pres[0], fulls[0]
+        pre_headers = dict(getattr(pre, "auth_headers", None) or {})
+        post_headers = dict(getattr(post, "auth_headers", None) or {})
+        for ep in targets:
+            if self._halted():
+                log.info("mfa-transition: halted by stop control")
+                break
+            if not self.scope.active_test_allowed(ep.url):
+                continue
+            try:
+                res = check_transition(
+                    client, ep.url, pre_headers, post_headers,
+                    getattr(pre, "name", "pre"),
+                    getattr(post, "name", "post"),
+                    timeout=self.cfg.scan.http_timeout)
+            except BudgetExceeded:
+                coverage.record("mfa", "blocked",
+                                f"budget: {ep.normalized_url}")
+                continue
+            metrics.authorization_tests += 1
+            if res.verdict == "strong_candidate":
+                metrics.authorization_confirmed += 1
+                self._note_candidate()
+                coverage.record("mfa", "candidate", res.notes)
+                f = Finding(
+                    id=stable_finding_id("mfa", ep.normalized_url,
+                                         pre.name, post.name),
+                    source="mfa-transition",
+                    name=(f"MFA bypass: pre-MFA session '{pre.name}' "
+                          f"reaches privileged resource ({ep.path})"),
+                    severity="high",
+                    confidence=Confidence.PROBABLE.value,
+                    validation_status=ValidationStatus.
+                    STRONG_CANDIDATE.value,
+                    host=ep.host, matched_at=ep.url,
+                    endpoint_url=ep.url, method="GET",
+                    description=res.notes,
+                    tags=["mfa", "authz", "session", ep.endpoint_type],
+                    raw={"transition": res.to_dict()},
+                    false_positive_notes=(
+                        "Both sessions are operator-supplied test sessions; "
+                        "the pre-MFA response is shape-compared against the "
+                        "post-MFA response, so shared login pages cannot "
+                        "confirm. Confirm interactively before reporting."),
+                    identity=pre.name,
+                    tenant=getattr(pre, "tenant", "") or "",
+                )
+                evidence.allocate(f)
+                evidence.record(
+                    f,
+                    request_text=(f"GET {ep.url}\n(pre-MFA: {pre.name}; "
+                                  f"post-MFA: {post.name})"),
+                    response_text=res.notes)
+                findings.append(f)
+                log.info("mfa-transition: %s", res.notes)
+            elif res.verdict == "tested_negative":
+                coverage.record("mfa", "tested_negative",
+                                f"{ep.normalized_url}: {res.notes}")
+            else:
+                coverage.record("mfa", "inconclusive",
+                                f"{ep.normalized_url}: {res.notes}")
+        return findings
+
+    # ── OAUTH TRANSITIONS (test identities + observed flows) ────────
+    def _oauth_probe(self, endpoints: List[Endpoint], out_dir: Path,
+                     evidence: EvidenceStore, metrics: Metrics,
+                     budgets: BudgetTracker, coverage: CoverageTracker,
+                     client, identities,
+                     oast_provider=None) -> List[Finding]:
+        """Passive authorize-URL analysis plus bounded active probes."""
+        from urllib.parse import urlsplit
+        from .auth.oauth_checks import (find_authorize_urls,
+                                        check_pkce_strip,
+                                        check_redirect_oast)
+        findings: List[Finding] = []
+        seen_urls: List[str] = []
+        traffic_file = out_dir / "browser_traffic.json"
+        if traffic_file.exists():
+            try:
+                import json as _json
+                data = _json.loads(traffic_file.read_text(
+                    errors="ignore") or "{}")
+                for req in data.get("requests", []) or []:
+                    url = req.get("url", "") if isinstance(req, dict) \
+                        else ""
+                    if url:
+                        seen_urls.append(url)
+            except Exception as exc:
+                log.debug("oauth traffic read failed: %s", exc)
+        for ep in endpoints or []:
+            if getattr(ep, "method", "GET").upper() == "GET" and ep.url:
+                seen_urls.append(ep.url)
+        authz_urls = find_authorize_urls(seen_urls, source="traffic")[:5]
+        if not authz_urls:
+            return []
+        allow_state = bool(getattr(getattr(self.cfg, "safety", None),
+                                   "allow_state_change", False))
+        testers = [i for i in identities or []
+                   if getattr(i, "name", "") != "anonymous"
+                   and dict(getattr(i, "auth_headers", None) or {})]
+        active_urls = [a for a in authz_urls
+                       if self.scope.is_in_scope(a.url)]
+        if testers and active_urls and not self._reserve_or_block(
+                budgets, coverage, "oauth",
+                plan_differential(len(active_urls), 2)):
+            return findings
+        for authz in authz_urls:
+            try:
+                host = urlsplit(authz.url).hostname or ""
+            except (TypeError, ValueError):
+                continue
+            if not authz.has_state:
+                coverage.record("oauth", "candidate",
+                                f"{authz.url[:120]}: missing state")
+                findings.append(Finding(
+                    id=stable_finding_id("oauth", "nostate", authz.url),
+                    source="oauth-passive",
+                    name="OAuth login without state parameter",
+                    severity="medium",
+                    confidence=Confidence.PROBABLE.value,
+                    validation_status=ValidationStatus.
+                    STRONG_CANDIDATE.value,
+                    host=host, matched_at=authz.url,
+                    endpoint_url=authz.url, method="GET",
+                    description=("Authorization endpoint omits `state`: "
+                                 "the login flow is open to CSRF. Observed "
+                                 "passively; confirm the state parameter is "
+                                 "absent across fresh flows."),
+                    tags=["oauth", "auth", "csrf"],
+                    raw={"authorize": authz.to_dict()},
+                    false_positive_notes=(
+                        "Passive observation only; some providers bind "
+                        "CSRF protection to nonce/PKCE instead of state."),
+                ))
+            if authz.implicit_flow:
+                coverage.record("oauth", "candidate",
+                                f"{authz.url[:120]}: implicit flow")
+                findings.append(Finding(
+                    id=stable_finding_id("oauth", "implicit", authz.url),
+                    source="oauth-passive",
+                    name="OAuth implicit flow exposes tokens in URL",
+                    severity="medium",
+                    confidence=Confidence.PROBABLE.value,
+                    validation_status=ValidationStatus.
+                    STRONG_CANDIDATE.value,
+                    host=host, matched_at=authz.url,
+                    endpoint_url=authz.url, method="GET",
+                    description=("`response_type` includes token: access "
+                                 "tokens travel in URL fragments where logs "
+                                 "and Referer headers can leak them."),
+                    tags=["oauth", "auth", "token-leak"],
+                    raw={"authorize": authz.to_dict()},
+                    false_positive_notes=(
+                        "Passive observation only; confirm tokens are "
+                        "actually issued to the fragment."),
+                ))
+            if not testers or not self.scope.is_in_scope(authz.url):
+                continue
+            tester = testers[0]
+            tester_headers = dict(getattr(tester, "auth_headers", None)
+                                  or {})
+            tester_name = getattr(tester, "name", "tester")
+            if authz.has_pkce:
+                self._paced()
+                try:
+                    res = check_pkce_strip(
+                        client, authz.url, tester_headers, tester_name,
+                        timeout=self.cfg.scan.http_timeout)
+                except BudgetExceeded:
+                    coverage.record("oauth", "blocked",
+                                    f"budget: {authz.url[:120]}")
+                    continue
+                metrics.authorization_tests += 1
+                if res.verdict == "strong_candidate":
+                    metrics.authorization_confirmed += 1
+                    self._note_candidate()
+                    coverage.record("oauth", "candidate", res.notes)
+                    findings.append(Finding(
+                        id=stable_finding_id("oauth", "nopkce", authz.url),
+                        source="oauth-pkce",
+                        name="OAuth PKCE not enforced",
+                        severity="medium",
+                        confidence=Confidence.PROBABLE.value,
+                        validation_status=ValidationStatus.
+                        STRONG_CANDIDATE.value,
+                        host=host, matched_at=authz.url,
+                        endpoint_url=authz.url, method="GET",
+                        description=res.notes + " No code was redeemed "
+                                        "and no redirect was followed.",
+                        tags=["oauth", "auth", "pkce"],
+                        raw={"probe": res.to_dict()},
+                        false_positive_notes=(
+                            "The authorize answer was observed, never "
+                            "redeemed. Confirm the code validates without "
+                            "a verifier before reporting."),
+                        identity=tester_name,
+                    ))
+                else:
+                    coverage.record("oauth", "inconclusive",
+                                    f"{authz.url[:120]}: {res.notes}")
+            if oast_provider is not None and oast_provider.available() \
+                    and allow_state:
+                self._paced()
+                try:
+                    callback = oast_provider.create_token()
+                    res = check_redirect_oast(
+                        client, authz.url, tester_headers, tester_name,
+                        callback, timeout=self.cfg.scan.http_timeout)
+                except BudgetExceeded:
+                    coverage.record("oauth", "blocked",
+                                    f"budget: {authz.url[:120]}")
+                    continue
+                metrics.authorization_tests += 1
+                if res.verdict == "strong_candidate":
+                    metrics.authorization_confirmed += 1
+                    self._note_candidate()
+                    coverage.record("oauth", "candidate", res.notes)
+                    findings.append(Finding(
+                        id=stable_finding_id("oauth", "redirect",
+                                             authz.url),
+                        source="oauth-redirect",
+                        name=("OAuth redirect_uri not validated "
+                              "(code-disclosure chain)"),
+                        severity="medium",
+                        confidence=Confidence.PROBABLE.value,
+                        validation_status=ValidationStatus.
+                        STRONG_CANDIDATE.value,
+                        host=host, matched_at=authz.url,
+                        endpoint_url=authz.url, method="GET",
+                        description=res.notes + " The redirect was "
+                                        "observed, never followed; no code "
+                                        "was redeemed.",
+                        tags=["oauth", "auth", "open-redirect"],
+                        raw={"probe": res.to_dict()},
+                        false_positive_notes=(
+                            "Location observed only. Confirm an attacker "
+                            "receiver actually gets a usable code."),
+                        identity=tester_name,
+                    ))
+                else:
+                    coverage.record("oauth", "inconclusive",
+                                    f"{authz.url[:120]}: {res.notes}")
+        for f in findings:
+            evidence.allocate(f)
+            evidence.record(
+                f, request_text=f"GET {f.endpoint_url}",
+                response_text=(f.description or "")[:2000])
+        return findings
+
     # ── AUTHZ MATRIX: harvest → swap → per-method sweep (#1–2) ──────
     def _authz_matrix_probe(self, endpoints: List[Endpoint],
                             evidence: EvidenceStore, metrics: Metrics,
@@ -1964,12 +2262,14 @@ class Orchestrator:
             write_replays = (len(targets) *
                              cfg_a.max_ids_per_endpoint *
                              max(0, len(identities) - 1))
+        graphql_replays = (len(targets) * cfg_a.max_ids_per_endpoint *
+                           max(0, len(identities) - 1))
         if not self._reserve_or_block(
                 budgets, coverage, "authz",
                 plan_authz_matrix(len(targets), len(identities),
                                   len(cfg_a.methods),
                                   cfg_a.max_ids_per_endpoint,
-                                  write_replays)):
+                                  write_replays, graphql_replays)):
             return []
         matrix = AuthorizationMatrix()
         findings: List[Finding] = []
@@ -2216,6 +2516,14 @@ class Orchestrator:
                     coverage.record("authz", "blocked",
                                     f"budget: {ep.normalized_url}")
                     continue
+        # ── operation-aware GraphQL replay (read side; mutations are
+        # never replayed) over endpoints with observed query operations
+        try:
+            findings.extend(self._authz_graphql_probe(
+                endpoints, pool, identities, owner_headers, evidence,
+                metrics, coverage, client, matrix))
+        except BudgetExceeded:
+            coverage.record("authz", "blocked", "graphql replay budget")
         # ── Phase 7 views: extended matrix + role/tenant/resource/
         # action analytics over everything the sweeps observed ──────
         from .authz.matrix import build_extended
@@ -2349,6 +2657,121 @@ class Orchestrator:
                     response_text=res.notes)
                 findings.append(f)
                 log.info("authz-write-replay: %s", res.notes)
+        return findings
+
+    # ── GRAPHQL OPERATION REPLAY (read side, query ops only) ────────
+    def _authz_graphql_probe(self, endpoints, pool, identities,
+                             owner_headers, evidence, metrics, coverage,
+                             client, matrix) -> List[Finding]:
+        """Replay observed query operations with victim variables."""
+        from .authorization.graphql_replay import replay_operations
+        from .validation.graphql import (is_mutation_operation,
+                                         parse_graphql_body)
+        cfg_a = self.cfg.authorization
+        findings: List[Finding] = []
+        gql_targets = []
+        for ep in endpoints or []:
+            if len(gql_targets) >= cfg_a.max_endpoints:
+                break
+            if not self.scope.active_test_allowed(ep.url):
+                continue
+            for shape in list(getattr(ep, "observed_requests", [])
+                              or []):
+                if not isinstance(shape, dict):
+                    continue
+                if str(shape.get("method") or "").upper() != "POST":
+                    continue
+                parsed = parse_graphql_body(shape.get("post_data"))
+                if parsed is None or is_mutation_operation(
+                        parsed["query"]):
+                    continue
+                gql_targets.append(ep)
+                break
+        for ep in gql_targets:
+            if self._halted():
+                log.info("authz-graphql: halted by stop control")
+                break
+            self._paced()
+            for tester in identities or []:
+                tester_name = getattr(tester, "name", "anonymous")
+                victims = [h for h in pool
+                           if getattr(h, "source", "response") == "response"
+                           and getattr(h, "owner", "") not in
+                           ("", tester_name)]
+                if not victims:
+                    continue
+                try:
+                    results = replay_operations(
+                        client, ep, victims, tester, owner_headers,
+                        timeout=self.cfg.scan.http_timeout,
+                        max_ids=cfg_a.max_ids_per_endpoint,
+                        scope=self.scope, matrix=matrix,
+                        ownership_fields=list(
+                            cfg_a.ownership_fields or []))
+                except BudgetExceeded:
+                    coverage.record("authz", "blocked",
+                                    f"budget: {ep.normalized_url}")
+                    break
+                for res in results:
+                    metrics.authorization_tests += 1
+                    cross_tenant = bool(
+                        res.tester_tenant and res.owner_tenant and
+                        res.tester_tenant != res.owner_tenant)
+                    if res.verdict != "strong_candidate":
+                        if 400 <= res.status < 500 or res.status == 200:
+                            coverage.record(
+                                "tenant_isolation" if cross_tenant
+                                else "bola", "tested_negative",
+                                f"{ep.normalized_url}::{res.variable}: "
+                                f"{tester_name}→{res.status}")
+                        continue
+                    metrics.authorization_confirmed += 1
+                    self._note_candidate()
+                    cls = ("tenant_isolation" if cross_tenant else "bola")
+                    coverage.record(cls, "candidate", res.notes)
+                    coverage.record("idor", "candidate", res.notes)
+                    kind_label = "Cross-tenant GraphQL read" \
+                        if cross_tenant else "GraphQL BOLA"
+                    f = Finding(
+                        id=stable_finding_id(
+                            "graphql", res.endpoint_url, res.operation,
+                            res.variable, res.victim_value),
+                        source="graphql-bola",
+                        name=(f"{kind_label}: "
+                              f"'{res.tester}' reads '{res.owner}''s "
+                              f"'{res.variable}={res.victim_value}' "
+                              f"({ep.path})"),
+                        severity="high",
+                        confidence=Confidence.PROBABLE.value,
+                        validation_status=ValidationStatus.
+                        STRONG_CANDIDATE.value,
+                        host=ep.host, matched_at=res.endpoint_url,
+                        endpoint_url=res.endpoint_url, method="POST",
+                        parameter=res.variable,
+                        description=res.notes,
+                        tags=["bola", "idor", "authz", "graphql",
+                              "tenant-isolation" if cross_tenant else
+                              "cross-user", ep.endpoint_type],
+                        raw={"graphql": res.to_dict()},
+                        false_positive_notes=(
+                            "Victim variable harvested from the owner's own "
+                            "session; the same observed operation document "
+                            "replayed with only that variable swapped. "
+                            "Mutation operations are never replayed. "
+                            "Confirm interactively before reporting."),
+                        identity=res.tester, tenant=res.tester_tenant,
+                        resource_key=(f"{ep.normalized_url}::"
+                                      f"{res.variable}={res.victim_value}"),
+                    )
+                    evidence.allocate(f)
+                    evidence.record(
+                        f,
+                        request_text=(f"POST {res.endpoint_url}\n"
+                                      f"operation {res.operation}\n(as "
+                                      f"{res.tester}; owner: {res.owner})"),
+                        response_text=res.notes)
+                    findings.append(f)
+                    log.info("authz-graphql: %s", res.notes)
         return findings
 
     # ── BEHAVIORAL STATE (agent Phase 3) ─────────────────────────────
@@ -2909,6 +3332,9 @@ class Orchestrator:
 
         submitted_triggers = list(dict.fromkeys(
             url for item in submitted for url in item["trigger_urls"]))
+        # token reflection in trigger bodies is a non-upgrading readback
+        # signal: it shows processed content came back, not just a fetch
+        trigger_reflects: Dict[str, bool] = {}
         for trigger_url in submitted_triggers:
             if self._halted():
                 incomplete = True
@@ -2922,6 +3348,16 @@ class Orchestrator:
                     timeout=self.cfg.scan.http_timeout)
                 if response.status_code >= 400:
                     incomplete = True
+                else:
+                    try:
+                        text = response.text or ""
+                    except Exception:
+                        text = ""
+                    keys = [item["callback_key"] for item in submitted
+                            if item["callback_key"] and
+                            item["callback_key"] in text]
+                    if keys:
+                        trigger_reflects[trigger_url] = True
             except BudgetExceeded:
                 budget_blocked = True
                 incomplete = True
@@ -2975,12 +3411,20 @@ class Orchestrator:
                         f"interaction after {len(item['trigger_urls'])} "
                         "related in-scope trigger routes. "
                         "This proves a server-side fetch, but does not by "
-                        "itself prove access to internal resources."),
+                        "itself prove access to internal resources."
+                        + (" One or more trigger responses reflect the "
+                           "callback token (possible processed-content "
+                           "readback: confirm manually)."
+                           if any(trigger_reflects.get(url)
+                                  for url in item["trigger_urls"]) else "")),
                     tags=["ssrf", "second-order", "oast",
                           ep.endpoint_type],
                     raw={"callback_host": item["callback_host"],
                          "callback_url": item["callback_url"],
                          "trigger_urls": item["trigger_urls"],
+                         "trigger_reflects_token": sorted(
+                             url for url in item["trigger_urls"]
+                             if trigger_reflects.get(url)),
                          "candidate_score": item["candidate_score"],
                          "candidate_rationale": item["candidate_rationale"],
                          "interactions": matched[:10]},
@@ -3644,6 +4088,13 @@ class Orchestrator:
             self._note_candidate()
             coverage.record("ssrf", "confirmed",
                             f"OAST callback on '{res.parameter}'")
+            bypass_suffix = (f" through parser-bypass variant "
+                             f"({res.bypass_kind})" if res.bypass_kind
+                             else "")
+            reflects_note = (" The target response reflects the callback "
+                             "token (possible full-read: confirm manually; "
+                             "callback-grade proof, not data access)."
+                             if res.response_reflects_token else "")
             f = Finding(
                 id=stable_finding_id("oast", ep.normalized_url),
                 source="oast-sweep",
@@ -3660,8 +4111,11 @@ class Orchestrator:
                 description=(
                     "The server fetched our unique out-of-band Interactsh "
                     f"callback on parameter '{res.parameter}' "
-                    f"using {res.payload}."),
-                tags=["ssrf", "oast", ep.endpoint_type],
+                    f"using {res.payload}.{bypass_suffix}{reflects_note}"),
+                tags=["ssrf", "oast", ep.endpoint_type]
+                + (["ssrf-bypass"] if res.bypass_kind else [])
+                + (["ssrf-reflects-token"]
+                   if res.response_reflects_token else []),
                 raw={"interactions": res.interactions[:10],
                      "callback_host": res.callback_host,
                      "request_method": res.request_method,
@@ -3669,12 +4123,18 @@ class Orchestrator:
                      "parameter_location": res.parameter_location,
                      "response_status": res.response_status,
                      "response_length": res.response_length,
-                     "response_time_ms": res.response_time_ms},
+                     "response_time_ms": res.response_time_ms,
+                     "bypass_kind": res.bypass_kind,
+                     "response_reflects_token":
+                         res.response_reflects_token},
                 false_positive_notes=(
                     "Confirmed via unique out-of-band Interactsh "
                     "callback (DNS/HTTP/SMTP), not response shape. "
                     "Unique callback host per request eliminates cross-probe "
-                    "correlation."),
+                    "correlation."
+                    + (" A reflected token is a full-read signal, not "
+                       "proof of internal data access."
+                       if res.response_reflects_token else "")),
                 identity="anonymous",
             )
             evidence.allocate(f)

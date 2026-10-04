@@ -113,6 +113,22 @@ def _candidate_from(target: TestTarget, test_class: str,
                     candidate.parameter_location = "body"
                 except ValueError:
                     pass
+        # GraphQL: map a bare variable name to its variables.<path> form
+        # when the retained JSON body carries the operation document
+        if candidate.parameter and not in_request_query and not in_body:
+            from ..validation.graphql import normalize_parameter as _gql_norm
+            body_text = candidate.request_body
+            if isinstance(body_text, dict):
+                import json as _json2
+                try:
+                    body_text = _json2.dumps(body_text)
+                except (TypeError, ValueError):
+                    body_text = None
+            if isinstance(body_text, (str, bytes)):
+                full = _gql_norm(body_text, candidate.parameter)
+                if full:
+                    candidate.parameter = full
+                    candidate.parameter_location = "body"
         _apply_observed_browser_request(candidate, endpoint, scope)
     return candidate
 

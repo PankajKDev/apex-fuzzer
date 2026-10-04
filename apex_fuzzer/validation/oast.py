@@ -481,6 +481,167 @@ class OastResult:
     parameter_location: str = "query"
     interactions: List[Dict] = field(default_factory=list)
     notes: str = ""
+    # parser-bypass variant kind that earned the callback ("" = direct);
+    # whether the target response reflects the callback token, a
+    # possible full-read signal that never upgrades a finding alone.
+    bypass_kind: str = ""
+    response_reflects_token: bool = False
+
+
+def _fire_probe_request(http, endpoint, param, payload: str,
+                        timeout: int = 10):
+    """Send one SSRF probe; return (response, request_url).
+
+    Raises BudgetExceeded (shared budgets) or ValueError for
+    unsupported shapes; other transport errors propagate to the caller.
+    """
+    method = (getattr(endpoint, "method", "GET") or "GET").upper()
+    if method not in {"GET", "POST", "PUT", "PATCH"}:
+        raise ValueError(f"unsupported method {method}")
+    if param.location == "body" and method not in {"POST", "PUT", "PATCH"}:
+        raise ValueError("body probe needs a mutating method")
+    request_url = endpoint.url
+    # observed base headers (including auth contexts) ride along;
+    # only the probed input is replaced
+    headers = {name: value for name, value in
+               (getattr(endpoint, "headers", None) or {}).items()
+               if isinstance(name, str) and isinstance(value, str)}
+    request_kwargs = {"timeout": timeout}
+    if param.location == "body":
+        params = list(getattr(endpoint, "body_parameters", []) or [])
+        values = _with_body_param(params, param.name, payload)
+        content_types = list(getattr(
+            endpoint, "request_content_types", []) or [])
+        content_type = (getattr(endpoint, "content_type", "") or "").lower()
+        is_json = ("json" in content_type or any(
+            "json" in str(value).lower() for value in content_types))
+        if is_json:
+            request_kwargs["json"] = _nested_json(values)
+        else:
+            request_kwargs["data"] = values
+    elif param.location == "header":
+        headers[param.name] = payload
+    else:
+        request_url = _with_param(endpoint.url, param.name, payload)
+    if headers:
+        request_kwargs["headers"] = headers
+    request_fn = getattr(http, "request", None)
+    if callable(request_fn):
+        response = request_fn(method, request_url, **request_kwargs)
+    else:
+        response = getattr(http, method.lower())(request_url,
+                                                 **request_kwargs)
+    return response, request_url
+
+
+def _response_reflects_token(response, markers) -> bool:
+    """True when the target response echoes a callback marker."""
+    try:
+        body = getattr(response, "content", b"") or \
+            getattr(response, "text", "") or ""
+    except Exception:
+        return False
+    if isinstance(body, (bytes, bytearray)):
+        try:
+            body = bytes(body).decode("utf-8", "replace")
+        except (UnicodeDecodeError, ValueError):
+            return False
+    if not isinstance(body, str):
+        return False
+    return any(marker and marker in body for marker in markers)
+
+
+def _confirmed_result(endpoint, param, payload: str, callback_host: str,
+                      response, method: str, request_url: str,
+                      location: str, matched, bypass_kind: str = "",
+                      callback_key: str = "") -> OastResult:
+    notes = f"out-of-band callback on parameter '{param.name}'"
+    if bypass_kind:
+        notes += f" via parser-bypass variant ({bypass_kind})"
+    reflects = _response_reflects_token(
+        response, [payload, callback_host, callback_key])
+    if reflects:
+        notes += ("; target response reflects the callback token "
+                  "(possible full-read: confirm manually)")
+    log.info("OAST HIT: param=%s on %s (%d interactions)%s",
+             param.name, endpoint.url, len(matched),
+             f" [{bypass_kind}]" if bypass_kind else "")
+    return OastResult(
+        confirmed=True, url=endpoint.url, parameter=param.name,
+        payload=payload, callback_host=callback_host,
+        response_status=getattr(response, "status_code", None),
+        response_length=len(getattr(response, "content", b"")
+                            or getattr(response, "text", "")
+                            or ""),
+        response_time_ms=_response_time_ms(response),
+        request_method=method, request_url=request_url,
+        parameter_location=location,
+        interactions=matched[:20],
+        notes=notes, bypass_kind=bypass_kind,
+        response_reflects_token=reflects)
+
+
+def _probe_bypass_variants(http, endpoint, tried_params, provider,
+                           poll_timeout: int, poll_interval: int
+                           ) -> Optional[OastResult]:
+    """Fire parser-bypass callback variants for params that missed.
+
+    Variants run only for schemes that answered the direct probe: firing
+    at a scheme the target never speaks wastes requests and muddies
+    attribution.
+    """
+    from .ssrf_bypass import bypass_variants
+    from .second_order import make_ssrf_canary
+    try:
+        decoy = urlsplit(endpoint.url).hostname or ""
+    except (TypeError, ValueError):
+        decoy = ""
+    for p, schemes_ok in tried_params or []:
+        for scheme in ("http", "https"):
+            if scheme not in (schemes_ok or {"http", "https"}):
+                continue
+            try:
+                direct = make_ssrf_canary(provider.create_token(), scheme)
+            except (ValueError, TypeError) as exc:
+                log.debug("bypass canary failed (%s): %s", p.name, exc)
+                continue
+            variants = bypass_variants(direct, decoy)
+            if not variants:
+                continue
+            pending = []
+            for kind, variant in variants:
+                callback_host = urlsplit(variant).hostname or ""
+                key_builder = getattr(provider, "correlation_key", None)
+                callback_key = (key_builder(variant)
+                                if callable(key_builder)
+                                else callback_host)
+                try:
+                    response, request_url = _fire_probe_request(
+                        http, endpoint, p, variant, timeout=10)
+                    method = (getattr(endpoint, "method", "GET") or
+                              "GET").upper()
+                    pending.append((variant, callback_host, callback_key,
+                                    response, method, request_url,
+                                    p.location, kind))
+                except BudgetExceeded:
+                    raise
+                except Exception as exc:
+                    log.debug("bypass fire failed (%s/%s): %s",
+                              p.name, kind, exc)
+                    continue
+            if not pending:
+                continue
+            interactions = provider.poll(timeout=poll_timeout,
+                                         interval=poll_interval)
+            for (variant, callback_host, callback_key, response, method,
+                 request_url, location, kind) in pending:
+                matched = matching_interactions(interactions, callback_key)
+                if matched:
+                    return _confirmed_result(
+                        endpoint, p, variant, callback_host, response,
+                        method, request_url, location, matched,
+                        bypass_kind=kind, callback_key=callback_key)
+    return None
 
 
 def probe_endpoint(http, endpoint, provider: InteractshProvider,
@@ -492,6 +653,8 @@ def probe_endpoint(http, endpoint, provider: InteractshProvider,
     Each parameter gets independent HTTP and HTTPS callback hosts so stale
     interactions from another parameter cannot confirm this probe. Requests
     follow the endpoint's documented method and JSON/form content type.
+    When direct callbacks fail, bounded parser-bypass variants of each
+    callback URL are tried with fresh per-variant nonces.
     """
     if not provider.available():
         return None
@@ -507,6 +670,7 @@ def probe_endpoint(http, endpoint, provider: InteractshProvider,
     fired = 0
     last_response = None
     last_request = ("GET", endpoint.url, "query", "")
+    tried_params = []
     for p in cands:
         pending = []
         for scheme in ("http", "https"):
@@ -517,44 +681,10 @@ def probe_endpoint(http, endpoint, provider: InteractshProvider,
             callback_key = (key_builder(payload) if callable(key_builder)
                             else callback_host)
             try:
+                response, request_url = _fire_probe_request(
+                    http, endpoint, p, payload, timeout=10)
                 method = (getattr(endpoint, "method", "GET") or
                           "GET").upper()
-                if method not in {"GET", "POST", "PUT", "PATCH"}:
-                    continue
-                if p.location == "body" and method not in {
-                        "POST", "PUT", "PATCH"}:
-                    continue
-                request_url = endpoint.url
-                headers = {}
-                request_kwargs = {"timeout": 10}
-                if p.location == "body":
-                    params = list(getattr(endpoint, "body_parameters", [])
-                                  or [])
-                    values = _with_body_param(params, p.name, payload)
-                    content_types = list(getattr(
-                        endpoint, "request_content_types", []) or [])
-                    content_type = (getattr(endpoint, "content_type", "")
-                                    or "").lower()
-                    is_json = ("json" in content_type or any(
-                        "json" in str(value).lower()
-                        for value in content_types))
-                    if is_json:
-                        request_kwargs["json"] = _nested_json(values)
-                    else:
-                        request_kwargs["data"] = values
-                elif p.location == "header":
-                    headers[p.name] = payload
-                else:
-                    request_url = _with_param(endpoint.url, p.name, payload)
-                if headers:
-                    request_kwargs["headers"] = headers
-                request_fn = getattr(http, "request", None)
-                if callable(request_fn):
-                    response = request_fn(method, request_url,
-                                          **request_kwargs)
-                else:
-                    response = getattr(http, method.lower())(
-                        request_url, **request_kwargs)
                 fired += 1
                 last_response = response
                 last_request = (method, request_url, p.location, payload)
@@ -567,6 +697,8 @@ def probe_endpoint(http, endpoint, provider: InteractshProvider,
                 continue
         if not pending:
             continue
+        schemes_ok = {urlsplit(entry[0]).scheme for entry in pending}
+        tried_params.append((p, schemes_ok))
         interactions = provider.poll(timeout=poll_timeout,
                                      interval=poll_interval)
         for (payload, callback_host, callback_key, response, method,
@@ -575,18 +707,17 @@ def probe_endpoint(http, endpoint, provider: InteractshProvider,
             if matched:
                 log.info("OAST HIT: param=%s on %s (%d interactions)",
                          p.name, endpoint.url, len(matched))
-                return OastResult(
-                    confirmed=True, url=endpoint.url, parameter=p.name,
-                    payload=payload, callback_host=callback_host,
-                    response_status=getattr(response, "status_code", None),
-                    response_length=len(getattr(response, "content", b"")
-                                        or getattr(response, "text", "")
-                                        or ""),
-                    response_time_ms=_response_time_ms(response),
-                    request_method=method, request_url=request_url,
-                    parameter_location=location,
-                    interactions=matched[:20],
-                    notes=f"out-of-band callback on parameter '{p.name}'")
+                return _confirmed_result(
+                    endpoint, p, payload, callback_host, response, method,
+                    request_url, location, matched,
+                    callback_key=callback_key)
+    # bypass stage: direct callbacks failed everywhere; try bounded
+    # parser-bypass variants with fresh per-variant nonces
+    bypass_hit = _probe_bypass_variants(
+        http, endpoint, tried_params, provider, poll_timeout,
+        poll_interval)
+    if bypass_hit is not None:
+        return bypass_hit
     if fired:
         method, request_url, location, payload = last_request
         status = getattr(last_response, "status_code", None)

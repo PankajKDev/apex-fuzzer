@@ -177,7 +177,7 @@ def test_planner_math():
     assert (s.mutation_requests, s.verification_requests,
             s.total) == (2, 20, 22)
     o = plan_oast(4, 3)
-    assert o.total == 24
+    assert o.total == 144
     ssrf = plan_second_order_ssrf(6, 4)
     assert (ssrf.mutation_requests, ssrf.verification_requests,
             ssrf.total) == (6, 24, 30)

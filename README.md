@@ -427,6 +427,10 @@ auth:
       identity: user_b
       roles: ["member"]
       tenant: acme
+    # - name: pre_mfa           # test session stuck before MFA
+    #   headers:
+    #     Cookie: "session=PRE"
+    #   mfa_pending: true       # enables the MFA transition check
 ```
 
 Two authenticated contexts enable BOLA detection; one is enough for the
@@ -442,6 +446,26 @@ What gets probed: endpoints typed `admin`/`api`/`authentication`, plus any
 endpoint carrying an identifier-like parameter (`id, uuid, uid, user_id,
 account_id, order_id, email, username, …`), IDOR-param endpoints first, capped
 by `validation.differential_max_endpoints`.
+
+### MFA session transitions
+
+Mark one test context `mfa_pending: true` (authenticated but pre-MFA) and
+keep a completed test session alongside it. The MFA check GETs privileged
+endpoints under both: a pre-MFA session seeing the same protected object
+as the post-MFA session is a session-issuance flaw (`source:
+mfa-transition`); a denied pre-session against an allowed post-session is
+healthy and records `tested_negative`. Nothing is submitted and no
+challenge is ever answered or bypassed.
+
+### OAuth transitions
+
+Authorize URLs observed in browser traffic and endpoint URLs are analyzed
+offline: missing `state` and `response_type=token` (implicit flow) become
+candidates. With a configured test identity, two bounded active probes run
+per authorize URL (codes never redeemed, redirects never followed): PKCE
+stripping (a fresh code without `code_challenge` means no bind) and an
+OAST `redirect_uri` (a code aimed at our collector proves an unvalidated
+target; needs a live provider plus state-change acknowledgment).
 
 ### Automated login (agent Phase 2)
 
@@ -522,7 +546,15 @@ provider-compatible nonce in the registered correlation label; static
 collectors use a unique path nonce and their configured scheme (the lab's
 collector is HTTP). The scanner matches that per-request nonce, retains the
 request method and shape, and records status/length differences as
-inconclusive signals when no callback arrives. It does not request cloud
+inconclusive signals when no callback arrives. When direct callbacks fail,
+bounded parser-bypass variants (decimal/hex/octal IP, IPv6-mapped,
+zero-IP loopback, and backslash forms for IP-literal callbacks,
+userinfo-decoy with the target's own host) fire with fresh
+per-variant nonces. A confirming response that echoes the callback token
+or nonce records a full-read signal that never upgrades a finding alone:
+callback-grade proof stays distinct from internal data-access proof.
+Redirect-following and DNS rebinding need controlled infrastructure and
+stay manual procedures. It does not request cloud
 metadata or credential endpoints. The official client is interrupted and
 deregisters its session after the scan; the explicit custom-REST compatibility
 path uses `DELETE /deregister/{uuid}`.
@@ -700,6 +732,13 @@ harvest → swap → method sweep (`authorization/harvest.py`,
    ambiguous shapes, multipart/binary bodies, and out-of-scope URLs send
    nothing. At most 3 requests per (endpoint, param, victim), charged to
    the shared budgets and the preflight reservation.
+
+5. **GraphQL operation replay** (read side; mutations never replay):
+   observed query/subscription documents replay with only one variable
+   swapped to a harvested victim value, as another identity; the owner
+   baseline is fetched first on the same operation and graded by
+   ownership comparison (`source: graphql-bola`). Completed denials
+   record `tested_negative`.
 
 Swap findings carry their invariant evaluation (`no_cross_user_read`)
 as corroboration in evidence — the swap verdict stays primary, so
@@ -887,13 +926,14 @@ they are not vulnerability outcomes and cannot map to `negative`.
 | engine | strong_candidate when | confirmed when |
 |--------|----------------------|----------------|
 | differential | two users, both 200, same shape/hash; or anonymous 200 on admin/api | — (stays candidate, needs id-swap proof) |
-| OAST sweep / SsrfValidator | — | unique callback token observed inbound |
-| mutation SQLi prescreen | DB error marker reflected | ≥4 s delay on SLEEP/BENCHMARK payload vs baseline |
+| OAST sweep / SsrfValidator | — | unique per-request callback token observed inbound (direct or parser-bypass variant); token reflected in response is a non-upgrading full-read signal |
+| mutation SQLi prescreen | DB error marker reflected or repeatable true/false response difference | — (candidate only; prescreen never sends delay payloads) |
 | mutation XSS prescreen | payload reflected unfiltered | — |
-| sqlmap | — | "is vulnerable" in output |
+| sqlmap | — | version-tolerant success signals (`is vulnerable`, `is '...' injectable`); 1.8.x negatives (`does not seem / do not appear to be injectable`) map to negative |
 | dalfox | "verified"/"PoC" in output | — |
 | idor-swap (same + cross-endpoint) | victim object served to another identity, same shape | — (swap proves access; impact confirmed by human) |
 | bola-write (opt-in replay) | replay accepted with victim ID echoed (200) | clean readback shows attacker's values newly persisted on victim object |
+| graphql-bola | victim variable served to another identity on the same operation, same shape | — (replay proves access; impact confirmed by human) |
 | authz-matrix BFLA | method treats roles/tenants identically (200s match) | — |
 | business-logic | abuse value accepted (echoed, 200) **and** invariant violated | clean re-read shows the mutated value persisted (`verified-effect`) |
 | stored-XSS | inert canary persists and renders unescaped in active sink | — (confirm script execution manually) |
@@ -915,7 +955,8 @@ Supported shapes:
 GET query, form-urlencoded body, JSON body (including nested names),
 textual XML bodies via the raw file, and text-only multipart bodies (one
 text part replaced byte-exact; file parts never touched), request headers,
-and individual cookie pairs (session/identity carriers excluded). The mutation
+individual cookie pairs (session/identity carriers excluded), and GraphQL
+variables (`variables.<path>`, operation text preserved). The mutation
 prescreen replays multipart from retained raw bytes; sqlmap 1.8.4 parses
 the raw multipart request but finds no testable parameters there, so it
 stays inconclusive and the prescreen result stands via evidence
@@ -969,10 +1010,11 @@ techniques by default; time-based joins only under explicit opt-in
 (`validation.sqli_time_based` / `--sqli-time`, bounded `--time-sec`).
 Stacked queries stay excluded by policy. The XSS prescreen covers GET query fields
 plus observed form-urlencoded, JSON (including nested names), textual XML
-leaf, text-only multipart, header, and cookie-pair fields, preserving
-method, headers, content type, and peer fields (session cookies and
-auth headers are never mutated; other cookie pairs keep the session
-pair byte-identical). Non-GET methods require `safety.allow_state_change`;
+leaf, text-only multipart, header, cookie-pair, and GraphQL variable
+fields, preserving method, headers, content type, and peer fields (session
+cookies and auth headers are never mutated; other cookie pairs keep the
+session pair byte-identical; GraphQL probes need the retained operation
+text). Non-GET methods require `safety.allow_state_change`;
 GET-body, unsupported-method, and ambiguous observed shapes stay
 inconclusive without sending. Dalfox itself remains GET-query only.
 

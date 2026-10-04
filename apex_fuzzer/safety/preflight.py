@@ -102,13 +102,17 @@ def plan_differential(n_endpoints: int, n_contexts: int) -> RequestPlan:
 
 def plan_authz_matrix(n_endpoints: int, n_identities: int,
                       n_methods: int, max_ids: int,
-                      write_replays: int = 0) -> RequestPlan:
+                      write_replays: int = 0,
+                      graphql_replays: int = 0) -> RequestPlan:
     harvest = n_endpoints * n_identities
     swap = n_endpoints * max_ids * max(0, n_identities - 1) * 2
     sweep = n_endpoints * n_methods * n_identities
-    # write replay: baseline + replay + readback per attempt
+    # write replay: baseline + replay + readback per attempt;
+    # GraphQL operation replay: owner baseline + tester replay
     write = write_replays * 3
-    return RequestPlan("authz_matrix", "*", harvest, swap + sweep + write)
+    graphql = graphql_replays * 2
+    return RequestPlan("authz_matrix", "*", harvest,
+                       swap + sweep + write + graphql)
 
 
 def plan_race(n_endpoints: int, concurrency: int,
@@ -134,7 +138,9 @@ def plan_second_order_ssrf(n_injections: int,
 
 
 def plan_oast(n_endpoints: int, max_params: int) -> RequestPlan:
-    return RequestPlan("oast", "*", 0, n_endpoints * max_params * 2)
+    # direct HTTP+HTTPS callbacks plus bounded parser-bypass variants
+    # (up to 5 per scheme) for params that miss
+    return RequestPlan("oast", "*", 0, n_endpoints * max_params * 12)
 
 
 # ── dry-run (zero network: file reads only) ───────────────────────────
@@ -181,12 +187,15 @@ def dry_run_plan(target: str, cfg, profile,
     if "authz_matrix" in names:
         n_eps = len(endpoints) or cfg.authorization.max_endpoints
         writes = 0
+        graphql = 0
         if getattr(cfg.authorization, "write_replay", False):
             writes = (n_eps * cfg.authorization.max_ids_per_endpoint *
                       max(0, n_identities - 1))
+        graphql = (n_eps * cfg.authorization.max_ids_per_endpoint *
+                   max(0, n_identities - 1))
         plans.append(plan_authz_matrix(
             n_eps, n_identities, len(cfg.authorization.methods),
-            cfg.authorization.max_ids_per_endpoint, writes))
+            cfg.authorization.max_ids_per_endpoint, writes, graphql))
     if "race" in names:
         plans.append(plan_race(cfg.race.max_endpoints,
                                cfg.race.concurrency, cfg.race.rounds))

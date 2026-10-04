@@ -169,6 +169,10 @@ def body_with_parameter(candidate, parameter: str, value: str):
             raw_body_bytes(body),
             getattr(candidate, "request_content_type", "") or "",
             parameter, value)
+    if isinstance(parameter, str) and parameter.startswith("variables.") \
+            and getattr(candidate, "request_body", None) is None:
+        raise ValueError("GraphQL probes need the retained operation text; "
+                         "metadata alone cannot rebuild the query document")
     if is_xml(candidate):
         return xml_body_with_parameter(candidate, parameter, value)
     body = _body_template(candidate)
@@ -190,6 +194,9 @@ def body_parameter_value(candidate, parameter: str) -> str:
             raw_body_bytes(body),
             getattr(candidate, "request_content_type", "") or "",
             parameter)
+    if isinstance(parameter, str) and parameter.startswith("variables.") \
+            and getattr(candidate, "request_body", None) is None:
+        raise ValueError("GraphQL probes need the retained operation text")
     if is_xml(candidate):
         return xml_body_parameter_value(candidate, parameter)
     body = _body_template(candidate)

@@ -16,17 +16,27 @@ def _origin(url: str):
 
 
 def verify_execution(target_url: str, poc_url: str, marker: str, cfg,
-                     headers: Optional[Dict[str, str]] = None) -> Dict:
+                     headers: Optional[Dict[str, str]] = None,
+                     fragment: str = "",
+                     cookies: Optional[Dict[str, str]] = None) -> Dict:
     """Return executed only when Chromium observes this run's alert marker.
 
     The PoC must remain same-origin. Browser requests are restricted to at
     most 30 same-origin GETs for the main document and scripts. Other
     resource types, nested documents, state-changing requests, and
-    third-party hosts are blocked.
+    third-party hosts are blocked. Beyond query-string PoCs, the marker
+    can ride the URL fragment (hash-sink apps) or a cookie jar entry
+    (cookie-sink apps); the same sandbox applies to every source.
     """
     target_origin = _origin(target_url)
     if not target_origin or _origin(poc_url) != target_origin:
         return {"status": "rejected", "reason": "PoC is not same-origin"}
+    if fragment:
+        base = poc_url.split("#", 1)[0]
+        poc_url = base + "#" + fragment.lstrip("#")
+        if _origin(poc_url) != target_origin:
+            return {"status": "rejected", "reason": "PoC is not same-origin"}
+    source = "fragment" if fragment else ("cookie" if cookies else "query")
 
     bcfg = cfg.browser
     timeout_ms = max(1000, min(
@@ -46,6 +56,19 @@ def verify_execution(target_url: str, poc_url: str, marker: str, cfg,
         }
         if safe_headers:
             context.set_extra_http_headers(safe_headers)
+        if cookies:
+            try:
+                context.add_cookies([{
+                    "name": name, "value": value,
+                    "url": f"{target_origin[0]}://{target_origin[1]}"
+                           + (f":{target_origin[2]}" if target_origin[2]
+                              not in (80, 443) else ""),
+                } for name, value in cookies.items()
+                    if isinstance(name, str) and isinstance(value, str)
+                    and name.strip()])
+            except Exception as exc:
+                return {"status": "rejected",
+                        "reason": f"cookie jar failed: {str(exc)[:200]}"}
 
         request_count = [0]
 
@@ -91,6 +114,7 @@ def verify_execution(target_url: str, poc_url: str, marker: str, cfg,
             "status": "executed" if executed else "not_executed",
             "dialog_observed": executed,
             "same_origin": True,
+            "source": source,
             "requests": "same-origin main-document/script GETs (max 30)",
         }
     except Exception as exc:

@@ -165,11 +165,32 @@ class XssValidator(Validator):
                     poc = next((_poc_url(entry, candidate, marker)
                                 for entry in candidates
                                 if _poc_url(entry, candidate, marker)), "")
+                    payload = next((entry.get("payload", "")
+                                    for entry in candidates
+                                    if isinstance(entry.get("payload"),
+                                                  str)
+                                    and _poc_url(entry, candidate, marker)),
+                                   "")
                     if poc:
                         from .xss_browser import verify_execution
-                        browser_result = verify_execution(
-                            candidate.endpoint_url, poc, marker, self.cfg,
-                            candidate.request_headers)
+                        # query first, then fragment and cookie sinks with
+                        # the same marker; stop at the first execution
+                        attempts = [("query", poc, "", None)]
+                        page = poc.split("#", 1)[0].split("?", 1)[0]
+                        if payload:
+                            attempts.append(
+                                ("fragment", page, payload, None))
+                            attempts.append(
+                                ("cookie", page, "",
+                                 {"apexxss": payload}))
+                        for _source, _url, _frag, _jar in attempts:
+                            browser_result = verify_execution(
+                                candidate.endpoint_url, _url, marker,
+                                self.cfg, candidate.request_headers,
+                                fragment=_frag, cookies=_jar)
+                            browser_result["attempted_source"] = _source
+                            if browser_result.get("status") == "executed":
+                                break
                     else:
                         browser_result = {"status": "no_replayable_poc"}
                 if browser_result.get("reason"):
@@ -177,12 +198,14 @@ class XssValidator(Validator):
                         str(browser_result["reason"]))[:300]
                 evidence["browser_verification"] = browser_result
                 if browser_result.get("status") == "executed":
+                    via = browser_result.get("attempted_source") or "query"
                     return ValidationOutcome(
                         status=ValidationStatus.CONFIRMED.value,
                         confidence=Confidence.CONFIRMED.value,
                         evidence=evidence,
                         notes="Playwright observed the per-scan execution "
-                              "marker in a same-origin JavaScript dialog")
+                              "marker in a same-origin JavaScript dialog "
+                              f"(source: {via})")
                 return ValidationOutcome(
                     status=ValidationStatus.STRONG_CANDIDATE.value,
                     confidence=Confidence.PROBABLE.value,
