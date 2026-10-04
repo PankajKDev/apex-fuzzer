@@ -145,3 +145,22 @@ def test_query_parameter_must_be_observed_on_target_url():
 
     assert outcome.status == "inconclusive"
     assert fixture.calls == []
+
+
+def test_ssti_plugin_blocks_out_of_scope_target():
+    from apex_fuzzer.config import Config, ScopeConfig
+    from apex_fuzzer.plugins.adapters import SstiPlugin
+    from apex_fuzzer.plugins.base import TestTarget, TestContext
+    from apex_fuzzer.scope import Scope
+    from types import SimpleNamespace as _NS
+
+    cfg = Config()
+    scope = Scope(ScopeConfig(allowed_domains=["example.test"]))
+    finding = Finding(id="ssti-oos", source="nuclei", parameter="q",
+                      endpoint_url="https://other.test/s?q=1",
+                      matched_at="https://other.test/s?q=1")
+    target = TestTarget("https://other.test/s?q=1", parameter="q",
+                        method="GET", finding=finding, endpoint=None,
+                        test_class="ssti")
+    ctx = TestContext(cfg, http=_NS(), scope=scope)
+    assert SstiPlugin().run(target, ctx).status == "blocked"

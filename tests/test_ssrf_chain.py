@@ -418,3 +418,22 @@ def test_stored_trigger_reflection_recorded(tmp_path):
     assert findings[0].raw["trigger_reflects_token"] == [
         "https://t.com/api/import/status"]
     assert "readback" in findings[0].description
+
+
+def test_ssrf_plugin_blocks_out_of_scope_target():
+    from apex_fuzzer.config import Config, ScopeConfig
+    from apex_fuzzer.models import Finding
+    from apex_fuzzer.plugins.adapters import SsrfPlugin
+    from apex_fuzzer.plugins.base import TestTarget, TestContext
+    from apex_fuzzer.scope import Scope
+
+    cfg = Config()
+    scope = Scope(ScopeConfig(allowed_domains=["example.test"]))
+    finding = Finding(id="ssrf-oos", source="nuclei", parameter="url",
+                      endpoint_url="https://other.test/fetch?url=1",
+                      matched_at="https://other.test/fetch?url=1")
+    target = TestTarget("https://other.test/fetch?url=1", parameter="url",
+                        method="GET", finding=finding, endpoint=None,
+                        test_class="ssrf")
+    ctx = TestContext(cfg, http=SimpleNamespace(), scope=scope)
+    assert SsrfPlugin().run(target, ctx).status == "blocked"

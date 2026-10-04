@@ -187,3 +187,63 @@ def test_oauth_probes_never_follow_redirects():
     assert query["redirect_uri"] == "http://127.0.0.1:9001/cb"
     assert query["client_id"] == "c1"
     assert not [u for u in seen if u.startswith("http://127.0.0.1")]
+
+
+def test_oauth_active_probe_skips_out_of_scope(tmp_path):
+    from apex_fuzzer.config import Config, ScopeConfig
+    from apex_fuzzer.models import Endpoint
+    from apex_fuzzer.orchestrator import Orchestrator
+    from apex_fuzzer.profiles import get as get_profile
+    from apex_fuzzer.reporting.metrics import Metrics
+    from apex_fuzzer.reporting.coverage import CoverageTracker
+    from apex_fuzzer.scope import Scope
+    from apex_fuzzer.validation.evidence import EvidenceStore
+
+    cfg = Config()
+    cfg.scope.allowed_domains = ["example.test"]
+    orch = Orchestrator(cfg, tmp_path, profile=get_profile("standard"))
+    orch.scope = Scope(ScopeConfig(allowed_domains=["example.test"]))
+
+    class Http:
+        def get(self, *args, **kwargs):
+            raise AssertionError("out-of-scope authorize URL must not send")
+
+    ep = Endpoint(url="https://other.test/authorize?client_id=c1&"
+                     "redirect_uri=https%3A%2F%2Fapp.test%2Fcb&"
+                     "response_type=code&state=s",
+                  normalized_url="https://other.test/authorize",
+                  method="GET", host="other.test", path="/authorize")
+    tester = SimpleNamespace(name="user_a", tenant="",
+                             auth_headers={"Cookie": "s=1"})
+    findings = orch._oauth_probe(
+        [ep], tmp_path, EvidenceStore(tmp_path / "proofs"), Metrics(),
+        __import__("apex_fuzzer.budgets", fromlist=["BudgetTracker"])
+        .BudgetTracker(cfg), CoverageTracker(), Http(), [tester], None)
+    assert findings == []
+
+
+def test_ai_hypothesis_out_of_scope_never_sends(tmp_path):
+    from apex_fuzzer.config import Config, ScopeConfig
+    from apex_fuzzer.models import Hypothesis
+    from apex_fuzzer.orchestrator import Orchestrator
+    from apex_fuzzer.profiles import get as get_profile
+    from apex_fuzzer.scope import Scope
+
+    cfg = Config()
+    cfg.scope.allowed_domains = ["example.test"]
+    orch = Orchestrator(cfg, tmp_path, profile=get_profile("standard"))
+    orch.scope = Scope(ScopeConfig(allowed_domains=["example.test"]))
+
+    class Http:
+        def get(self, *args, **kwargs):
+            raise AssertionError("out-of-scope hypothesis must not send")
+
+        def request(self, *args, **kwargs):
+            raise AssertionError("out-of-scope hypothesis must not send")
+
+    h = Hypothesis(hypothesis="SQLi in id", endpoint="https://evil.test/x",
+                   reason="ai", test_class="sqli", confidence=0.9)
+    orch._route_hypothesis(h, None, {}, SimpleNamespace(), Http(), [],
+                           None, None)
+    assert h.status == "inconclusive"
+    assert "eligible" in h.notes

@@ -422,6 +422,11 @@ class SsrfPlugin(_ClassGated):
         gated = self._class_ok(target)
         if gated:
             return gated
+        if ctx.scope is not None and not ctx.scope.active_test_allowed(
+                target.endpoint_url):
+            return TestResult(status="blocked",
+                              observations=["target is not active-test "
+                                            "eligible"])
         outcome = SsrfValidator(ctx.cfg, ctx.oast_provider,
                                 ctx.http).validate(
             _candidate_from(target, "ssrf"))
@@ -445,6 +450,11 @@ class SstiPlugin(_ClassGated):
         if not ctx.cfg.validation.ssti:
             return TestResult(status="skipped",
                               observations=["SSTI validator disabled"])
+        if ctx.scope is not None and not ctx.scope.active_test_allowed(
+                target.endpoint_url):
+            return TestResult(status="blocked",
+                              observations=["target is not active-test "
+                                            "eligible"])
         try:
             outcome = SstiValidator(ctx.cfg, ctx.http, ctx.timeout).validate(
                 _candidate_from(target, "ssti"))

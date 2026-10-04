@@ -171,7 +171,9 @@ Results land in `output/<host>/`: `report.html`, `findings.jsonl`,
 `coverage.json`, `application.json`, `application_graph.json`,
 `attack_chains.jsonl`, `proofs/`.
 
-For a strict, bounded bounty workflow with zero-network preflight, see
+For full operating instructions, see the
+[user guide](docs/user-guide.md). For a strict, bounded bounty workflow
+with zero-network preflight, see
 [Authorized bounty scan workflow](docs/bounty-scan.md).
 For class-by-class coverage and the prioritized tool roadmap, see the
 [bug bounty class and tool matrix](docs/bounty-class-tool-matrix.md).
@@ -295,6 +297,8 @@ validation:
   cors_max_identities: 3
   mutation: true          # WAF-aware prescreen before sqlmap/dalfox
   mutation_payloads: 8    # ladder depth per class
+  prescreen_max_endpoints: 30  # lead-independent sweep bounds
+  prescreen_max_params: 3
   sqli_time_based: false  # opt-in sqlmap delay confirmation (holds DB conns)
   sqli_time_sec: 2        # per-delay seconds when sqli_time_based is true
   cache: true             # deception checks in validation runs (read-only)
@@ -1002,6 +1006,18 @@ needs all three legs — personalized content (victim differs from baseline),
 a cache HIT signal on the re-read, and a re-read body equal to the victim
 body. Completed comparisons otherwise are genuine negatives; poisoning
 probes are out of scope and stay manual.
+
+## Lead-independent prescreen sweep
+
+Nuclei misses an endpoint and the deep validators never run. During
+validation passes, the sweep probes endpoint query/body/header parameters
+directly with the SQLi/XSS mutation prescreens — no Nuclei lead required
+(`validation.prescreen_max_endpoints/prescreen_max_params` bound it;
+non-GET shapes need `safety.allow_state_change`). Hits become
+`prescreen-sqli`/`prescreen-xss` findings and re-enter the plugin loop,
+so sqlmap/Dalfox can still confirm them. Prescreen silence records
+nothing: a miss is never a negative. Deduplicated against existing
+findings by class, endpoint, and parameter.
 
 ## WAF-aware mutation engine
 

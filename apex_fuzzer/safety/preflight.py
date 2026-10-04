@@ -137,6 +137,11 @@ def plan_second_order_ssrf(n_injections: int,
                        verification_requests=n_injections * n_triggers)
 
 
+def plan_prescreen(n_endpoints: int, max_params: int) -> RequestPlan:
+    # baseline + boolean pairs + error ladder per parameter, worst case
+    return RequestPlan("prescreen", "*", 0, n_endpoints * max_params * 10)
+
+
 def plan_cache(n_endpoints: int) -> RequestPlan:
     # anonymous baseline + victim fetch + anonymous re-read per endpoint
     return RequestPlan("cache", "*", 0, n_endpoints * 3)

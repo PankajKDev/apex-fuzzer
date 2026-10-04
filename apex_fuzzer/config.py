@@ -55,6 +55,10 @@ class ValidationConfig:
     path_traversal_max_depth: int = 4
     mutation: bool = True
     mutation_payloads: int = 8
+    # Lead-independent prescreen sweep: endpoints and params probed per
+    # validation run without requiring a Nuclei lead first.
+    prescreen_max_endpoints: int = 30
+    prescreen_max_params: int = 3
     differential_max_endpoints: int = 30
     # Time-based sqlmap confirmation is a separate opt-in: delay payloads
     # hold DB connections open and are the load-heaviest check in the

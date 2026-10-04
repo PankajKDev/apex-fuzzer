@@ -1508,6 +1508,16 @@ class Orchestrator:
                     endpoints, out_dir, evidence, metrics, budgets,
                     coverage, client, identities, oast_provider)
 
+            # 2c) lead-independent prescreen sweep: endpoints x params
+            # feed the mutation prescreens directly so findings do not
+            # depend on Nuclei leads; hits re-enter the plugin loop below
+            if ((self.profile.run_validation
+                    or self.cfg.validation.enabled)
+                    and self.cfg.validation.mutation):
+                findings += self._prescreen_sweep(
+                    endpoints, findings, evidence, metrics, budgets,
+                    coverage, client)
+
             # 3) per-finding plugins (§48: registry + TestResult)
             test_ctx = TestContext(
                 self.cfg, http=client, scope=self.scope,
@@ -1850,6 +1860,147 @@ class Orchestrator:
             test_class, aggregate,
             combined_notes or "aggregated plugin outcomes")
 
+    def _prescreen_sweep(self, endpoints: List[Endpoint],
+                           findings: List[Finding],
+                           evidence: EvidenceStore, metrics: Metrics,
+                           budgets: BudgetTracker,
+                           coverage: CoverageTracker, client
+                           ) -> List[Finding]:
+        """Probe endpoint parameters with the mutation prescreens directly.
+
+        Nuclei misses an endpoint and the deep validators never run: this
+        sweep closes that lead dependency for SQLi/XSS prescreens only
+        (no heavy tools, no delays). Hits become findings so the plugin
+        loop below can drive sqlmap/dalfox confirmation. Silence records
+        nothing: a prescreen miss is not a negative.
+        """
+        from .safety.preflight import plan_prescreen
+        from .validation.differential import IDOR_PARAM_NAMES
+        cfg_v = self.cfg.validation
+        max_eps = max(0, int(getattr(cfg_v, "prescreen_max_endpoints",
+                                     30)))
+        max_params = max(0, int(getattr(cfg_v, "prescreen_max_params", 3)))
+        if max_eps == 0 or max_params == 0:
+            return []
+
+        def _params_of(ep):
+            out = []
+            for src, loc in ((ep.query_parameters, "query"),
+                             (ep.body_parameters, "body"),
+                             (ep.header_parameters, "header")):
+                for item in list(src or []):
+                    name = getattr(item, "name", "")
+                    if name and (name, loc) not in out:
+                        out.append((name, loc))
+            idorish = [pair for pair in out
+                       if pair[0].lower() in IDOR_PARAM_NAMES]
+            rest = [pair for pair in out if pair not in idorish]
+            return (idorish + rest)[:max_params]
+
+        candidates = []
+        for ep in endpoints or []:
+            if ep.endpoint_type == "static":
+                continue
+            if not self.scope.active_test_allowed(ep.url):
+                continue
+            pairs = _params_of(ep)
+            if pairs:
+                candidates.append((ep, pairs))
+        candidates.sort(key=lambda row: (
+            0 if has_idor_params(row[0]) else 1, row[0].url))
+        candidates = candidates[:max_eps]
+        if not candidates:
+            return []
+        log.info("prescreen-sweep: %d endpoints", len(candidates))
+        if not self._reserve_or_block(
+                budgets, coverage, "prescreen",
+                plan_prescreen(len(candidates), max_params)):
+            return []
+
+        covered = set()
+        for f in findings or []:
+            try:
+                covered.add((_classify_finding(f),
+                             normalize_url(f.endpoint_url or
+                                           f.matched_at or ""),
+                             f.parameter or ""))
+            except Exception:
+                continue
+        engine = MutationEngine(self.cfg, client, self._active_waf)
+        new_findings: List[Finding] = []
+        for ep, pairs in candidates:
+            if self._halted():
+                log.info("prescreen-sweep: halted by stop control")
+                break
+            self._paced()
+            content_types = list(
+                getattr(ep, "request_content_types", []) or [])
+            content_type = ((content_types[0] if content_types else "")
+                            or getattr(ep, "content_type", ""))
+            for name, location in pairs:
+                for test_class in ("sqli", "xss"):
+                    if (test_class, ep.normalized_url, name) in covered:
+                        continue
+                    candidate = Candidate(
+                        finding=Finding(id="probe", source="prescreen"),
+                        test_class=test_class, endpoint_url=ep.url,
+                        method=ep.method or "GET", parameter=name,
+                        parameter_location=location,
+                        request_content_type=content_type,
+                        body_parameters=list(ep.body_parameters or []))
+                    try:
+                        if test_class == "sqli":
+                            outcome = engine.prescreen_sqli(candidate)
+                        else:
+                            outcome = engine.prescreen_xss(candidate)
+                    except BudgetExceeded:
+                        coverage.record(test_class, "blocked",
+                                        f"budget: {ep.normalized_url}")
+                        break
+                    if outcome is None or outcome.status not in (
+                            ValidationStatus.STRONG_CANDIDATE.value,):
+                        continue
+                    metrics.validation_candidates += 1
+                    self._note_candidate()
+                    coverage.record(test_class, "candidate",
+                                    outcome.notes or "")
+                    covered.add((test_class, ep.normalized_url, name))
+                    f = Finding(
+                        id=stable_finding_id(f"prescreen-{test_class}",
+                                             ep.normalized_url, name),
+                        source=f"prescreen-{test_class}",
+                        name=(f"{'SQLi' if test_class == 'sqli' else 'XSS'} "
+                              f"prescreen hit on '{name}' ({ep.path})"),
+                        severity="medium",
+                        confidence=Confidence.PROBABLE.value,
+                        validation_status=ValidationStatus.
+                        STRONG_CANDIDATE.value,
+                        host=ep.host, matched_at=ep.url,
+                        endpoint_url=ep.url, method=candidate.method,
+                        parameter=name,
+                        description=(outcome.notes or "") + " Lead-"
+                                        "independent prescreen signal; "
+                                        "requires independent validation.",
+                        tags=[test_class, "prescreen", ep.endpoint_type],
+                        raw={"prescreen": dict(outcome.evidence or {})},
+                        false_positive_notes=(
+                            "Prescreen-level signal only (boolean "
+                            "differential or reflection/error marker). "
+                            "Confirm with the follow-up validators before "
+                            "reporting."),
+                    )
+                    evidence.allocate(f)
+                    evidence.record(
+                        f,
+                        request_text=(
+                            f"{candidate.method} {ep.url}\n{location}::"
+                            f"{name}"),
+                        response_text=(outcome.notes or "")[:2000])
+                    new_findings.append(f)
+                    log.info("prescreen-sweep: %s %s on %s", test_class,
+                             name, ep.url)
+        return new_findings
+
     def _differential_probe(self, endpoints: List[Endpoint],
                             diff: DifferentialTester,
                             evidence: EvidenceStore, metrics: Metrics,
@@ -2085,7 +2236,7 @@ class Orchestrator:
                    if getattr(i, "name", "") != "anonymous"
                    and dict(getattr(i, "auth_headers", None) or {})]
         active_urls = [a for a in authz_urls
-                       if self.scope.is_in_scope(a.url)]
+                       if self.scope.active_test_allowed(a.url)]
         if testers and active_urls and not self._reserve_or_block(
                 budgets, coverage, "oauth",
                 plan_differential(len(active_urls), 2)):
@@ -2140,7 +2291,8 @@ class Orchestrator:
                         "Passive observation only; confirm tokens are "
                         "actually issued to the fragment."),
                 ))
-            if not testers or not self.scope.is_in_scope(authz.url):
+            if not testers or not self.scope.active_test_allowed(
+                    authz.url):
                 continue
             tester = testers[0]
             tester_headers = dict(getattr(tester, "auth_headers", None)
@@ -4394,6 +4546,11 @@ class Orchestrator:
                           nuclei: NucleiRunner, live_file: Path):
         url = h.endpoint
         cls = h.test_class.lower()
+        if url and not self.scope.active_test_allowed(url):
+            h.status = "inconclusive"
+            h.notes = "skipped: hypothesized target is not active-test " \
+                "eligible"
+            return
 
         def promote(status: str, notes: str, severity: str,
                     validation_status: str, source: str,

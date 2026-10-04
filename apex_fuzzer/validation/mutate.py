@@ -518,6 +518,8 @@ class MutationEngine:
             elapsed = (time.time() - t0) * 1000
             return {"status": r.status_code, "text": r.text or "",
                     "elapsed_ms": elapsed}
+        except BudgetExceeded:
+            raise
         except Exception as e:
             log.debug("mutation fetch failed %s: %s", url, e)
             return None

@@ -39,6 +39,9 @@ validation:
   cors_max_identities: 3
   mutation: true
   mutation_payloads: 8
+  # Lead-independent prescreen sweep bounds (no Nuclei lead required).
+  prescreen_max_endpoints: 30
+  prescreen_max_params: 3
   # sqlmap time-based (delay) confirmation is a separate opt-in: delay
   # payloads hold DB connections open and are the heaviest SQLi check.
   sqli_time_based: false
