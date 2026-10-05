@@ -11,7 +11,6 @@ New stages (v5.2):
   (spec §8)
 - adaptive rate limiting on all direct HTTP (spec §9)
 """
-import csv
 import ipaddress
 import time
 from pathlib import Path
@@ -24,14 +23,15 @@ from .models import (Endpoint, Parameter, Finding, Hypothesis,
                       ValidationStatus, stable_finding_id,
                       RESULT_STATUSES, ResultStatus)
 from .logging_setup import get_logger, attach_file_handler
-from .shell import run, which, AdaptiveRateLimiter
+from .shell import which, AdaptiveRateLimiter
 from .budgets import BudgetTracker, BudgetExceeded
 from .checkpoints import Checkpoint
 from .http import HTTPClient
 from .stages.recon import (harvest_api_specs, harvest_robots, merge_recon,
-                           recon_identity_headers, run_recon,
-                           scoped_subprocess_input)
+                           recon_identity_headers, run_recon)
 from .stages.endpoints import build_endpoints
+from .stages.scanning import (probe_live, run_nuclei_stage,
+                              takeover_check)
 from .application.application_model import (Application,
                                             build_from_scan)
 from .application.identities import from_auth_contexts
@@ -47,8 +47,7 @@ from .discovery import technologies as tech_mod
 from .discovery import param_miner
 from .discovery.javascript import chunk_js
 from .discovery.classifier import classify
-from .detection.nuclei import (NucleiRunner, correlate,
-                                run_hypothesis_templates)
+from .detection.nuclei import NucleiRunner, run_hypothesis_templates
 from .validation.evidence import EvidenceStore
 from .validation.base import Candidate
 from .validation.sqli import SqliValidator
@@ -80,14 +79,6 @@ from .safety.authorization import (
     Authorization, AuthorizationRefused, GATED_MODULES)
 
 log = get_logger("orchestrator")
-
-
-
-LIVE_CODES = "200,204,301,302,401,403,405,500,502,503,504"
-
-
-
-
 
 
 def takeover_notes_from_file(path) -> List[str]:
@@ -300,7 +291,7 @@ class Orchestrator:
             log.info("live probe complete (resume)")
         else:
             ck.mark("probe", "running")
-            self._probe_live(out_dir, live_file)
+            probe_live(self.cfg, self.scope, out_dir, live_file)
             metrics.live_hosts = len(self._read_lines(live_file))
             ck.mark("probe")
         log.info("live hosts: %d", metrics.live_hosts)
@@ -308,38 +299,17 @@ class Orchestrator:
         # ── 6. SUBDOMAIN TAKEOVER  (BUGFIX B + tko-subs confirmed) ──────
         findings: List[Finding] = []
         if self.profile.run_subzy or self.profile.run_tko:
-            findings += self._takeover_check(out_dir, host, metrics,
-                                             coverage)
+            findings += takeover_check(
+                self.cfg, self.profile, self.scope, out_dir, host,
+                metrics, coverage)
 
         # ── 7. NUCLEI ───────────────────────────────────────────────────
         nuclei = NucleiRunner(self.cfg, out_dir)
         # NOTE: takeover findings (tko/subzy) seed the list; nuclei findings
         # are appended below when that stage runs.
-        if self.profile.run_nuclei:
-            if resume and ck.is_complete("nuclei"):
-                findings = [Finding.from_dict(d) for d in
-                            read_jsonl(out_dir / "findings.jsonl")]
-                # resume: re-derive floor coverage from stored findings
-                fresh_nuclei = [f for f in findings
-                                if f.source.startswith("nuclei")]
-            else:
-                ck.mark("nuclei", "running")
-                raw_findings = nuclei.run_scan(live_file)
-                metrics.nuclei_findings = len(raw_findings)
-                deduped = correlate(raw_findings)
-                metrics.nuclei_findings_after_dedup = len(deduped)
-                deduped = [f for f in deduped
-                           if self.scope.is_in_scope(f.matched_at)]
-                findings = findings + deduped
-                write_jsonl(out_dir / "findings.jsonl", findings)
-                ck.mark("nuclei")
-                fresh_nuclei = deduped
-            # nuclei matches are candidates, never confirmations (§57)
-            for f in fresh_nuclei:
-                coverage.record(_classify_finding(f), "candidate",
-                                f"nuclei template {f.template_id}")
-        else:
-            ck.mark("nuclei", "skipped")
+        findings, fresh_nuclei = run_nuclei_stage(
+            self.cfg, self.profile, self.scope, out_dir, live_file,
+            nuclei, findings, metrics, coverage, ck, resume)
 
         # ── 8. VALIDATION (+ differential + OAST) ───────────────────────
         evidence = EvidenceStore(out_dir / "proofs")
@@ -943,143 +913,7 @@ class Orchestrator:
 
     # ── PROBE LIVE  (BUGFIX A) ──────────────────────────────────────────
 
-    def _probe_live(self, out_dir: Path, live_file: Path):
-        probe_input = scoped_subprocess_input(
-            self.scope, out_dir, "raw.txt", "probe-input.txt")
-        if probe_input.stat().st_size == 0:
-            log.warning("nothing to probe — no in-scope URLs")
-            live_file.write_text("")
-            return
-        if not which("httpx"):
-            log.warning("httpx missing — falling back to in-scope raw set")
-            live_file.write_text(probe_input.read_text())
-            return
-        r = run([
-            "httpx", "-silent",
-            "-mc", LIVE_CODES,
-            "-l", str(probe_input),
-            "-o", str(live_file),
-        ], timeout=self.cfg.scan.timeout * 2)
-        if r.timed_out:
-            log.warning("httpx timed out")
-        if not live_file.exists():
-            live_file.write_text("")
 
-    # ── SUBDOMAIN TAKEOVER  (BUGFIX B + tko-subs confirmed, spec §10) ──
-    def _takeover_check(self, out_dir: Path, host: str,
-                        metrics: Metrics,
-                        coverage: Optional[CoverageTracker] = None
-                        ) -> List[Finding]:
-        raw = out_dir / "raw.txt"
-        if not raw.exists():
-            return []
-        hosts: Set[str] = set()
-        from urllib.parse import urlparse
-        for line in raw.read_text(errors="ignore").splitlines():
-            try:
-                h = urlparse(line.strip()).hostname
-                if h and self.scope.is_in_scope(f"https://{h}/"):
-                    hosts.add(h)
-            except Exception:
-                continue
-        if not hosts:
-            return []
-        hosts_file = out_dir / "hosts.txt"
-        hosts_file.write_text("\n".join(sorted(hosts)))
-
-        # confirmed takeover via tko-subs -takeover (github/heroku tokens)
-        if self.profile.run_tko and which("tko-subs"):
-            tko_out = out_dir / "tko.csv"
-            args = ["tko-subs", "-domains", str(hosts_file),
-                    "-output", str(tko_out)]
-            import os
-            if os.environ.get("GITHUB_TOKEN"):
-                args += ["-takeover",
-                         "-githubtoken", os.environ["GITHUB_TOKEN"],
-                         "-herokuusername",
-                         os.environ.get("HEROKU_USERNAME", ""),
-                         "-herokuapikey", os.environ.get("HEROKU_API_KEY", ""),
-                         "-herokuappname",
-                         os.environ.get("HEROKU_APP_NAME", "")]
-            log.info("tko-subs: checking %d hosts (%s)",
-                     len(hosts),
-                     "confirmed takeover" if "-takeover" in args
-                     else "fingerprint only")
-            r = run(args, timeout=self.cfg.scan.timeout * 2)
-            if r.stdout:
-                (out_dir / "takeover.txt").write_text(r.stdout)
-            if tko_out.exists():
-                return self._parse_tko(tko_out, metrics, coverage)
-        # fallback: subzy fingerprint (detection-only)
-        if which("subzy"):
-            log.info("subzy: checking %d hosts", len(hosts))
-            r = run([
-                "subzy", "run",
-                "--targets", str(hosts_file),
-                "--hide_fails", "--https",
-                "--timeout", "10",
-            ], timeout=self.cfg.scan.timeout * 2)
-            if r.stdout:
-                (out_dir / "takeover.txt").write_text(r.stdout)
-        return []
-
-    def _parse_tko(self, tko_csv: Path, metrics: Metrics,
-                   coverage: Optional[CoverageTracker] = None
-                   ) -> List[Finding]:
-        """tko-subs CSV: Domain,CNAME,Provider,IsVulnerable,IsTakenOver,Resp"""
-        findings: List[Finding] = []
-        try:
-            with open(tko_csv) as f:
-                for row in csv.DictReader(f):
-                    domain = (row.get("Domain") or "").strip()
-                    vuln = (row.get("IsVulnerable") or "").lower()
-                    taken = (row.get("IsTakenOver") or "").lower()
-                    provider = row.get("Provider") or "unknown"
-                    if not domain or vuln != "true":
-                        continue
-                    confirmed = taken == "true"
-                    metrics.takeover_confirmed += 1
-                    if coverage is not None:
-                        coverage.record(
-                            "takeover",
-                            "confirmed" if confirmed else "candidate",
-                            f"tko-subs: {domain} ({provider})")
-                    findings.append(Finding(
-                        id=f"takeover-{domain}",
-                        source="tko-subs" if confirmed else "tko-subs-fp",
-                        name=(f"Subdomain takeover CONFIRMED — {domain} "
-                              f"({provider})" if confirmed
-                              else f"Subdomain takeover candidate — "
-                                   f"{domain} ({provider})"),
-                        severity="high",
-                        confidence=(Confidence.CONFIRMED.value
-                                    if confirmed else
-                                    Confidence.PROBABLE.value),
-                        validation_status=(
-                            ValidationStatus.CONFIRMED.value
-                            if confirmed else
-                            ValidationStatus.STRONG_CANDIDATE.value),
-                        host=domain,
-                        matched_at=f"https://{domain}/",
-                        endpoint_url=f"https://{domain}/",
-                        method="GET",
-                        response_status=200 if not confirmed else None,
-                        description=(
-                            f"CNAME {row.get('CNAME', '')} points to an "
-                            f"unclaimed {provider} resource."
-                            + (" The resource was claimed during the scan "
-                               "to confirm control." if confirmed else
-                               " No takeover performed — fingerprint only.")),
-                        tags=["subdomain-takeover", provider],
-                        raw={"provider": provider,
-                             "cname": row.get("CNAME", ""),
-                             "response": (row.get("Response") or "")[:500]},
-                    ))
-        except Exception as e:
-            log.warning("tko csv parse failed: %s", e)
-        if findings:
-            log.info("takeover: %d candidate(s)", len(findings))
-        return findings
 
     # ── VALIDATION (spec §2/3/4/8) ─────────────────────────────────────
     def _validate(self, findings: List[Finding],

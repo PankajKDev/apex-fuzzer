@@ -20,8 +20,6 @@ from . import read_lines
 
 log = get_logger("stages-recon")
 
-LIVE_CODES = "200,204,301,302,401,403,405,500,502,503,504"
-
 
 def header_arg(headers: dict) -> str:
     """Join headers the way hakrawler's -h flag expects."""

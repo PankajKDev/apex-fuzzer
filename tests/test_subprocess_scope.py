@@ -36,18 +36,20 @@ def test_scoped_input_missing_source(tmp_path):
 
 
 def test_probe_live_fallback_uses_filtered_set(tmp_path, monkeypatch):
-    import main.orchestrator as orch_mod
+    import main.stages.scanning as scan_mod
+    from main.stages.scanning import probe_live
     orch = _orch(tmp_path)
     (tmp_path / "raw.txt").write_text(
         "https://example.com/a\nhttps://evil.com/b\n")
-    monkeypatch.setattr(orch_mod, "which", lambda *a, **k: None)
+    monkeypatch.setattr(scan_mod, "which", lambda *a, **k: None)
     live = tmp_path / "live.txt"
-    orch._probe_live(tmp_path, live)
+    probe_live(orch.cfg, orch.scope, tmp_path, live)
     assert live.read_text() == "https://example.com/a\n"
 
 
 def test_probe_live_httpx_receives_filtered_file(tmp_path, monkeypatch):
-    import main.orchestrator as orch_mod
+    import main.stages.scanning as scan_mod
+    from main.stages.scanning import probe_live
     orch = _orch(tmp_path)
     (tmp_path / "raw.txt").write_text(
         "https://example.com/a\nhttps://evil.com/b\n")
@@ -61,10 +63,10 @@ def test_probe_live_httpx_receives_filtered_file(tmp_path, monkeypatch):
         (tmp_path / "live.txt").write_text("https://example.com/a\n")
         return R()
 
-    monkeypatch.setattr(orch_mod, "which", lambda *a, **k: "/bin/httpx")
-    monkeypatch.setattr(orch_mod, "run", fake_run)
+    monkeypatch.setattr(scan_mod, "which", lambda *a, **k: "/bin/httpx")
+    monkeypatch.setattr(scan_mod, "run", fake_run)
     live = tmp_path / "live.txt"
-    orch._probe_live(tmp_path, live)
+    probe_live(orch.cfg, orch.scope, tmp_path, live)
     flag = seen["args"].index("-l")
     fed = open(seen["args"][flag + 1]).read()
     assert fed == "https://example.com/a\n"
@@ -72,10 +74,11 @@ def test_probe_live_httpx_receives_filtered_file(tmp_path, monkeypatch):
 
 
 def test_probe_live_empty_scope_writes_empty(tmp_path):
+    from main.stages.scanning import probe_live
     orch = _orch(tmp_path)
     (tmp_path / "raw.txt").write_text("https://evil.com/b\n")
     live = tmp_path / "live.txt"
-    orch._probe_live(tmp_path, live)
+    probe_live(orch.cfg, orch.scope, tmp_path, live)
     assert live.read_text() == ""
 
 
