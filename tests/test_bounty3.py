@@ -664,8 +664,8 @@ def test_openapi_ssrf_metadata_preserves_locations_and_nested_schema():
 
 
 def test_ssrf_trigger_ranking_prefers_related_result_routes():
-    from main.orchestrator import (
-        _rank_ssrf_triggers, _materialize_trigger_urls)
+    from main.validation.ssrf_triggers import (
+        rank_ssrf_triggers, materialize_trigger_urls)
     sink = _ep("https://t.com/api/imports", ["url"], "import")
     sink.path = "/api/imports"
     result = _ep("https://t.com/api/imports/7/status", [], "api")
@@ -673,12 +673,12 @@ def test_ssrf_trigger_ranking_prefers_related_result_routes():
     result.method = "GET"
     unrelated = _ep("https://t.com/account", [], "page")
     unrelated.path = "/account"
-    ranked = _rank_ssrf_triggers(sink, [result, unrelated])
+    ranked = rank_ssrf_triggers(sink, [result, unrelated])
     assert ranked and ranked[0][0] is result
     assert all(row[0] is not unrelated for row in ranked)
     response = FakeResp(202, json.dumps({"jobId": "job-42"}),
                         {"Location": "/api/imports/job-42"})
-    assert _materialize_trigger_urls(
+    assert materialize_trigger_urls(
         ["https://t.com/api/imports/{jobId}/status"], response,
         "https://t.com/api/imports")[0].endswith("/job-42/status")
 

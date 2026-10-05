@@ -27,6 +27,7 @@ from .logging_setup import get_logger, attach_file_handler
 from .shell import run, which, AdaptiveRateLimiter
 from .budgets import BudgetTracker, BudgetExceeded
 from .checkpoints import Checkpoint
+from .http import HTTPClient
 from .application.application_model import (Application,
                                             build_from_scan)
 from .application.identities import from_auth_contexts
@@ -54,6 +55,9 @@ from .validation.ssrf import endpoint_from_url
 from .validation.oast import (InteractshProvider, probe_endpoint,
                                ssrf_candidates, ssrf_candidate_score,
                                matching_interactions)
+from .validation.ssrf_triggers import (
+    append_query_parameter, assign_nested, materialize_trigger_urls,
+    nested_parameter_object, rank_ssrf_triggers)
 from .validation.differential import (DifferentialTester,
                                        has_idor_params,
                                        PRIVILEGED_TYPES)
@@ -222,7 +226,7 @@ class Orchestrator:
                 lab_host).is_global
         except ValueError:
             lab_target = lab_host == "localhost"
-        client = _HTTPClient(limiter=limiter, budgets=budgets,
+        client = HTTPClient(limiter=limiter, budgets=budgets,
                              extra_headers=extra_headers,
                              user_agent=configured_ua,
                              scope=self.scope,
@@ -3998,7 +4002,7 @@ class Orchestrator:
 
         trigger_scores = {}
         for sink_ep, *_ in sinks:
-            for trigger_ep, score, rationale in _rank_ssrf_triggers(
+            for trigger_ep, score, rationale in rank_ssrf_triggers(
                     sink_ep, endpoints):
                 if self.scope.is_in_scope(trigger_ep.url):
                     prev = trigger_scores.get(trigger_ep.url)
@@ -4041,13 +4045,13 @@ class Orchestrator:
             headers_for_request = dict(headers)
             data = {p.name: (p.sample_value or "test")
                     for p in ep.body_parameters if p.name}
-            json_body = _nested_parameter_object(data)
+            json_body = nested_parameter_object(data)
             request_url = ep.url
             if location == "body":
                 data[parameter.name] = callback_url
-                _assign_nested(json_body, parameter.name, callback_url)
+                assign_nested(json_body, parameter.name, callback_url)
             elif location == "query":
-                request_url = _append_query_parameter(
+                request_url = append_query_parameter(
                     request_url, parameter.name, callback_url)
             elif location == "header":
                 headers_for_request[parameter.name] = callback_url
@@ -4091,7 +4095,7 @@ class Orchestrator:
             if response.status_code >= 400:
                 incomplete = True
             metrics.second_order_ssrf_tests += 1
-            trigger_urls = _materialize_trigger_urls(
+            trigger_urls = materialize_trigger_urls(
                 triggers, response, ep.url)
             submitted.append({
                 "endpoint": ep, "parameter": parameter.name,
@@ -5254,144 +5258,6 @@ def _interaction_line(i: Dict) -> str:
                                     if isinstance(v, str))[:240]
 
 
-def _append_query_parameter(url: str, name: str, value: str) -> str:
-    from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
-    parts = urlsplit(url)
-    query = parse_qsl(parts.query, keep_blank_values=True)
-    query.append((name, value))
-    return urlunsplit((parts.scheme, parts.netloc, parts.path,
-                       urlencode(query, doseq=True), parts.fragment))
-
-
-def _nested_parameter_object(values: Dict[str, str]) -> Dict:
-    """Convert OpenAPI dotted property names into a JSON object."""
-    out: Dict = {}
-    for name, value in values.items():
-        _assign_nested(out, name, value)
-    return out
-
-
-def _assign_nested(out: Dict, name: str, value) -> None:
-    import re
-    parts = re.findall(r"[^.\[\]]+|\[\d*\]", name)
-    cursor = out
-    for index, raw in enumerate(parts):
-        is_last = index == len(parts) - 1
-        if raw.startswith("["):
-            if not isinstance(cursor, list):
-                return
-            slot = raw[1:-1]
-            pos = int(slot) if slot.isdigit() else 0
-            while len(cursor) <= pos:
-                cursor.append({})
-            if is_last:
-                cursor[pos] = value
-            elif not isinstance(cursor[pos], (dict, list)):
-                cursor[pos] = [] if parts[index + 1].startswith("[") else {}
-            cursor = cursor[pos]
-        else:
-            if not isinstance(cursor, dict):
-                return
-            if is_last:
-                cursor[raw] = value
-            else:
-                next_is_array = parts[index + 1].startswith("[")
-                if not isinstance(cursor.get(raw), (dict, list)):
-                    cursor[raw] = [] if next_is_array else {}
-                cursor = cursor[raw]
-
-
-def _rank_ssrf_triggers(sink: Endpoint, endpoints: List[Endpoint]):
-    """Rank safe GET routes that can plausibly process a stored sink value."""
-    import re
-    sink_path = (sink.path or "").lower().rstrip("/") or "/"
-    sink_tokens = set(re.findall(r"[a-z0-9]+", sink_path))
-    sink_context = " ".join([sink.summary, sink.description,
-                             sink.operation_id, *sink.tags]).lower()
-    sink_terms = set(re.findall(r"[a-z0-9]+", sink_context))
-    trigger_terms = {"job", "task", "status", "result", "preview", "render",
-                     "process", "worker", "history", "detail", "file", "image"}
-    ranked = []
-    for candidate in endpoints:
-        if candidate.method.upper() != "GET" or candidate.endpoint_type == "static":
-            continue
-        path = (candidate.path or "").lower().rstrip("/") or "/"
-        tokens = set(re.findall(r"[a-z0-9]+", path))
-        context = " ".join([candidate.summary, candidate.description,
-                            candidate.operation_id, *candidate.tags]).lower()
-        context_tokens = set(re.findall(r"[a-z0-9]+", context))
-        score = 0
-        rationale = []
-        if path == sink_path:
-            score += 8
-            rationale.append("same resource route")
-        overlap = sink_tokens & tokens - {"api", "v1", "v2", "v3"}
-        if overlap:
-            score += min(5, len(overlap) * 2)
-            rationale.append("shared resource path: " + ", ".join(sorted(overlap)))
-        if context_tokens & trigger_terms:
-            score += 3
-            rationale.append("documented processing or result route")
-        if tokens & trigger_terms:
-            score += 2
-            rationale.append("processing or result path segment")
-        if sink_terms & context_tokens:
-            score += 2
-            rationale.append("shared OpenAPI operation context")
-        if score >= 3:
-            ranked.append((candidate, score, "; ".join(rationale)))
-    return sorted(ranked, key=lambda item: (-item[1], item[0].url))
-
-
-def _materialize_trigger_urls(templates: List[str], response, base_url: str):
-    """Fill documented `{id}` trigger paths from a create response."""
-    import json
-    import re
-    from urllib.parse import urljoin, urlsplit
-    values = {}
-    try:
-        payload = json.loads(getattr(response, "text", "") or "")
-        if isinstance(payload, dict):
-            values.update({str(k).lower(): str(v) for k, v in payload.items()
-                           if isinstance(v, (str, int))})
-            for key in ("data", "result", "job", "task", "resource"):
-                nested = payload.get(key)
-                if isinstance(nested, dict):
-                    values.update({str(k).lower(): str(v)
-                                   for k, v in nested.items()
-                                   if isinstance(v, (str, int))})
-    except (TypeError, ValueError):
-        pass
-    location = ""
-    for key, value in (getattr(response, "headers", {}) or {}).items():
-        if str(key).lower() == "location":
-            location = urljoin(base_url, str(value))
-            break
-    location_id = urlsplit(location).path.rstrip("/").split("/")[-1]
-    if location_id and location_id.lower() not in {
-            "", "status", "result", "preview", "history"}:
-        values.setdefault("id", location_id)
-        values.setdefault("jobid", location_id)
-        values.setdefault("taskid", location_id)
-    materialized = []
-    for template in templates:
-        unresolved = False
-        def replace(match):
-            nonlocal unresolved
-            key = match.group(1).lower()
-            value = values.get(key)
-            if value is None and key.endswith("id"):
-                value = values.get("id")
-            if value is None:
-                unresolved = True
-                return match.group(0)
-            return value
-        url = re.sub(r"\{([^{}]+)\}", replace, template)
-        if not unresolved:
-            materialized.append(url)
-    return materialized
-
-
 def _classify_finding(f: Finding) -> str:
     name = (f.name or "").lower() + " " + (f.template_id or "").lower()
     if "sqli" in name or "sql" in name:
@@ -5415,109 +5281,6 @@ def _classify_finding(f: Finding) -> str:
     return "unknown"
 
 
-class _HTTPClient:
-    # Methods that never change server state (read-only discovery).
-    # Everything else goes through the gate as an active, state-changing
-    # test (scope + private-IP + state-change acknowledgement).
-    _READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
-
-    def __init__(self, limiter: Optional[AdaptiveRateLimiter] = None,
-                 budgets: Optional[BudgetTracker] = None,
-                 extra_headers: Optional[Dict[str, str]] = None,
-                 user_agent: str = "",
-                 scope=None,
-                 resolver=None,
-                 allow_private_targets: bool = False,
-                 allow_state_change: bool = False,
-                 approved_cidrs=None):
-        import requests
-        self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": (user_agent.strip() or
-                           "ApexFuzzer/5.2 (+authorized-testing)")})
-        for name, value in (extra_headers or {}).items():
-            if isinstance(name, str) and isinstance(value, str) \
-                    and name.strip() and value:
-                self.session.headers[name.strip()] = value
-        self.limiter = limiter
-        self.budgets = budgets
-        # Default-deny gate (safety/gate.py). None = ungated, preserving
-        # today's behavior for direct unit calls; the orchestrator always
-        # passes its Scope. Denials are recorded, never sent.
-        self.scope = scope
-        self.resolver = resolver
-        self.allow_private_targets = allow_private_targets
-        self.allow_state_change = allow_state_change
-        self.approved_cidrs = list(approved_cidrs or [])
-        self.scope_denials: List[Dict[str, str]] = []
-
-    def _budget_ok(self, url: str, mutating: bool = False):
-        if not self.budgets:
-            return
-        from urllib.parse import urlparse as _up
-        try:
-            host = _up(url).hostname or ""
-        except Exception:
-            host = ""
-        if mutating:
-            if not self.budgets.consume_mutation(host, url):
-                raise BudgetExceeded(f"mutation budget exceeded for {host}")
-            return
-        if not self.budgets.consume_request(host, url):
-            raise BudgetExceeded(f"budget exceeded for {host}")
-
-    def _gate(self, url: str, method: str):
-        """Enforce the default-deny gate before any request is sent.
-
-        Ungated (``scope=None``) clients keep today's behavior for
-        direct unit calls. Denials raise ScopeRefused and are recorded
-        in ``scope_denials``; denied requests never touch the limiter,
-        budgets, or the network.
-        """
-        if self.scope is None:
-            return
-        from .safety.gate import can_send, ScopeRefused
-        read_only = method.upper() in self._READ_METHODS
-        decision = can_send(
-            url, self.scope, self.resolver, method=method,
-            active_test=not read_only, is_state_changing=not read_only,
-            allow_private_targets=self.allow_private_targets,
-            allow_state_change=self.allow_state_change,
-            approved_cidrs=self.approved_cidrs)
-        if not decision.allowed:
-            self.scope_denials.append(
-                {"url": url, "method": method.upper(),
-                 "reason": decision.reason})
-            raise ScopeRefused(decision.reason, url)
-
-    def get(self, url, **kw):
-        self._gate(url, "GET")
-        if self.limiter:
-            self.limiter.before_request()
-        self._budget_ok(url)
-        r = self.session.get(url, allow_redirects=False, **kw)
-        if self.limiter:
-            self.limiter.after_response(r.status_code)
-        return r
-
-    def post(self, url, **kw):
-        self._gate(url, "POST")
-        if self.limiter:
-            self.limiter.before_request()
-        self._budget_ok(url, mutating=True)
-        r = self.session.post(url, allow_redirects=False, **kw)
-        if self.limiter:
-            self.limiter.after_response(r.status_code)
-        return r
-
-    def request(self, method, url, **kw):
-        """Generic verb (PUT/PATCH/DELETE…) with limiter + budget gates."""
-        self._gate(url, method)
-        if self.limiter:
-            self.limiter.before_request()
-        self._budget_ok(url, mutating=method.upper() != "GET")
-        r = self.session.request(method.upper(), url,
-                                 allow_redirects=False, **kw)
-        if self.limiter:
-            self.limiter.after_response(r.status_code)
-        return r
+# Backward-compatible alias: tests and external code import
+# _HTTPClient from main.orchestrator.
+_HTTPClient = HTTPClient
