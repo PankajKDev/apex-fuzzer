@@ -23,32 +23,67 @@ class Scope:
         self._excluded_hosts = {h.lower() for h in cfg.excluded_hosts}
         self._excluded_paths = list(cfg.excluded_paths)
 
-    def is_in_scope(self, url: str) -> bool:
-        if not url:
+    @staticmethod
+    def _allowed_host(host: str, allowed: str,
+                      allow_subdomains: bool) -> bool:
+        rule = allowed.lower().strip()
+        # leading-dot and wildcard forms both mean "this domain and
+        # (when subdomains are allowed) everything under it"
+        if rule.startswith("*."):
+            rule = rule[2:]
+        rule = rule.lstrip(".")
+        if not rule or "*" in rule:
             return False
+        if host == rule:
+            return True
+        return bool(allow_subdomains and host.endswith("." + rule))
+
+    @staticmethod
+    def _url_port(parsed) -> int:
+        try:
+            if parsed.port is not None:
+                return int(parsed.port)
+        except (TypeError, ValueError):
+            pass
+        return 443 if parsed.scheme == "https" else 80
+
+    def check(self, url: str) -> tuple:
+        """Scope decision with a stable audit reason.
+
+        Reasons: allowed, unsupported_scheme, out_of_scope_domain,
+        excluded_host, excluded_path, disallowed_port.
+        """
+        if not url:
+            return False, "out_of_scope_domain"
         try:
             p = urlparse(url)
         except ValueError:
-            return False
+            return False, "out_of_scope_domain"
         if p.scheme not in ("http", "https"):
-            return False
+            return False, "unsupported_scheme"
         host = (p.hostname or "").lower()
         if not host:
-            return False
+            return False, "out_of_scope_domain"
         if host in self._excluded_hosts:
-            return False
+            return False, "excluded_host"
         for path in self._excluded_paths:
             if p.path.startswith(path):
-                return False
+                return False, "excluded_path"
+        allowed_ports = list(getattr(self.cfg, "allowed_ports", None)
+                             or [])
+        if allowed_ports and self._url_port(p) not in allowed_ports:
+            return False, "disallowed_port"
         if not self.cfg.allowed_domains:
-            return True
+            return True, "allowed"
         for allowed in self.cfg.allowed_domains:
-            allowed = allowed.lower().lstrip(".")
-            if host == allowed:
-                return True
-            if self.cfg.allow_subdomains and host.endswith("." + allowed):
-                return True
-        return False
+            if self._allowed_host(host, str(allowed),
+                                  self.cfg.allow_subdomains):
+                return True, "allowed"
+        return False, "out_of_scope_domain"
+
+    def is_in_scope(self, url: str) -> bool:
+        allowed, _ = self.check(url)
+        return allowed
 
     def active_test_allowed(self, url: str) -> bool:
         if not self.is_in_scope(url):

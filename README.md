@@ -425,9 +425,10 @@ reporting:
 
 scope:
   allowed_domains: []     # empty + first target → auto-seeded with target host
-  allow_subdomains: true
+  allow_subdomains: true  # "*.example.com" and ".example.com" forms match too
   excluded_hosts: []
   excluded_paths: []      # prefix matches, e.g. ["/static/"]
+  allowed_ports: []       # empty = any port; e.g. [80, 443] to deny the rest
   # crawl_exclude_exts / active_test_exclude_exts default to image, font,
   # media and archive extensions
 ```

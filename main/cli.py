@@ -30,6 +30,10 @@ def build_parser() -> argparse.ArgumentParser:
                                 add_help=False)
     p.add_argument("-d", "--domain", help="Single domain")
     p.add_argument("-f", "--file", help="File with one target per line")
+    p.add_argument("--scope-check", default=None, action="append",
+                   metavar="URL",
+                   help="Explain the scope decision for URL(s) and exit "
+                        "(repeatable; zero network; exit 1 if any denied)")
     p.add_argument("--seed-urls", default=None,
                    help="File with manual seed URLs (one per line), "
                         "merged into discovery for every target")
@@ -284,6 +288,28 @@ def config_check_report(cfg, profile_name: str) -> str:
     return "\n".join(lines)
 
 
+def scope_check_report(cfg, urls) -> tuple:
+    """Explain the scope decision for each URL (zero network).
+
+    Returns (text, denied_any). IP policy (private ranges, DNS) is
+    enforced per request at send time and always applies on top.
+    """
+    from .scope import Scope
+    scope = Scope(cfg.scope)
+    lines = ["Scope check (zero network — IP policy applies at send):"]
+    denied = False
+    for url in urls or []:
+        allowed, reason = scope.check(url)
+        active = scope.active_test_allowed(url) if allowed else False
+        lines.append(f"  {'ALLOW' if allowed else 'DENY'} "
+                     f"{reason} {url}"
+                     + ("" if not allowed else
+                        f" (active-test: {'yes' if active else 'no'})"))
+        denied = denied or not allowed
+    lines.append(f"RESULT: {'DENIED' if denied else 'all allowed'}")
+    return "\n".join(lines), denied
+
+
 def doctor_config(cfg=None) -> list:
     """Validate config, credentials presence, and module
     prerequisites without sending any request. Returns problems."""
@@ -454,6 +480,10 @@ def main():
         print(config_check_report(cfg, args.profile))
         result = cfg.validate()
         sys.exit(1 if result["errors"] else 0)
+    if getattr(args, "scope_check", None):
+        text, denied = scope_check_report(cfg, args.scope_check)
+        print(text)
+        sys.exit(1 if denied else 0)
     problems = cfg.validate()
     for message in problems["warnings"]:
         log.warning("%s", message)

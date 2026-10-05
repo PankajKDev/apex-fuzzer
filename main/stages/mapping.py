@@ -17,6 +17,7 @@ from ..discovery import param_miner
 from ..discovery import technologies as tech_mod
 from ..discovery.classifier import classify
 from ..logging_setup import get_logger
+from ..budgets import BudgetExceeded
 from ..models import (Confidence, Endpoint, Parameter, read_jsonl,
                       write_jsonl)
 from ..reporting.coverage import CoverageTracker
@@ -43,6 +44,24 @@ def map_attack_surface(endpoints: List[Endpoint], host: str,
     authed = recon_identity_headers(cfg)
     if authed:
         passes.append(authed)
+    # soft-404 baseline first: unknown routes on template-serving
+    # hosts would otherwise all look like live endpoints
+    from ..validation.soft404 import detect_soft404, matches
+    soft404 = None
+    soft404_hits: List[str] = []
+    if endpoints:
+        try:
+            from urllib.parse import urlsplit as _split
+            first = _split(endpoints[0].url)
+            base = f"{first.scheme or 'https'}://{first.hostname or ''}/"
+            soft404 = detect_soft404(
+                client, base, timeout=cfg.scan.http_timeout)
+        except BudgetExceeded:
+            log.debug("soft-404: budget blocked baseline probe")
+            soft404 = None
+        except Exception as e:
+            log.debug("soft-404 detection failed: %s", e)
+            soft404 = None
     for pass_headers in passes:
         for ep in [e for e in endpoints
                    if e.method == "GET"][:30]:
@@ -51,6 +70,8 @@ def map_attack_surface(endpoints: List[Endpoint], host: str,
                 fetch_kwargs["headers"] = pass_headers
             try:
                 r = client.get(ep.url, **fetch_kwargs)
+                if soft404 is not None and matches(soft404, r):
+                    soft404_hits.append(ep.url)
                 set_cookies = []
                 if r.headers.get("set-cookie"):
                     set_cookies = [r.headers.get("set-cookie")]
@@ -122,6 +143,14 @@ def map_attack_surface(endpoints: List[Endpoint], host: str,
         1 for e in endpoints if "javascript" in e.source)
     write_jsonl(out_dir / "technologies.jsonl",
                 list(tech_by_name.values()))
+    import json as _json
+    (out_dir / "soft404.json").write_text(_json.dumps(
+        {"baseline": soft404.to_dict() if soft404 else None,
+         "matched_fetched_urls": sorted(set(soft404_hits))},
+        indent=2))
+    if soft404_hits:
+        log.info("soft-404: %d fetched URL(s) match the not-found "
+                 "template", len(set(soft404_hits)))
 
     # ── active parameter mining: Arjun + LinkFinder (spec §1) ───────
     if profile.param_mining:

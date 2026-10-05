@@ -92,11 +92,11 @@ def test_out_of_scope_raises_without_sending():
     c = _client()
     with pytest.raises(ScopeRefused) as ei:
         c.get("https://evil.com/")
-    assert ei.value.reason == "out_of_scope"
+    assert ei.value.reason == "out_of_scope_domain"
     assert c.session.calls == []
     assert c.scope_denials == [
         {"url": "https://evil.com/", "method": "GET",
-         "reason": "out_of_scope"}]
+         "reason": "out_of_scope_domain"}]
 
 
 def test_private_ip_blocked_without_sending():
@@ -171,7 +171,7 @@ def test_scope_refused_is_budget_exceeded():
         raise AssertionError("must refuse")
     except BudgetExceeded as exc:
         assert isinstance(exc, ScopeRefused)
-        assert exc.reason == "out_of_scope"
+        assert exc.reason == "out_of_scope_domain"
 
 
 def test_differential_probe_propagates_denial_as_blocked():

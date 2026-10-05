@@ -179,8 +179,13 @@ sections:
 - `auth.contexts`: test identities (see §5).
 - `safety`: strict mode, authorization reference, state-change
   acknowledgment, request/state caps, stop-on-candidate, pacer.
-- `scope`: allowed domains (auto-seeded from the first target),
-  subdomain handling, exclusions.
+- `scope`: allowed domains (`*.example.com` and `.example.com`
+  forms match subdomains too; deceptive suffixes never match),
+  subdomain handling, host/path exclusions, and `allowed_ports`
+  (empty = any port). Explain any URL with `--scope-check URL`
+  (repeatable, zero network): prints ALLOW/DENY plus the reason
+  (`out_of_scope_domain`, `excluded_host`, `excluded_path`,
+  `disallowed_port`, `unsupported_scheme`) and exits 1 on any deny.
 - Top-level `seed_urls` / `har_files`: operator-supplied discovery
   input (see §4b). `--seed-urls FILE` merges manual URLs into the
   recon pool; `--har FILE` (repeatable) imports HAR 1.2 captures

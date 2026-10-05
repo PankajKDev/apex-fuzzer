@@ -54,6 +54,19 @@ def test_private_ip_blocked():
     assert not d.allowed and d.reason == gate.REASON_BLOCKED_IP_RANGE
 
 
+def test_disallowed_port_denied_without_dns():
+    from main.config import ScopeConfig
+    from main.scope import Scope
+    scope = Scope(ScopeConfig(allowed_domains=["example.com"],
+                              allowed_ports=[443]))
+
+    class Exploding:
+        def resolve(self, host):
+            raise AssertionError("no DNS past a scope denial")
+    d = gate.can_send("https://example.com:8080/", scope, Exploding())
+    assert not d.allowed and d.reason == "disallowed_port"
+
+
 def test_private_ip_allowed_in_lab_mode():
     r = FakeResolver({"example.com": ["192.168.1.10"]})
     d = gate.can_send("https://example.com/", _scope(), r,

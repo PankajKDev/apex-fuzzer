@@ -20,7 +20,7 @@ from ..budgets import BudgetExceeded
 # Stable audit reasons (run DB / logs). Keep additive, never rename.
 REASON_ALLOWED = "allowed"
 REASON_UNSUPPORTED_SCHEME = "unsupported_scheme"
-REASON_OUT_OF_SCOPE = "out_of_scope"
+REASON_OUT_OF_SCOPE = "out_of_scope_domain"
 REASON_ACTIVE_TEST_EXCLUDED = "active_test_excluded"
 REASON_DNS_FAILURE = "dns_failure"
 REASON_BLOCKED_IP_RANGE = "blocked_ip_range"
@@ -132,7 +132,16 @@ def can_send(url: str,
     if not host:
         return GateDecision(False, REASON_OUT_OF_SCOPE)
     if scope is not None:
-        if not scope.is_in_scope(url):
+        checker = getattr(scope, "check", None)
+        if callable(checker):
+            try:
+                allowed, reason = checker(url)
+            except Exception:
+                return GateDecision(False, REASON_OUT_OF_SCOPE)
+            if not allowed:
+                return GateDecision(False, str(reason or
+                                               REASON_OUT_OF_SCOPE))
+        elif not scope.is_in_scope(url):
             return GateDecision(False, REASON_OUT_OF_SCOPE)
         if active_test and not scope.active_test_allowed(url):
             return GateDecision(False, REASON_ACTIVE_TEST_EXCLUDED)

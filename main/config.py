@@ -285,6 +285,9 @@ class ScopeConfig:
     allow_subdomains: bool = True
     excluded_hosts: List[str] = field(default_factory=list)
     excluded_paths: List[str] = field(default_factory=list)
+    # Allowed destination ports. Empty means no port restriction
+    # (today's behavior); when set, any other port is out of scope.
+    allowed_ports: List[int] = field(default_factory=list)
     crawl_exclude_exts: List[str] = field(default_factory=lambda: [
         "png", "jpg", "jpeg", "gif", "svg", "webp", "ico",
         "woff", "woff2", "ttf", "otf", "eot",
@@ -698,6 +701,11 @@ class Config:
             if not isinstance(value, list) or not all(
                     isinstance(item, str) for item in value):
                 err(f"scope.{key} must be a list of strings")
+        ports = getattr(self.scope, "allowed_ports", [])
+        if not isinstance(ports, list) or not all(
+                isinstance(p, int) and not isinstance(p, bool)
+                and 1 <= p <= 65535 for p in ports):
+            err("scope.allowed_ports must be a list of ports 1-65535")
         if not self.scope.allowed_domains:
             warn("scope.allowed_domains is empty: the first target host "
                  "is auto-seeded (explicit scope is recommended)")
