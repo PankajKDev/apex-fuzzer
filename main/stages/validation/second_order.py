@@ -415,3 +415,161 @@ def second_order_ssrf_probe(endpoints: List[Endpoint],
         coverage.record("second_order_ssrf", "inconclusive",
                         "injection or trigger flow was incomplete")
     return findings
+
+
+def blind_xss_probe(endpoints: List[Endpoint],
+                    evidence: EvidenceStore, metrics: Metrics,
+                    budgets: BudgetTracker,
+                    coverage: CoverageTracker, client,
+                    cfg, scope, controls: ProbeControls,
+                    identities, provider) -> List[Finding]:
+    """Correlate stored script-src payloads with OAST callbacks.
+
+    Posts a benign `<script src>` pointing at a unique callback URL
+    into every body field, then polls for the fetch. A callback proves
+    some client retrieved the URL — not that script executed — so hits
+    stay strong candidates for controlled-browser confirmation.
+    Silence is inconclusive: admin panels and workers may render later.
+    """
+    cfg_v = cfg.validation
+    if provider is None or not provider.available():
+        coverage.record("second_order", "untestable",
+                        "OAST provider unavailable for blind-XSS "
+                        "correlation")
+        return []
+    targets = [e for e in endpoints or []
+               if (getattr(e, "method", "GET") or "GET").upper()
+               in ("POST", "PUT", "PATCH")
+               and list(getattr(e, "body_parameters", []) or [])
+               and scope.active_test_allowed(e.url)]
+    targets = targets[:max(0, cfg_v.second_order_max_endpoints)]
+    if not targets:
+        coverage.record("second_order", "untestable",
+                        "no in-scope mutating endpoints with body fields")
+        return []
+    if not reserve_or_block(
+            budgets, coverage, "second_order",
+            plan_second_order(len(targets), 0)):
+        return []
+    actors = [i for i in identities or []
+              if getattr(i, "name", "anonymous") != "anonymous"] \
+        or list(identities or [])[:1]
+    actor = actors[0] if actors else None
+    identity = getattr(actor, "name", "anonymous")
+    headers = dict(getattr(actor, "auth_headers", None) or {})
+    submitted = []
+    budget_blocked = False
+    incomplete = False
+    for ep in targets:
+        if controls.halted():
+            incomplete = True
+            break
+        if not budgets.consume_test("second_order",
+                                    ep.normalized_url):
+            coverage.record("second_order", "blocked",
+                            f"budget: {ep.normalized_url}")
+            budget_blocked = True
+            continue
+        callback_url = make_ssrf_canary(provider.create_token())
+        key_builder = getattr(provider, "correlation_key", None)
+        callback_key = (key_builder(callback_url)
+                        if callable(key_builder)
+                        else callback_url)
+        fields = [p.name for p in ep.body_parameters if p.name]
+        payload = f'<script src="{callback_url}"></script>'
+        data = {name: payload for name in fields}
+        try:
+            controls.paced()
+            response = client.post(
+                ep.url, data=data, headers=headers,
+                timeout=cfg.scan.http_timeout)
+        except BudgetExceeded:
+            coverage.record("second_order", "blocked",
+                            f"budget: {ep.normalized_url}")
+            budget_blocked = True
+            continue
+        except Exception as exc:
+            log.debug("blind-XSS injection failed at %s: %s",
+                      ep.url, exc)
+            incomplete = True
+            continue
+        metrics.second_order_tests += 1
+        submitted.append({
+            "endpoint": ep, "fields": fields,
+            "callback_url": callback_url,
+            "callback_key": callback_key,
+            "status": response.status_code,
+        })
+    interactions = []
+    if submitted:
+        try:
+            interactions = provider.poll(
+                timeout=cfg.oast.poll_timeout,
+                interval=cfg.oast.poll_interval)
+        except Exception as exc:
+            log.debug("blind-XSS OAST polling failed: %s", exc)
+            incomplete = True
+    findings: List[Finding] = []
+    for item in submitted:
+        ep = item["endpoint"]
+        matched = matching_interactions(
+            interactions, item["callback_key"])
+        if matched:
+            metrics.second_order_candidates += 1
+            controls.noted()
+            coverage.record(
+                "second_order", "candidate",
+                f"blind-XSS callback for {ep.normalized_url}")
+            f = Finding(
+                id=stable_finding_id(
+                    "blind_xss", ep.normalized_url,
+                    item["callback_key"]),
+                source="blind-xss",
+                name=(f"Blind XSS: stored script payload fetched "
+                      f"({ep.path})"),
+                severity="medium",
+                confidence=Confidence.PROBABLE.value,
+                validation_status=ValidationStatus.
+                STRONG_CANDIDATE.value,
+                host=ep.host, matched_at=ep.url,
+                endpoint_url=ep.url, method="POST",
+                description=(
+                    f"A unique script-src URL stored through POST "
+                    f"{ep.url} (fields: "
+                    f"{', '.join(item['fields'])}) received an "
+                    f"out-of-band interaction. A client retrieved the "
+                    f"payload URL — script execution is NOT proven. "
+                    f"Confirm in a controlled browser before reporting."),
+                tags=["xss", "blind-xss", "second-order",
+                      ep.endpoint_type],
+                raw={"callback_url": item["callback_url"],
+                     "fields": item["fields"],
+                     "interactions": matched[:10]},
+                false_positive_notes=(
+                    "A DNS/HTTP callback proves a fetch of the injected "
+                    "URL, not JavaScript execution (prefetchers, link "
+                    "previewers, and scanners also fetch). Replay the "
+                    "stored value in an instrumented browser to confirm "
+                    "execution."),
+                identity=identity,
+            )
+            evidence.allocate(f)
+            evidence.record(
+                f,
+                request_text=(
+                    f"POST {ep.url}\n"
+                    f"fields {', '.join(item['fields'])} =\n"
+                    f"{item['callback_url']} (inside <script src>)"),
+                response_text="\n".join(
+                    interaction_line(it) for it in matched[:10]))
+            findings.append(f)
+        else:
+            coverage.record(
+                "second_order", "blocked" if budget_blocked
+                else "inconclusive",
+                f"no blind-XSS callback for {ep.normalized_url} "
+                f"after polling")
+    if incomplete and not submitted:
+        coverage.record("second_order", "inconclusive",
+                        "blind-XSS injection flow was incomplete")
+    return findings

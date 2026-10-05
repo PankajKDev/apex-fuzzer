@@ -36,7 +36,8 @@ from .oast import maybe_register_oast, oast_sweep
 from .plugins import apply_plugin_results, finding_endpoint
 from .prescreen import prescreen_sweep
 from .race import race_probe
-from .second_order import second_order_probe, second_order_ssrf_probe
+from .second_order import (blind_xss_probe, second_order_probe,
+                             second_order_ssrf_probe)
 
 log = get_logger("stages-validation")
 
@@ -287,6 +288,10 @@ def run_validation(findings: List[Finding],
             out += second_order_probe(
                 endpoints, evidence, metrics, budgets, coverage,
                 client, cfg, scope, controls, identities)
+            out += blind_xss_probe(
+                endpoints, evidence, metrics, budgets, coverage,
+                client, cfg, scope, controls, identities,
+                oast_provider)
         if cfg.validation.second_order_ssrf:
             out += second_order_ssrf_probe(
                 endpoints, evidence, metrics, budgets, coverage,
