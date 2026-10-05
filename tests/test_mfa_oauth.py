@@ -246,7 +246,8 @@ def test_ai_hypothesis_out_of_scope_never_sends(tmp_path):
 
     h = Hypothesis(hypothesis="SQLi in id", endpoint="https://evil.test/x",
                    reason="ai", test_class="sqli", confidence=0.9)
-    orch._route_hypothesis(h, None, {}, SimpleNamespace(), Http(), [],
-                           None, None)
+    from main.stages.ai_loop import route_hypothesis
+    route_hypothesis(h, None, {}, SimpleNamespace(), Http(), [],
+                     None, None, cfg, orch.scope)
     assert h.status == "inconclusive"
     assert "eligible" in h.notes

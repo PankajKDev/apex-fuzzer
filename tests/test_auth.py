@@ -478,7 +478,8 @@ def test_login_skipped_paths(tmp_path, monkeypatch):
     # disabled → no-op
     orch = Orchestrator(Config(), out, profile=get_profile("standard"))
     m = Metrics()
-    orch._login_identities(out, m)
+    from main.stages.auth import login_identities
+    login_identities(out, m, orch.cfg, orch.scope)
     assert m.logins_attempted == 0
     # enabled but out-of-scope URL → skipped before any browser touch
     cfg = Config()
@@ -486,7 +487,7 @@ def test_login_skipped_paths(tmp_path, monkeypatch):
     cfg.auth.login.url = "https://evil.com/login"
     cfg.scope.allowed_domains = ["t.com"]
     orch2 = Orchestrator(cfg, out, profile=get_profile("standard"))
-    orch2._login_identities(out, m)
+    login_identities(out, m, cfg, orch2.scope)
     assert m.logins_attempted == 0
     # enabled + in scope but no playwright → skipped
     cfg2 = Config()
@@ -499,7 +500,7 @@ def test_login_skipped_paths(tmp_path, monkeypatch):
         lambda: False)
     import main.browser.browser as bmod
     monkeypatch.setattr(bmod, "playwright_available", lambda: False)
-    orch3._login_identities(out, m)
+    login_identities(out, m, cfg2, orch3.scope)
     assert m.logins_attempted == 0
 
 
@@ -625,7 +626,8 @@ def test_orchestrator_login_enriches_context(auth_site, tmp_path,
         name="alice", username="alice", password_env="PW_ALICE")]
     orch = Orchestrator(cfg, tmp_path, profile=get_profile("deep"))
     m = Metrics()
-    orch._login_identities(tmp_path, m)
+    from main.stages.auth import login_identities
+    login_identities(tmp_path, m, cfg, orch.scope)
     assert m.logins_attempted == 1 and m.logins_succeeded == 1
     assert cfg.auth.contexts[0].headers.get("Cookie") == \
         "session=SESS1"

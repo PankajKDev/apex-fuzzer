@@ -14,7 +14,8 @@ from ..discovery import parameters as param_mod
 from ..discovery.javascript import JSAnalyzer, is_first_party
 from ..discovery.url_normalizer import normalize_url
 from ..logging_setup import get_logger
-from ..models import Confidence, Endpoint, Parameter, write_jsonl
+from ..models import (Confidence, Endpoint, Parameter, read_jsonl,
+                      write_jsonl)
 
 log = get_logger("stages-endpoints")
 
@@ -426,3 +427,16 @@ def add_sourcemap_params(by_norm: Dict[str, Endpoint], host: str,
                 attached += 1
                 if attached >= 30:
                     break
+
+
+def load_endpoints(out_dir: Path) -> List[Endpoint]:
+    loaded = []
+    for d in read_jsonl(out_dir / "endpoints.jsonl"):
+        kwargs = {k: v for k, v in d.items()
+                  if k in Endpoint.__dataclass_fields__}
+        for key in ("query_parameters", "body_parameters",
+                    "header_parameters"):
+            kwargs[key] = [Parameter(**p) if isinstance(p, dict) else p
+                           for p in kwargs.get(key, []) or []]
+        loaded.append(Endpoint(**kwargs))
+    return loaded

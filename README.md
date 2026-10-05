@@ -1553,7 +1553,24 @@ workflows (login, sessions, JWT/OAuth/OIDC passive), and state graph
 
 ```
 main/
-  orchestrator.py        10-stage pipeline, AI loop closure
+  orchestrator.py        run/_run_one coordination only (~450 lines);
+                         stages do the work, probes take explicit inputs
+  stages/
+    recon.py             crawlers, merge, robots/sitemap, API specs,
+                         authenticated recon, subprocess inputs
+    endpoints.py         normalization/dedupe, JS mining, browser/HAR merge
+    mapping.py           tech/WAF fingerprint, classification, Arjun,
+                         application model + graph
+    scanning.py          live probe, takeover, Nuclei stage
+    auth.py              login minting (Phase 2)
+    ai_loop.py           hypothesis planning + deterministic loop closure
+    intel.py             behavioral state, workflows, resources, invariants
+    reporting.py         leads, Burp, reviews, audit, changes, report
+    validation/          ProbeControls + one module per probe family
+                         (differential, introspection, identity, cache,
+                         oast, prescreen, plugins, authz, business,
+                         race, second-order, coordinator)
+  http.py                gated transport client (limiter + budgets + scope)
   cli.py                 argparse, --doctor, --update
   config.py              Scan/Discovery/Validation/Budgets/Oast/Nuclei/AI/Auth/Reporting/Scope
   profiles.py            passive · standard · deep · api · authenticated · validation
