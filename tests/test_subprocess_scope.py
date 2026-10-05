@@ -16,20 +16,22 @@ def _orch(tmp_path):
 
 
 def test_scoped_input_filters_and_preserves_source(tmp_path):
+    from main.stages.recon import scoped_subprocess_input
     orch = _orch(tmp_path)
     (tmp_path / "raw.txt").write_text(
         "https://example.com/a\nhttps://evil.com/b\nnot-a-url\n")
-    dest = orch._scoped_subprocess_input(tmp_path, "raw.txt",
-                                         "probe-input.txt")
+    dest = scoped_subprocess_input(orch.scope, tmp_path, "raw.txt",
+                                   "probe-input.txt")
     assert dest.read_text() == "https://example.com/a\n"
     # source file intact for audit/resume
     assert "evil.com" in (tmp_path / "raw.txt").read_text()
 
 
 def test_scoped_input_missing_source(tmp_path):
+    from main.stages.recon import scoped_subprocess_input
     orch = _orch(tmp_path)
-    dest = orch._scoped_subprocess_input(tmp_path, "raw.txt",
-                                         "probe-input.txt")
+    dest = scoped_subprocess_input(orch.scope, tmp_path, "raw.txt",
+                                   "probe-input.txt")
     assert dest.read_text() == ""
 
 

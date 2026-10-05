@@ -7,7 +7,8 @@ from types import SimpleNamespace
 
 from main.config import Config
 from main.leads import MAX_LEADS, collect_leads, write_leads
-from main.orchestrator import katana_rl, takeover_notes_from_file
+from main.orchestrator import takeover_notes_from_file
+from main.stages.recon import katana_rl
 from main.profiles import get as get_profile
 from main.safety.preflight import resolve_modules
 
@@ -186,7 +187,8 @@ def test_robots_harvest_reaches_endpoint_pool(tmp_path):
     (tmp_path / "robots.txt.out").write_text(
         "https://example.test/panel/\nhttps://example.test/inv/\n")
     orch = Orchestrator(Config(), tmp_path, profile=get_profile("leads"))
-    orch._merge_recon(tmp_path)
+    from main.stages.recon import merge_recon
+    merge_recon(orch.cfg, tmp_path)
     raw = (tmp_path / "raw.txt").read_text()
     assert "https://example.test/panel/" in raw
     assert "https://example.test/inv/" in raw

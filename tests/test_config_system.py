@@ -395,9 +395,6 @@ def test_hacker_header_rejects_injection_and_nonstrings(tmp_path):
 
 
 def test_seed_urls_cli_override_and_merge(tmp_path):
-    from main.orchestrator import Orchestrator
-    from main.profiles import get as get_profile
-
     seed = tmp_path / "seeds.txt"
     seed.write_text("https://example.test/panel/api/orders?order_id=1\n"
                     "# comment\nnot-a-url\n")
@@ -409,8 +406,8 @@ def test_seed_urls_cli_override_and_merge(tmp_path):
     assert any("seed_urls" in e for e in cfg.validate()["errors"])
     cfg.seed_urls = [cfg.seed_urls[0]]
     assert cfg.validate()["errors"] == []
-    orch = Orchestrator(cfg, tmp_path, profile=get_profile("standard"))
-    orch._merge_recon(tmp_path)
+    from main.stages.recon import merge_recon
+    merge_recon(cfg, tmp_path)
     raw = (tmp_path / "raw.txt").read_text()
     assert "order_id=1" in raw
 
@@ -445,13 +442,14 @@ def test_har_files_cli_config_and_missing_warns(tmp_path):
 
 
 def test_authenticated_recon_identity_headers(tmp_path):
-    from main.orchestrator import Orchestrator, _header_arg
+    from main.orchestrator import Orchestrator
     from main.profiles import get as get_profile
+    from main.stages.recon import header_arg, recon_identity_headers
 
     orch = Orchestrator(Config(), tmp_path,
                         profile=get_profile("standard"))
-    assert orch._recon_identity_headers() == {}
-    assert _header_arg({"Cookie": "s=1", "Authorization": "Bearer x"}) == \
+    assert recon_identity_headers(orch.cfg) == {}
+    assert header_arg({"Cookie": "s=1", "Authorization": "Bearer x"}) == \
         "Cookie: s=1;;Authorization: Bearer x"
     cfg = Config()
     cfg.discovery.authenticated_recon = True
@@ -461,20 +459,19 @@ def test_authenticated_recon_identity_headers(tmp_path):
         AuthContext(name="anonymous", headers={}),
         AuthContext(name="u", headers={"Cookie": "s=1",
                                        "X-Custom": "z"})]
-    orch = Orchestrator(cfg, tmp_path, profile=get_profile("standard"))
-    assert orch._recon_identity_headers() == {"Cookie": "s=1"}
+    assert recon_identity_headers(cfg) == {"Cookie": "s=1"}
 
 
 def test_authenticated_recon_crawler_args(tmp_path, monkeypatch):
-    from main.orchestrator import Orchestrator
     from main.profiles import get as get_profile
     from main.config import AuthContext
-    import main.orchestrator as orch_mod
+    from main.stages.recon import run_recon
+    import main.stages.recon as recon_mod
 
     cfg = Config()
     cfg.discovery.authenticated_recon = True
     cfg.auth.contexts = [AuthContext(name="u", headers={"Cookie": "s=1"})]
-    orch = Orchestrator(cfg, tmp_path, profile=get_profile("standard"))
+    profile = get_profile("standard")
     seen = []
 
     def fake_run(args, timeout=0, input_data=None):
@@ -482,8 +479,8 @@ def test_authenticated_recon_crawler_args(tmp_path, monkeypatch):
         seen.append(list(args))
         return SimpleNamespace(ok=True, stdout="", stderr="")
 
-    monkeypatch.setattr(orch_mod, "run", fake_run)
-    monkeypatch.setattr(orch_mod, "which", lambda name: f"/bin/{name}")
+    monkeypatch.setattr(recon_mod, "run", fake_run)
+    monkeypatch.setattr(recon_mod, "which", lambda name: f"/bin/{name}")
     import types as _t
 
     def fake_run_stdout(args, timeout=0, input_data=None):
@@ -491,8 +488,8 @@ def test_authenticated_recon_crawler_args(tmp_path, monkeypatch):
         return _t.SimpleNamespace(ok=True,
                                   stdout="https://example.test/a\n",
                                   stderr="")
-    monkeypatch.setattr(orch_mod, "run", fake_run_stdout)
-    orch._recon("https://example.test", tmp_path)
+    monkeypatch.setattr(recon_mod, "run", fake_run_stdout)
+    run_recon(cfg, profile, "https://example.test", tmp_path)
     katana = [a for a in seen if a[0] == "katana" and "-H" in a]
     assert katana and "Cookie:s=1" in katana[0]
     hakrawler = [a for a in seen if a[0] == "hakrawler"]
@@ -503,14 +500,14 @@ def test_authenticated_recon_crawler_args(tmp_path, monkeypatch):
 
 
 def test_recon_stays_anonymous_by_default(tmp_path, monkeypatch):
-    from main.orchestrator import Orchestrator
     from main.profiles import get as get_profile
     from main.config import AuthContext
-    import main.orchestrator as orch_mod
+    from main.stages.recon import run_recon
+    import main.stages.recon as recon_mod
 
     cfg = Config()
     cfg.auth.contexts = [AuthContext(name="u", headers={"Cookie": "s=1"})]
-    orch = Orchestrator(cfg, tmp_path, profile=get_profile("standard"))
+    profile = get_profile("standard")
     seen = []
 
     def fake_run(args, timeout=0, input_data=None):
@@ -518,9 +515,9 @@ def test_recon_stays_anonymous_by_default(tmp_path, monkeypatch):
         seen.append(list(args))
         return SimpleNamespace(ok=True, stdout="", stderr="")
 
-    monkeypatch.setattr(orch_mod, "run", fake_run)
-    monkeypatch.setattr(orch_mod, "which", lambda name: f"/bin/{name}")
-    orch._recon("https://example.test", tmp_path)
+    monkeypatch.setattr(recon_mod, "run", fake_run)
+    monkeypatch.setattr(recon_mod, "which", lambda name: f"/bin/{name}")
+    run_recon(cfg, profile, "https://example.test", tmp_path)
     assert not [a for a in seen if "-H" in a or "-h" in a[1:2]]
     assert not (tmp_path / "katana-authed.txt").exists()
 

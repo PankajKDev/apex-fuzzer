@@ -28,6 +28,9 @@ from .shell import run, which, AdaptiveRateLimiter
 from .budgets import BudgetTracker, BudgetExceeded
 from .checkpoints import Checkpoint
 from .http import HTTPClient
+from .stages.recon import (harvest_api_specs, harvest_robots, merge_recon,
+                           recon_identity_headers, run_recon,
+                           scoped_subprocess_input)
 from .application.application_model import (Application,
                                             build_from_scan)
 from .application.identities import from_auth_contexts
@@ -40,8 +43,6 @@ from .plugins.adapters import PLUGIN_ORDER
 from .discovery.url_normalizer import normalize_url
 from .discovery import parameters as param_mod
 from .discovery import technologies as tech_mod
-from .discovery import robots as robots_mod
-from .discovery import api_specs as spec_mod
 from .discovery import param_miner
 from .discovery.javascript import JSAnalyzer, is_first_party, chunk_js
 from .discovery.classifier import classify
@@ -80,31 +81,12 @@ from .safety.authorization import (
 log = get_logger("orchestrator")
 
 
-def _is_public_archive_target(target: str) -> bool:
-    """Avoid disclosing local/private lab targets to public archive tools."""
-    hostname = target_hostname(target)
-    if not hostname or hostname == "localhost" or hostname.endswith(
-            ".localhost"):
-        return False
-    try:
-        return ipaddress.ip_address(hostname).is_global
-    except ValueError:
-        return "." in hostname
 
 LIVE_CODES = "200,204,301,302,401,403,405,500,502,503,504"
 
 
-def _header_arg(headers: dict) -> str:
-    """Join headers the way hakrawler's -h flag expects."""
-    return ";;".join(f"{name}: {value}" for name, value in
-                     (headers or {}).items())
 
 
-def katana_rl(profile_name: str, rate_limit: int) -> int:
-    """Katana request rate: leads mode stays at a quiet floor."""
-    if profile_name == "leads":
-        return 5
-    return 30 if rate_limit >= 100 else 10
 
 
 def takeover_notes_from_file(path) -> List[str]:
@@ -252,15 +234,17 @@ class Orchestrator:
             log.info("recon complete (resume)")
         else:
             ck.mark("recon", "running")
-            metrics.urls_discovered = len(self._recon(target, out_dir))
+            metrics.urls_discovered = len(
+                run_recon(self.cfg, self.profile, target, out_dir))
             ck.mark("recon")
 
         # Robots / sitemap appended to raw URL pool (spec §6).
         # Harvest runs after recon, so re-merge: robots.txt.out would
         # otherwise sit on disk while endpoints build without it.
         if self.profile.robots and self.cfg.discovery.robots_sitemap:
-            self._harvest_robots(client, base_url, out_dir)
-            self._merge_recon(out_dir)
+            harvest_robots(client, base_url, out_dir,
+                             self.cfg.scan.http_timeout)
+            merge_recon(self.cfg, out_dir)
 
         raw_urls = self._read_lines(out_dir / "raw.txt")
         metrics.urls_discovered = len(raw_urls)
@@ -285,7 +269,10 @@ class Orchestrator:
         # ── 3. API SPEC DISCOVERY ───────────────────────────────────────
         if (self.profile.api_specs and self.cfg.discovery.api_specs):
             if not (resume and ck.is_complete("mapping")):
-                self._harvest_api_specs(client, base_url, endpoints, out_dir)
+                harvest_api_specs(client, base_url, endpoints,
+                                    out_dir,
+                                    self.cfg.scan.http_timeout,
+                                    self.scope)
 
         # ── 4. MAPPING ──────────────────────────────────────────────────
         if resume and ck.is_complete("mapping"):
@@ -598,8 +585,6 @@ class Orchestrator:
         except Exception as e:
             log.debug("run audit skipped: %s", e)
             return {}
-        except Exception as e:
-            log.debug("run audit skipped: %s", e)
 
     # =====================================================================
     # PREFLIGHT + DRY-RUN (Milestone 1)
@@ -700,203 +685,10 @@ class Orchestrator:
     # =====================================================================
     # STAGES
     # =====================================================================
-    def _recon(self, target: str, out_dir: Path) -> List[str]:
-        url = target if target.startswith("http") else f"http://{target}"
-        host = target.replace("http://", "").replace(
-            "https://", "").split("/")[0]
-        jobs = []
-        # Leads mode crawls shallow and slow: discovery without alarming
-        # edge defenses. All other profiles keep the standard depth.
-        quiet = self.profile.name == "leads"
-        crawl_depth = "1" if quiet else "3"
-        if quiet:
-            log.info("recon: leads mode - quiet crawl (depth 1, "
-                     "katana -rl 5), no active probes will follow")
-        if _is_public_archive_target(target):
-            ps = Path.home() / "ParamSpider" / "paramspider.py"
-            if ps.exists():
-                jobs.append((["python3", str(ps), "-d", host,
-                              "--level", "high", "--quiet", "-o",
-                              str(out_dir / "param.txt")],
-                             "paramspider", None, out_dir / "param.txt"))
-            if which("waybackurls"):
-                jobs.append((["waybackurls"], "waybackurls",
-                             host + "\n", out_dir / "wayback.txt"))
-            if which("gauplus"):
-                jobs.append((["gauplus", "-subs"], "gauplus",
-                             host + "\n", out_dir / "gau.txt"))
-        else:
-            log.info("recon: skipping public archive lookups for local or "
-                     "non-public target %s", host)
-        if which("hakrawler"):
-            jobs.append((["hakrawler", "-d", crawl_depth, "-subs", "-u"],
-                         "hakrawler", url + "\n", out_dir / "hakrawler.txt"))
-        if which("katana"):
-            rl = katana_rl(self.profile.name, self.cfg.scan.rate_limit)
-            jobs.append((["katana", "-d", crawl_depth, "-silent",
-                          "-rl", str(rl)],
-                         "katana", url + "\n", out_dir / "katana.txt"))
-        auth_headers = self._recon_identity_headers()
-        if auth_headers:
-            if which("hakrawler"):
-                jobs.append((["hakrawler", "-d", crawl_depth, "-subs", "-u",
-                              "-h", _header_arg(auth_headers)],
-                             "hakrawler-authed", url + "\n",
-                             out_dir / "hakrawler-authed.txt"))
-            if which("katana"):
-                katana_args = ["katana", "-d", crawl_depth, "-silent",
-                               "-rl", str(rl)]
-                for name, value in auth_headers.items():
-                    katana_args.extend(["-H", f"{name}:{value}"])
-                jobs.append((katana_args, "katana-authed", url + "\n",
-                             out_dir / "katana-authed.txt"))
 
-        import concurrent.futures
-        def _run(job):
-            args, name, inp, out_path = job
-            r = run(args, timeout=self.cfg.scan.timeout, input_data=inp)
-            if out_path and r.stdout:
-                Path(out_path).write_text(r.stdout)
-            return name
 
-        with concurrent.futures.ThreadPoolExecutor(
-                max_workers=self.cfg.scan.concurrency) as ex:
-            for name in ex.map(_run, jobs):
-                log.info("recon: %s done", name)
 
-        self._merge_recon(out_dir)
-        return self._read_lines(out_dir / "raw.txt")
 
-    def _recon_identity_headers(self) -> dict:
-        """Session headers for authenticated recon, or {} when off."""
-        if not bool(getattr(self.cfg.discovery, "authenticated_recon",
-                            False)):
-            return {}
-        for context in list(getattr(self.cfg.auth, "contexts", []) or []):
-            if getattr(context, "name", "") == "anonymous":
-                continue
-            headers = dict(getattr(context, "headers", None) or {})
-            picked = {k: v for k, v in headers.items()
-                      if k.lower() in ("cookie", "authorization")
-                      and isinstance(v, str) and v.strip()}
-            if picked:
-                return picked
-        log.info("recon: authenticated_recon on but no authenticated "
-                 "identity carries Cookie/Authorization — crawling "
-                 "anonymously")
-        return {}
-
-    def _merge_recon(self, out_dir: Path):
-        """Merge recon files into raw.txt, applying crawl_exclude_exts."""
-        excl = {e.lower() for e in self.cfg.scope.crawl_exclude_exts}
-        raw: Set[str] = set()
-        for u in (getattr(self.cfg, "seed_urls", None) or []):
-            line = str(u).strip()
-            if not line.startswith("http"):
-                continue
-            ext = Path(line.split("?")[0]).suffix.lstrip(".").lower()
-            if ext and ext in excl:
-                continue
-            raw.add(line)
-        # Preserve what a previous merge already banked: re-merging
-        # (e.g. after the robots harvest lands) must only add.
-        existing = out_dir / "raw.txt"
-        if existing.exists():
-            for line in existing.read_text(errors="ignore").splitlines():
-                line = line.strip()
-                if line.startswith("http"):
-                    raw.add(line)
-        for f in ("param.txt", "wayback.txt", "gau.txt",
-                  "hakrawler.txt", "katana.txt",
-                  "hakrawler-authed.txt", "katana-authed.txt",
-                  "robots.txt.out", "sitemap.txt"):
-            p = out_dir / f
-            if not p.exists():
-                continue
-            for line in p.read_text(errors="ignore").splitlines():
-                line = line.strip()
-                if not line.startswith("http"):
-                    continue
-                ext = Path(line.split("?")[0]).suffix.lstrip(".").lower()
-                if ext and ext in excl:
-                    continue
-                raw.add(line)
-        (out_dir / "raw.txt").write_text("\n".join(sorted(raw)))
-
-    def _harvest_robots(self, client, base_url: str, out_dir: Path):
-        try:
-            r = robots_mod.fetch_robots(client, base_url,
-                                        self.cfg.scan.http_timeout)
-        except Exception as e:
-            log.debug("robots harvest failed: %s", e)
-            return
-        if not r["paths"] and not r["sitemaps"]:
-            return
-        from urllib.parse import urljoin
-        urls: Set[str] = set()
-        for p in r["paths"]:
-            urls.add(urljoin(base_url, p))
-        for sm in r["sitemaps"][:5]:
-            try:
-                urls.update(robots_mod.fetch_sitemap(
-                    client, sm, self.cfg.scan.http_timeout))
-            except Exception:
-                continue
-        if urls:
-            (out_dir / "robots.txt.out").write_text("\n".join(sorted(urls)))
-            log.info("robots/sitemap: %d URLs harvested", len(urls))
-
-    def _harvest_api_specs(self, client, base_url: str,
-                           endpoints: List[Endpoint], out_dir: Path):
-        try:
-            specs = spec_mod.discover(client, base_url,
-                                      self.cfg.scan.http_timeout)
-        except Exception as e:
-            log.debug("api spec discovery failed: %s", e)
-            return
-        if not specs:
-            return
-        (out_dir / "api_specs.json").write_text(
-            __import__("json").dumps(specs, indent=2))
-        from urllib.parse import urljoin
-        added = 0
-        for spec in specs:
-            base = spec.get("base", "") or base_url
-            for ep in spec["endpoints"]:
-                full = urljoin(base, ep["path"])
-                if not self.scope.is_in_scope(full):
-                    continue
-                n = normalize_url(full)
-                if any(e.normalized_url == n for e in endpoints):
-                    continue
-                e = Endpoint(
-                    url=full, normalized_url=n,
-                    host=__import__("urllib.parse", fromlist=["urlparse"])
-                    .urlparse(full).hostname or "",
-                    path=ep["path"], method=ep["method"],
-                    source=["api_spec"],
-                    endpoint_type=classify(ep["path"]),
-                    operation_id=ep.get("operation_id", ""),
-                    summary=ep.get("summary", ""),
-                    description=ep.get("description", ""),
-                    tags=ep.get("tags", []),
-                    request_content_types=ep.get(
-                        "request_content_types", []))
-                for p in ep.get("parameters", []):
-                    parameter = Parameter(
-                        name=p["name"], location=p.get("in", "query"),
-                        source=["api_spec"],
-                        confidence=Confidence.CONFIRMED.value)
-                    location = p.get("in", "query")
-                    if location == "body":
-                        e.body_parameters.append(parameter)
-                    elif location == "header":
-                        e.header_parameters.append(parameter)
-                    elif location not in ("path", "cookie"):
-                        e.query_parameters.append(parameter)
-                endpoints.append(e)
-                added += 1
-        log.info("api specs: %d endpoints added", added)
 
     def _build_endpoints(self, urls: List[str], host: str, out_dir: Path,
                          client, base_url: str, budgets, metrics
@@ -1314,7 +1106,7 @@ class Orchestrator:
         all_headers: Dict[str, str] = {}
         page_ids: List[tuple] = []  # (url, param, value, source)
         passes: List[Optional[dict]] = [None]
-        authed = self._recon_identity_headers()
+        authed = recon_identity_headers(self.cfg)
         if authed:
             passes.append(authed)
         for pass_headers in passes:
@@ -1554,25 +1346,10 @@ class Orchestrator:
                 log.info("linkfinder: attached %d JS params", attached)
 
     # ── PROBE LIVE  (BUGFIX A) ──────────────────────────────────────────
-    def _scoped_subprocess_input(self, out_dir: Path, src: str,
-                                   name: str) -> Path:
-        """Write a scope-filtered input file for an external tool.
-
-        Subprocesses (httpx, nuclei, …) follow redirects themselves,
-        outside the gate — so they only ever receive in-scope lines.
-        The unfiltered source file stays intact for audit/resume.
-        """
-        lines = self._read_lines(out_dir / src)
-        kept = [u for u in lines if self.scope.is_in_scope(u)]
-        dest = out_dir / name
-        dest.write_text("\n".join(kept) + ("\n" if kept else ""))
-        log.info("subprocess input: %d in-scope / %d total -> %s",
-                 len(kept), len(lines), name)
-        return dest
 
     def _probe_live(self, out_dir: Path, live_file: Path):
-        probe_input = self._scoped_subprocess_input(
-            out_dir, "raw.txt", "probe-input.txt")
+        probe_input = scoped_subprocess_input(
+            self.scope, out_dir, "raw.txt", "probe-input.txt")
         if probe_input.stat().st_size == 0:
             log.warning("nothing to probe — no in-scope URLs")
             live_file.write_text("")
