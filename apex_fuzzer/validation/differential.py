@@ -68,6 +68,22 @@ def looks_like_edge_deny(status: int, text: str,
 # endpoint types where an anonymous 200 is meaningful
 PRIVILEGED_TYPES = ("admin", "api", "authentication")
 
+# redirect statuses compared as authorization signals (R)
+_REDIRECT_STATUSES = (301, 302, 303, 307, 308)
+
+
+def _location_path(location: str) -> str:
+    """Redirect target path for cross-context comparison.
+
+    Query strings carry per-session echoes, so only the path decides
+    divergence. Empty when the target has no usable path.
+    """
+    try:
+        from urllib.parse import urlsplit
+        return urlsplit(location or "").path or ""
+    except (TypeError, ValueError):
+        return ""
+
 # parameter names that smell like resource identifiers (IDOR surface)
 IDOR_PARAM_NAMES = {
     "id", "uuid", "uid", "user_id", "userid", "account_id", "order_id",
@@ -86,6 +102,14 @@ class ContextResult:
     body_hash: str = ""
     error: str = ""
     edge_denied: bool = False
+    # Header signals (values never retained: cookie values and
+    # tracing headers vary per session and may carry secrets).
+    content_type: str = ""
+    location: str = ""
+    auth_markers: str = ""
+    # Application-error disclosure + observed latency (R/E/T inputs).
+    error_signature: str = ""
+    elapsed_ms: float = 0.0
 
 
 @dataclass
@@ -96,6 +120,10 @@ class DifferentialResult:
     verdict: str = "inconclusive"
     notes: str = ""
     edge_denied: bool = False
+    # Confirmation re-probe outcome (single-sample candidates stay
+    # candidates but are never reported as confirmed without a repeat).
+    confirmed: bool = False
+    confirmation_notes: str = ""
 
     def to_dict(self) -> Dict[str, Any]:
         return {
@@ -104,6 +132,8 @@ class DifferentialResult:
             "verdict": self.verdict,
             "notes": self.notes,
             "edge_denied": self.edge_denied,
+            "confirmed": self.confirmed,
+            "confirmation_notes": self.confirmation_notes,
             "contexts": [vars(c) for c in self.contexts],
         }
 
@@ -125,8 +155,93 @@ def _json_key_shape(value: Any, depth: int = 0) -> Any:
     return "scalar"
 
 
+def _header_value(headers, wanted: str) -> str:
+    try:
+        for name, value in (headers or {}).items():
+            if str(name).lower() == wanted and isinstance(value, str):
+                return value
+    except (AttributeError, TypeError):
+        pass
+    return ""
+
+
+def _media_type(content_type: str) -> str:
+    """Bare media type, lowercased, parameters stripped."""
+    return str(content_type or "").split(";")[0].strip().lower()
+
+
+def _auth_markers(headers) -> str:
+    """Session-relevant header presence without values.
+
+    Cookie names (sorted) plus a www-authenticate flag. Values are
+    per-session volatile and may carry secrets — never retained.
+    """
+    try:
+        items = list((headers or {}).items())
+    except (AttributeError, TypeError):
+        return ""
+    names = set()
+    challenged = False
+    for name, value in items:
+        low = str(name).lower()
+        if low == "set-cookie" and isinstance(value, str):
+            # cookie names only: values are per-session volatile and
+            # may carry secrets. The lookahead keeps Expires dates
+            # (which contain commas) from splitting pairs apart.
+            for m in re.finditer(
+                    r"(?:^|,)\s*([A-Za-z0-9!#$%&'*+\-.^_`|~]+)=",
+                    value):
+                names.add(m.group(1))
+        elif low == "www-authenticate":
+            challenged = True
+    bits = sorted(n for n in names if n)
+    if challenged:
+        bits.append("www-authenticate")
+    return ",".join(bits)
+
+
+# Application-error disclosure markers (family, substring). Narrow by
+# design: framework tracebacks and debug pages, not generic words
+# like "error" that appear in healthy copy. A match labels the
+# response; asymmetry across contexts is the signal, never the marker
+# alone.
+_APP_ERROR_MARKERS = (
+    ("python-traceback", "traceback (most recent call last)"),
+    ("java-stack", ".java:"),
+    ("java-exception", "exception in thread"),
+    ("dotnet-error", "server error in '/' application"),
+    ("dotnet-exception", "system.web.httpexception"),
+    ("php-fatal", "fatal error"),
+    ("php-warning", ".php on line"),
+    ("django-debug", "django debug"),
+    ("laravel-debug", "whoops, looks like something went wrong"),
+    ("sql-error", "sqlstate"),
+    ("sql-error", "syntax error"),
+    ("sql-error", "ora-"),
+    ("sql-error", "pg::"),
+    ("stack-trace", "stack trace"),
+)
+
+
+def _app_error_signature(text: str) -> str:
+    """Framework-error family disclosed in a body, or "".
+
+    Case-insensitive substring match over the first 8KB. Returns the
+    family label for evidence; the differential (one context leaks,
+    the other does not) is evaluated by the caller.
+    """
+    try:
+        sample = (text or "")[:8192].lower()
+    except (TypeError, ValueError):
+        return ""
+    for family, marker in _APP_ERROR_MARKERS:
+        if marker in sample:
+            return family
+    return ""
+
+
 def normalize_response(r) -> Dict[str, Any]:
-    """Status + sorted JSON keys + length bucket + body hash."""
+    """Status + sorted JSON keys + length bucket + body hash + headers."""
     body = r.text or ""
     length = len(body)
     shape = ""
@@ -139,12 +254,18 @@ def normalize_response(r) -> Dict[str, Any]:
     body_hash = hashlib.sha256(
         re.sub(r"\s+", " ", body[:8192]).encode("utf-8", "replace")
     ).hexdigest()[:16]
+    headers = getattr(r, "headers", None)
     return {
         "status": r.status_code,
         "length": length,
         "length_bucket": length // LENGTH_BUCKET,
         "key_shape": shape,
         "body_hash": body_hash,
+        "content_type": _media_type(_header_value(headers,
+                                                  "content-type")),
+        "location": _header_value(headers, "location")[:2000],
+        "auth_markers": _auth_markers(headers),
+        "error_signature": _app_error_signature(body),
     }
 
 
@@ -160,6 +281,35 @@ def _endpoint_is_differential_target(endpoint, endpoint_type: str) -> bool:
     if endpoint_type in PRIVILEGED_TYPES:
         return True
     return has_idor_params(endpoint)
+
+
+def _known_ct_mismatch(a, b) -> bool:
+    """True when both content types are known and differ.
+
+    Missing data never vetoes: header-dropping proxies exist, and a
+    missing signal must not erase a shape match.
+    """
+    ca = getattr(a, "content_type", "") or ""
+    cb = getattr(b, "content_type", "") or ""
+    return bool(ca and cb and ca != cb)
+
+
+def _anon_html_vs_authed_api(anon, authed) -> bool:
+    """Anonymous HTML 200 against authenticated API content.
+
+    The classic login-wall shadow: the app serves its login page with
+    200 to anonymous users while test users receive real API bodies.
+    Only fires on positive evidence (an authed non-HTML content type);
+    unknown types never veto.
+    """
+    act = getattr(anon, "content_type", "") or ""
+    if "html" not in act:
+        return False
+    for a in authed or []:
+        ct = getattr(a, "content_type", "") or ""
+        if ct and "html" not in ct:
+            return True
+    return False
 
 
 class DifferentialTester:
@@ -179,41 +329,96 @@ class DifferentialTester:
     def has_two_authenticated(self) -> bool:
         return sum(1 for c in self.contexts if c["name"] != "anonymous") >= 2
 
+    def _fetch_one(self, url: str, ctx, timeout: int) -> ContextResult:
+        import time as _time
+        cr = ContextResult(name=ctx["name"])
+        try:
+            _t0 = _time.perf_counter()
+            r = self.http.get(url, headers=ctx["headers"],
+                              timeout=timeout)
+            cr.elapsed_ms = (_time.perf_counter() - _t0) * 1000.0
+            n = normalize_response(r)
+            cr.status = n["status"]
+            cr.length = n["length"]
+            cr.length_bucket = n["length_bucket"]
+            cr.key_shape = n["key_shape"]
+            cr.body_hash = n["body_hash"]
+            cr.content_type = n["content_type"]
+            cr.location = n["location"]
+            cr.auth_markers = n["auth_markers"]
+            cr.error_signature = n["error_signature"]
+            try:
+                cr.edge_denied = looks_like_edge_deny(
+                    r.status_code, r.text or "",
+                    getattr(r, "headers", None))
+            except Exception:
+                cr.edge_denied = False
+        except BudgetExceeded:
+            # budget/gate exhaustion is infrastructure, never a
+            # negative — propagate so the caller records BLOCKED
+            raise
+        except Exception as e:
+            cr.error = str(e)[:200]
+        return cr
+
     def probe(self, url: str, endpoint_type: str = "unknown",
               timeout: int = 10) -> DifferentialResult:
         res = DifferentialResult(url=url, endpoint_type=endpoint_type)
         for ctx in self.contexts:
-            cr = ContextResult(name=ctx["name"])
-            try:
-                r = self.http.get(url, headers=ctx["headers"],
-                                  timeout=timeout)
-                n = normalize_response(r)
-                cr.status = n["status"]
-                cr.length = n["length"]
-                cr.length_bucket = n["length_bucket"]
-                cr.key_shape = n["key_shape"]
-                cr.body_hash = n["body_hash"]
-                try:
-                    cr.edge_denied = looks_like_edge_deny(
-                        r.status_code, r.text or "",
-                        getattr(r, "headers", None))
-                except Exception:
-                    cr.edge_denied = False
-            except BudgetExceeded:
-                # budget exhaustion is infrastructure, never a negative —
-                # propagate so the caller records BLOCKED coverage
-                raise
-            except Exception as e:
-                cr.error = str(e)[:200]
-            res.contexts.append(cr)
+            res.contexts.append(self._fetch_one(url, ctx, timeout))
         res.verdict, res.notes = self.evaluate(res)
+        if res.verdict == "strong_candidate":
+            self._confirm(res, timeout)
         return res
+
+    def _confirm(self, res: DifferentialResult, timeout: int) -> None:
+        """One confirmation pass over the same contexts.
+
+        A completed contradictory repeat downgrades to inconclusive
+        (single-sample dynamics: A/B tests, timestamps, balancer
+        variance). A repeat that cannot run (budget/gate) keeps the
+        candidate as single-sample evidence — an inconclusive tool
+        never erases a candidate.
+        """
+        repeat = DifferentialResult(url=res.url,
+                                    endpoint_type=res.endpoint_type)
+        try:
+            for ctx in self.contexts:
+                repeat.contexts.append(
+                    self._fetch_one(res.url, ctx, timeout))
+        except BudgetExceeded as e:
+            res.confirmed = False
+            res.confirmation_notes = (
+                f"single-sample: confirmation blocked ({e})")
+            res.notes += f" [{res.confirmation_notes}]"
+            return
+        verdict, notes = self.evaluate(repeat)
+        if verdict == "strong_candidate":
+            res.confirmed = True
+            res.confirmation_notes = (
+                "candidate reproduced on confirmation repeat (2/2 runs)")
+        else:
+            res.confirmed = False
+            res.confirmation_notes = (
+                f"confirmation repeat disagreed ({notes or verdict}); "
+                f"single-sample dynamics suspected")
+            res.verdict, res.notes = ("inconclusive",
+                                      f"{res.notes} "
+                                      f"[{res.confirmation_notes}]")
 
     @staticmethod
     def evaluate(res: DifferentialResult) -> Tuple[str, str]:
         by_name = {c.name: c for c in res.contexts}
         anon = by_name.get("anonymous")
         authed = [c for c in res.contexts if c.name != "anonymous"]
+
+        # Incomplete data is never a negative: errored contexts mean
+        # the comparison did not run, not that authorization held.
+        failed = [c.name for c in res.contexts if c.error]
+        if failed:
+            return ("inconclusive",
+                    f"incomplete contexts ({', '.join(failed)}); "
+                    f"comparison did not run")
 
         # Edge/bot-wall responses never reached the application: no
         # verdict built on them is sound. All denied → inconclusive;
@@ -233,11 +438,20 @@ class DifferentialTester:
                               or getattr(b, "edge_denied", False))
             if a.status == 200 and b.status == 200 and not edge_pages:
                 if a.body_hash == b.body_hash and a.body_hash:
+                    # byte-identical bodies expose the same data no
+                    # matter what the headers claim
                     return ("strong_candidate",
                             f"identical response body across "
                             f"{a.name} and {b.name} — BOLA/IDOR candidate")
                 if (a.key_shape and a.key_shape == b.key_shape
                         and a.length_bucket == b.length_bucket):
+                    if _known_ct_mismatch(a, b):
+                        return ("inconclusive",
+                                f"same response shape across {a.name} and "
+                                f"{b.name} but content types diverge "
+                                f"({a.content_type or '?'} vs "
+                                f"{b.content_type or '?'}); shadowing or "
+                                f"negotiation suspected, not proven access")
                     return ("strong_candidate",
                             f"same response shape across {a.name} and "
                             f"{b.name} — BOLA/IDOR candidate")
@@ -254,10 +468,47 @@ class DifferentialTester:
                         "authorization differential observed "
                         f"({a.name}={a.status}, {b.name}={b.status})")
 
+        # Differential error disclosure (E): same status, exactly one
+        # side leaks a framework error signature.
+        if len(authed) >= 2:
+            a, b = authed[0], authed[1]
+            edge = bool(getattr(a, "edge_denied", False)
+                        or getattr(b, "edge_denied", False))
+            siga = getattr(a, "error_signature", "") or ""
+            sigb = getattr(b, "error_signature", "") or ""
+            if (a.status == b.status and a.status and not edge
+                    and bool(siga) != bool(sigb)):
+                leaker, sig = (a, siga) if siga else (b, sigb)
+                other = b if leaker is a else a
+                return ("strong_candidate",
+                        f"differential error disclosure: {leaker.name} "
+                        f"leaks {sig} (HTTP {leaker.status}) while "
+                        f"{other.name} does not")
+
+        # Authorization redirect divergence (R): both sessions
+        # redirected, but to different paths (login vs resource).
+        if len(authed) >= 2:
+            a, b = authed[0], authed[1]
+            if (a.status in _REDIRECT_STATUSES
+                    and b.status in _REDIRECT_STATUSES
+                    and not getattr(a, "edge_denied", False)
+                    and not getattr(b, "edge_denied", False)):
+                pa = _location_path(getattr(a, "location", ""))
+                pb = _location_path(getattr(b, "location", ""))
+                if pa and pb and pa != pb:
+                    return ("strong_candidate",
+                            f"authorization redirect divergence: "
+                            f"{a.name} → {pa}, {b.name} → {pb}")
+
         # Broken access: anonymous 200 on privileged endpoint
         if (anon is not None and anon.status == 200
                 and res.endpoint_type in PRIVILEGED_TYPES
                 and not getattr(anon, "edge_denied", False)):
+            if _anon_html_vs_authed_api(anon, authed):
+                return ("inconclusive",
+                        "anonymous 200 is an HTML page while "
+                        "authenticated contexts receive API content — "
+                        "login-wall shadowing, not proven access")
             note = f"unauthenticated access to privileged endpoint " \
                    f"({res.endpoint_type})"
             if len(authed) >= 1 and authed[0].status == 200:
@@ -271,4 +522,15 @@ class DifferentialTester:
                     return ("inconclusive",
                             "auth enforced; authorization not tested "
                             "(single authenticated context)")
+        # anonymous redirected while an authed user gets 200 → the
+        # login wall holds at redirect level (healthy, not a gap)
+        anon_location = anon.location if anon is not None else ""
+        if anon is not None and anon.status in _REDIRECT_STATUSES \
+                and anon_location:
+            for a in authed:
+                if a.status == 200:
+                    return ("inconclusive",
+                            "anonymous redirected to login wall while "
+                            "authenticated users proceed; auth enforced "
+                            "at redirect")
         return ("inconclusive", "")
