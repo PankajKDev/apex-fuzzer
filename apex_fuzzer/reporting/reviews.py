@@ -1,0 +1,175 @@
+"""Operator review marks (false/true-positive feedback loop).
+
+Researchers triage findings between runs and record verdicts in
+``reviews.jsonl`` (one JSON object per line, author-edited):
+
+  {"finding_id": "diff-abc123", "verdict": "false_positive",
+   "reason": "login page HTML served with 200 to everyone"}
+
+Stable finding IDs (``stable_finding_id``) make marks stick across
+runs. False-positive marks suppress repeat probing of the exact
+(test class, endpoint, parameter) triple; true-positive marks are
+retained as evidence and surfaced in notes. Unknown verdicts and
+malformed lines are ignored (never fail a scan).
+"""
+from pathlib import Path
+from typing import Dict, List, Optional, Set, Tuple
+
+from ..logging_setup import get_logger
+
+log = get_logger("reviews")
+
+REVIEW_TRUE = "true_positive"
+REVIEW_FALSE = "false_positive"
+_KNOWN_VERDICTS = (REVIEW_TRUE, REVIEW_FALSE)
+
+# Triple key: (test class, normalized endpoint URL, parameter name).
+Triple = Tuple[str, str, str]
+
+# Authorization-family classes are one gap for suppression purposes:
+# operators write idor/bola/authz interchangeably, and finding sources
+# vary the same way (idor-swap, graphql-bola, authz-matrix).
+_AUTHZ_FAMILY = frozenset({"idor", "bola", "authz", "authz_matrix"})
+
+
+def canonical_test_class(name) -> str:
+    """One vocabulary for triple matching (authz family merged)."""
+    norm = _norm(name)
+    if norm in _AUTHZ_FAMILY:
+        return "authz"
+    return norm
+
+
+def canonical_triple_url(url) -> str:
+    """Triple endpoint key: normalized URL without query/fragment.
+
+    Operators write bare endpoints while findings carry concrete
+    query strings — both must meet on scheme://host/path.
+    """
+    from urllib.parse import urlsplit, urlunsplit
+    try:
+        parts = urlsplit(str(url or "").strip())
+        netloc = parts.netloc.rsplit("@", 1)[-1].lower()
+        scheme = (parts.scheme or "http").lower()
+        path = parts.path or "/"
+        return urlunsplit((scheme, netloc, path, "", ""))
+    except (TypeError, ValueError):
+        return str(url or "")
+
+
+def _norm(text) -> str:
+    return str(text or "").strip().lower()
+
+
+class ReviewIndex:
+    """Validated review marks with finding-ID and triple lookup."""
+
+    def __init__(self):
+        self.by_finding: Dict[str, Dict] = {}
+        self.triples: Set[Triple] = set()
+
+    def verdict_for_finding(self, finding_id: str) -> Optional[Dict]:
+        return self.by_finding.get(str(finding_id or ""))
+
+    def is_fp_triple(self, test_class: str, normalized_url: str,
+                     parameter: str) -> bool:
+        return (canonical_test_class(test_class),
+                canonical_triple_url(normalized_url),
+                _norm(parameter)) in self.triples
+
+    def __len__(self) -> int:
+        return len(self.by_finding)
+
+
+def load_reviews(path) -> ReviewIndex:
+    """Read reviews.jsonl; missing file → empty index (never an error)."""
+    import json
+    index = ReviewIndex()
+    p = Path(path)
+    if not p.exists():
+        return index
+    try:
+        lines = p.read_text(errors="ignore").splitlines()
+    except OSError as e:
+        log.debug("reviews unreadable %s: %s", path, e)
+        return index
+    for line in lines:
+        line = line.strip()
+        if not line:
+            continue
+        try:
+            entry = json.loads(line)
+        except ValueError:
+            log.warning("reviews: skipping malformed line")
+            continue
+        if not isinstance(entry, dict):
+            continue
+        verdict = _norm(entry.get("verdict"))
+        if verdict not in _KNOWN_VERDICTS:
+            log.warning("reviews: skipping unknown verdict %r",
+                        entry.get("verdict"))
+            continue
+        finding_id = str(entry.get("finding_id", "") or "").strip()
+        reason = str(entry.get("reason", "") or "")[:500]
+        record = {"verdict": verdict, "reason": reason}
+        if finding_id:
+            index.by_finding[finding_id] = record
+        triple = (canonical_test_class(entry.get("test_class")),
+                  canonical_triple_url(entry.get("endpoint", "")),
+                  _norm(entry.get("parameter")))
+        if verdict == REVIEW_FALSE and triple[0] and triple[1]:
+            index.triples.add(triple)
+    return index
+
+
+def resolve_finding_triples(index: ReviewIndex,
+                            findings: List) -> int:
+    """Link finding-ID marks to triples via a findings list.
+
+    Lets operators mark by finding ID alone: the triple is recovered
+    from the finding's source/class, endpoint, and parameter. Returns
+    the number of newly linked FP triples.
+    """
+    added = 0
+    for fid, record in index.by_finding.items():
+        if record.get("verdict") != REVIEW_FALSE:
+            continue
+        for f in findings or []:
+            try:
+                if getattr(f, "id", None) != fid:
+                    continue
+                triple = (canonical_test_class(finding_test_class(f)),
+                          canonical_triple_url(
+                              getattr(f, "endpoint_url", "") or
+                              getattr(f, "matched_at", "")),
+                          _norm(getattr(f, "parameter", "")))
+            except Exception:
+                continue
+            if triple[0] and triple[1] and triple not in index.triples:
+                index.triples.add(triple)
+                added += 1
+    return added
+
+
+def finding_test_class(finding) -> str:
+    """Best-effort finding → test-class mapping for triple keys."""
+    source = str(getattr(finding, "source", "") or "").lower()
+    for alias, mapped in (("differential", "authz"),
+                          ("second-order", "xss"),
+                          ("second_order", "xss"),
+                          ("oast", "ssrf")):
+        if alias in source:
+            return mapped
+    for candidate in ("sqli", "xss", "ssrf", "ssti", "xxe",
+                      "idor", "bola", "authz", "cors", "redirect",
+                      "traversal", "cache"):
+        if candidate in source:
+            return candidate
+    tags = [str(t).lower() for t in
+            (getattr(finding, "tags", None) or [])]
+    for candidate in ("sqli", "xss", "ssrf", "ssti", "xxe",
+                      "idor", "bola", "authz", "cors", "redirect",
+                      "traversal", "cache"):
+        if candidate in tags:
+            return candidate
+    return ""

@@ -22,7 +22,8 @@ def render_html(output: Path, target: str, findings: List[Finding],
                 coverage: Optional[Dict] = None,
                 safety_info: Optional[Dict] = None,
                 leads: Optional[List[Dict]] = None,
-                burp: Optional[Dict] = None) -> None:
+                burp: Optional[Dict] = None,
+                changes: Optional[Dict] = None) -> None:
     min_rank = MIN_RANK.get(min_severity, 0)
     findings = [f for f in findings
                 if MIN_RANK.get(f.severity, 4) >= min_rank]
@@ -48,6 +49,7 @@ def render_html(output: Path, target: str, findings: List[Finding],
         _section("🟧 Candidates", candidates, output_dir),
         _section("🟦 Observations & Inconclusive", informational,
                  output_dir),
+        _changes_block(changes),
         _leads_block(leads),
         _burp_block(burp),
         _hypotheses_block(hypotheses),
@@ -74,6 +76,7 @@ code{font-size:11px;color:#9aa0a6;background:#0b0d10;padding:2px 4px;border-radi
 .status.strong{background:#3a2a14;color:#ffbb66}
 .status.hypothesis{background:#122a3a;color:#66c6ff}
 tr.detail td{background:#14171d;padding:10px 16px;border-bottom:1px solid #1f232b}
+tr.group td{background:#1f232b;color:#ffbb66;font-weight:bold}
 .detail .impact{color:#ffd28a;margin-bottom:8px}
 .detail ol{margin:4px 0 8px 22px;padding:0}
 .detail li{margin:2px 0;font-size:13px}
@@ -121,15 +124,57 @@ def _metrics_block(m: Dict) -> str:
     return f"<div class='summary'>{boxes}</div>"
 
 
+def _collapse_key(f: Finding):
+    """Group key for combinatorial findings (swap/matrix replays).
+
+    One finding per (victim × tester) explodes the report; grouping by
+    (source, endpoint, method, parameter) keeps every evidence trail
+    while triaging as one authorization gap.
+    """
+    from ..discovery.url_normalizer import normalize_url
+    try:
+        norm = normalize_url(f.endpoint_url or f.matched_at or "")
+    except Exception:
+        norm = f.endpoint_url or f.matched_at or ""
+    return (f.source or "", norm, (f.method or "GET").upper(),
+            f.parameter or "")
+
+
+def _group_header(key, members: List[Finding]) -> str:
+    source, norm, method, param = key
+    testers = sorted({str(getattr(m, "identity", "") or "")
+                      for m in members} - {""})
+    objects = {str(getattr(m, "resource_key", "") or "")
+               for m in members} - {""}
+    detail = (f"testers: {', '.join(testers)}"
+              if testers else f"{len(members)} finding(s)")
+    if objects:
+        detail += f" · objects: {len(objects)}"
+    return (
+        f"<tr class='group'><td colspan='5'>"
+        f"↳ {len(members)}× {_h.escape(source)} — "
+        f"<code>{_h.escape(method)} {_h.escape(norm)}</code>"
+        f"{f' :: <code>{_h.escape(param)}</code>' if param else ''}"
+        f"<br><small>{_h.escape(detail)} — one gap, "
+        f"per-object evidence below</small></td></tr>")
+
+
 def _section(title: str, findings: List[Finding],
              output_dir: Optional[Path] = None) -> str:
     if not findings:
         return f"<h2>{title} (0)</h2><p>None.</p>"
-    rows = "".join(_finding_row(f, output_dir) for f in findings)
+    groups: Dict[tuple, List[Finding]] = {}
+    for f in findings:
+        groups.setdefault(_collapse_key(f), []).append(f)
+    parts = []
+    for key, members in groups.items():
+        if len(members) > 1:
+            parts.append(_group_header(key, members))
+        parts.extend(_finding_row(m, output_dir) for m in members)
     return (f"<h2>{title} ({len(findings)})</h2>"
             f"<table><tr><th>Severity</th><th>Name</th>"
             f"<th>Endpoint</th><th>Status</th>"
-            f"<th>Reproduction</th></tr>{rows}</table>")
+            f"<th>Reproduction</th></tr>{''.join(parts)}</table>")
 
 
 def _coverage_block(coverage: Optional[Dict]) -> str:
@@ -182,6 +227,40 @@ def _safety_block(safety_info: Optional[Dict]) -> str:
             _h.escape("; ".join(safety_info["refusal"])) + "</em></p>"
     return (f"<h2>🛡 Authorization &amp; Safety</h2>"
             f"<table>{rows}</table>{refused}")
+
+
+def _changes_block(changes: Optional[Dict]) -> str:
+    """Attack-surface change since the previous finished run."""
+    if not changes or changes.get("baseline"):
+        return ""
+    rows = []
+    for item in changes.get("new", []) or []:
+        rows.append(
+            f"<tr><td class='sev'>new</td>"
+            f"<td><code>{_h.escape(item.get('method', ''))} "
+            f"{_h.escape(item.get('normalized_url', ''))}</code></td>"
+            f"<td>{_h.escape(item.get('endpoint_type', ''))}</td></tr>")
+    for item in changes.get("changed", []) or []:
+        rows.append(
+            f"<tr><td class='sev'>changed</td>"
+            f"<td><code>{_h.escape(item.get('method', ''))} "
+            f"{_h.escape(item.get('url', ''))}</code></td>"
+            f"<td>params/type/content changed since run "
+            f"{_h.escape(str(changes.get('against_run', '')))}</td></tr>")
+    for item in changes.get("gone", []) or []:
+        rows.append(
+            f"<tr><td class='sev'>gone</td>"
+            f"<td><code>{_h.escape(item.get('method', ''))} "
+            f"{_h.escape(item.get('normalized_url', ''))}</code></td>"
+            f"<td>—</td></tr>")
+    if not rows:
+        return ""
+    return (f"<h2>🔄 Surface changes (vs run "
+            f"{_h.escape(str(changes.get('against_run', '')))})</h2>"
+            f"<p><em>New or changed endpoints deserve first testing "
+            f"priority on the next run.</em></p>"
+            f"<table><tr><th>Change</th><th>Endpoint</th>"
+            f"<th>Detail</th></tr>{''.join(rows)}</table>")
 
 
 def _leads_block(leads: Optional[List[Dict]]) -> str:
