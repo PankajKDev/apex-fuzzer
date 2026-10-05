@@ -5,6 +5,8 @@ Fake providers/HTTP only, except where noted. No network.
 from types import SimpleNamespace
 
 from main.models import Endpoint, Parameter
+from main.stages.validation import ProbeControls
+from main.stages.validation.second_order import second_order_ssrf_probe
 from main.validation import ssrf_bypass as bypass_mod
 from main.validation.oast import probe_endpoint
 
@@ -412,9 +414,10 @@ def test_stored_trigger_reflection_recorded(tmp_path):
                    method="POST")
     trigger = _endpoint("https://t.com/api/import/status",
                         [], "page")
-    findings = orch._second_order_ssrf_probe(
+    findings = second_order_ssrf_probe(
         [ep, trigger], EvidenceStore(tmp_path / "proofs"), Metrics(),
         BudgetTracker(cfg), CoverageTracker(), Http(),
+        orch.cfg, orch.scope, ProbeControls.from_orchestrator(orch),
         [Identity(name="operator", auth_headers={"Cookie": "s=1"})],
         provider)
     assert len(findings) == 1

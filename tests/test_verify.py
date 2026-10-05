@@ -14,6 +14,9 @@ from main.verify.assertions import (
     matching_assertions)
 from main.models import Endpoint, Parameter, Identity
 from main.config import Config
+from main.stages.validation import ProbeControls
+from main.stages.validation.business import business_logic_probe
+from main.stages.validation.race import race_probe
 
 
 class FakeResp:
@@ -276,10 +279,9 @@ def test_business_verified_upgrade_and_metrics():
     orch = Orchestrator(cfg, out, profile=get_profile("standard"))
     eps = [_ep("https://t.com/cart?qty=2", [("qty", "2")])]
     m = Metrics()
-    found = orch._business_logic_probe(
+    found = business_logic_probe(
         eps, EvidenceStore(out / "proofs"), m, BudgetTracker(cfg),
-        CoverageTracker(), _biz_http(store),
-        [Identity(name="user_a")])
+        CoverageTracker(), _biz_http(store), orch.cfg, orch.scope, ProbeControls.from_orchestrator(orch), [Identity(name="user_a")])
     assert len(found) == 1
     f = found[0]
     assert f.validation_status == "confirmed"
@@ -303,10 +305,9 @@ def test_business_refuted_downgrade():
     store = {"qty": 2}  # clean re-read: effect did NOT persist
     orch = Orchestrator(cfg, out, profile=get_profile("standard"))
     eps = [_ep("https://t.com/cart?qty=2", [("qty", "2")])]
-    found = orch._business_logic_probe(
+    found = business_logic_probe(
         eps, EvidenceStore(out / "proofs"), Metrics(),
-        BudgetTracker(cfg), CoverageTracker(), _biz_http(store),
-        [Identity(name="user_a")])
+        BudgetTracker(cfg), CoverageTracker(), _biz_http(store), orch.cfg, orch.scope, ProbeControls.from_orchestrator(orch), [Identity(name="user_a")])
     assert len(found) == 1
     assert found[0].validation_status == "inconclusive"
     assert "not persisted" in found[0].name
@@ -344,9 +345,9 @@ def test_race_idempotency_upgrade():
     ep.body_parameters.append(P(name="idem_key", location="body",
                                 source=["test"], sample_value="K1"))
     m = Metrics()
-    found = orch._race_probe(
+    found = race_probe(
         [ep], EvidenceStore(out / "proofs"), m, BudgetTracker(cfg),
-        CoverageTracker(), H(), [Identity(name="user_a")])
+        CoverageTracker(), H(), orch.cfg, orch.scope, ProbeControls.from_orchestrator(orch), [Identity(name="user_a")])
     assert found and found[0].validation_status == "confirmed"
     assert "verified-effect" in found[0].tags
     assert m.effects_verified == 1
@@ -378,9 +379,8 @@ def test_race_idempotency_profile_skips_without_key():
     ep = _ep("https://t.com/make", [], "api")
     ep.body_parameters.append(P(name="name", location="body",
                                 source=["test"], sample_value="x"))
-    found = orch._race_probe(
+    found = race_probe(
         [ep], EvidenceStore(out / "proofs"), Metrics(),
-        BudgetTracker(cfg), (cov := CoverageTracker()), H(),
-        [Identity(name="user_a")])
+        BudgetTracker(cfg), (cov := CoverageTracker()), H(), orch.cfg, orch.scope, ProbeControls.from_orchestrator(orch), [Identity(name="user_a")])
     assert found == []
     assert cov.summary()["race"] == "untestable"

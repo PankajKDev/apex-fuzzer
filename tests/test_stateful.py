@@ -13,6 +13,9 @@ from main.logic.race import run_race
 from main.budgets import BudgetExceeded
 from main.models import Identity, Endpoint, Parameter, Finding
 from main.config import Config
+from main.stages.validation import ProbeControls
+from main.stages.validation.business import business_logic_probe
+from main.stages.validation.race import race_probe
 
 
 class FakeResp:
@@ -360,9 +363,9 @@ def test_single_use_profile_requires_sequential_replay_verification():
     orch = Orchestrator(cfg, out, profile=get_profile("standard"))
     ep = _ep("https://t.com/redeem", [], ["token"], "api")
     ep.body_parameters[0].sample_value = "single-use-1"
-    found = orch._race_probe(
+    found = race_probe(
         [ep], EvidenceStore(out / "proofs"), Metrics(),
-        BudgetTracker(cfg), CoverageTracker(), H(), [_ident("user_a")])
+        BudgetTracker(cfg), CoverageTracker(), H(), orch.cfg, orch.scope, ProbeControls.from_orchestrator(orch), [_ident("user_a")])
     assert found and found[0].validation_status == "confirmed"
     assert found[0].raw["verification"]["status"] == "verified"
 
@@ -401,9 +404,9 @@ def test_race_inventory_profile_verifies_negative_stock():
     orch = Orchestrator(cfg, out, profile=get_profile("standard"))
     ep = _ep("https://t.com/api/reserve", [], ["sku"], "api")
     metrics, coverage = Metrics(), CoverageTracker()
-    found = orch._race_probe(
+    found = race_probe(
         [ep], EvidenceStore(out / "proofs"), metrics,
-        BudgetTracker(cfg), coverage, H(), [_ident("user_a")])
+        BudgetTracker(cfg), coverage, H(), orch.cfg, orch.scope, ProbeControls.from_orchestrator(orch), [_ident("user_a")])
     assert found and found[0].validation_status == "confirmed"
     assert found[0].result_status == "verified_effect"
     assert found[0].raw["verification"]["evidence"]["before"] == 2
@@ -470,10 +473,9 @@ def test_business_probe_end_to_end():
     cfg = Config()
     eps = [_ep("https://t.com/cart?qty=2", [("qty", "2")])]
     m, cov = Metrics(), CoverageTracker()
-    found = orch._business_logic_probe(
+    found = business_logic_probe(
         eps, EvidenceStore(out / "proofs"), m, BudgetTracker(cfg),
-        cov, _biz_http(),
-        [_ident("user_a", headers={"Cookie": "s=A"})])
+        cov, _biz_http(), orch.cfg, orch.scope, ProbeControls.from_orchestrator(orch), [_ident("user_a", headers={"Cookie": "s=A"})])
     assert any(f.source == "business-logic" for f in found)
     assert cov.summary()["business_logic"] == "candidate"
     assert m.business_logic_candidates >= 1
@@ -490,10 +492,9 @@ def test_business_probe_no_params_untestable():
     from main.budgets import BudgetTracker
     from main.validation.evidence import EvidenceStore
     cov = CoverageTracker()
-    found = orch._business_logic_probe(
+    found = business_logic_probe(
         [_ep("https://t.com/about")], EvidenceStore(out / "proofs"),
-        Metrics(), BudgetTracker(Config()), cov, _biz_http(),
-        [_ident("anonymous")])
+        Metrics(), BudgetTracker(Config()), cov, _biz_http(), orch.cfg, orch.scope, ProbeControls.from_orchestrator(orch), [_ident("anonymous")])
     assert found == []
     assert cov.summary()["business_logic"] == "untestable"
 
@@ -519,9 +520,9 @@ def test_race_probe_end_to_end():
                                         source=["html"],
                                         sample_value="X"))
     m, cov = Metrics(), CoverageTracker()
-    found = orch._race_probe(
+    found = race_probe(
         [ep], EvidenceStore(out / "proofs"), m, BudgetTracker(cfg),
-        cov, H(), [_ident("user_a")])
+        cov, H(), orch.cfg, orch.scope, ProbeControls.from_orchestrator(orch), [_ident("user_a")])
     assert any(f.source == "race" for f in found)
     assert cov.summary()["race"] == "candidate"
     assert m.race_candidates == 1

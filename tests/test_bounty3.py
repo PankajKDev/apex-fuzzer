@@ -12,6 +12,9 @@ from main.authorization.access_tests import (
 from main.validation.second_order import (
     make_canary, classify_context, inject_canary, find_renders,
     make_ssrf_canary, second_order_ssrf_fields, INERT_TAG)
+from main.stages.validation import ProbeControls
+from main.stages.validation.second_order import (
+    second_order_probe, second_order_ssrf_probe)
 from main.validation.oast import probe_endpoint
 from main.budgets import BudgetExceeded
 from main.models import Identity, Endpoint, Parameter, Finding
@@ -486,10 +489,9 @@ def test_second_order_probe_finds_stored():
     eps = [_ep("https://t.com/comment", ["body"], "page"),
            _ep("https://t.com/list", [], "page")]
     m, cov = Metrics(), CoverageTracker()
-    found = orch._second_order_probe(
+    found = second_order_probe(
         eps, EvidenceStore(out / "proofs"), m, BudgetTracker(cfg),
-        cov, _so_http({}),
-        [Identity(name="user_a", auth_headers={"Cookie": "s=A"})])
+        cov, _so_http({}), orch.cfg, orch.scope, ProbeControls.from_orchestrator(orch), [Identity(name="user_a", auth_headers={"Cookie": "s=A"})])
     assert len(found) == 1
     f = found[0]
     assert f.source == "second-order"
@@ -515,11 +517,11 @@ def test_second_order_encoded_is_negative():
 
     cfg = Config()
     cov = CoverageTracker()
-    found = orch._second_order_probe(
+    found = second_order_probe(
         [_ep("https://t.com/c", ["b"], "page"),
          _ep("https://t.com/list", [], "page")],
         EvidenceStore(out / "proofs"), Metrics(), BudgetTracker(cfg),
-        cov, H(), [Identity(name="anonymous")])
+        cov, H(), orch.cfg, orch.scope, ProbeControls.from_orchestrator(orch), [Identity(name="anonymous")])
     assert found == []
     assert cov.summary()["second_order"] == "tested_negative"
 
@@ -531,10 +533,9 @@ def test_second_order_no_forms_untestable():
     from main.budgets import BudgetTracker
     from main.validation.evidence import EvidenceStore
     cov = CoverageTracker()
-    found = orch._second_order_probe(
+    found = second_order_probe(
         [_ep("https://t.com/api/x")], EvidenceStore(out / "proofs"),
-        Metrics(), BudgetTracker(Config()), cov, _so_http({}),
-        [Identity(name="anonymous")])
+        Metrics(), BudgetTracker(Config()), cov, _so_http({}), orch.cfg, orch.scope, ProbeControls.from_orchestrator(orch), [Identity(name="anonymous")])
     assert found == []
     assert cov.summary()["second_order"] == "untestable"
 
@@ -741,9 +742,10 @@ def test_second_order_ssrf_correlates_stored_callback(tmp_path):
     ep.method = "POST"
     trigger = _ep("https://t.com/admin/jobs", [], "page")
     metrics, coverage = Metrics(), CoverageTracker()
-    findings = orch._second_order_ssrf_probe(
+    findings = second_order_ssrf_probe(
         [ep, trigger], EvidenceStore(tmp_path / "proofs"), metrics,
         BudgetTracker(cfg), coverage, Http(),
+        orch.cfg, orch.scope, ProbeControls.from_orchestrator(orch),
         [Identity(name="operator", auth_headers={"Cookie": "s=1"})],
         provider)
     assert len(findings) == 1
@@ -759,9 +761,10 @@ def test_second_order_ssrf_correlates_stored_callback(tmp_path):
 
     provider.emit = False
     negative_metrics, negative_coverage = Metrics(), CoverageTracker()
-    not_confirmed = orch._second_order_ssrf_probe(
+    not_confirmed = second_order_ssrf_probe(
         [ep, trigger], EvidenceStore(tmp_path / "proofs-no-hit"),
         negative_metrics, BudgetTracker(cfg), negative_coverage, Http(),
+        orch.cfg, orch.scope, ProbeControls.from_orchestrator(orch),
         [Identity(name="operator")], provider)
     assert not_confirmed == []
     assert negative_coverage.summary()["second_order_ssrf"] == "inconclusive"
