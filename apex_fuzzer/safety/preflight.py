@@ -282,11 +282,27 @@ def render_plan_text(plan: Dict) -> str:
         lines.append(f"  (inventory: {plan['inventory_endpoints']} "
                      f"known endpoints)")
     for p in plan["plans"]:
-        lines.append(f"  cost {p['module']:<15} total={p['total']} "
+        lines.append(f"  reservation {p['module']:<15} total={p['total']} "
                      f"(base={p['baseline']} mut={p['mutation']} "
                      f"burst={p['concurrency']} verify={p['verification']})")
     lines.append(f"  TOTAL planned stateful requests: "
                  f"{plan['total_planned']}")
+    stateful = sum(p["mutation"] + p["concurrency"] + p["verification"]
+                   for p in plan["plans"])
+    lines.append(f"  of which state-changing (mutation/burst/verify): "
+                 f"~{stateful} (read-only discovery and crawling excluded)")
+    if plan["excluded_hosts"]:
+        lines.append("  scope excluded hosts: " +
+                     ", ".join(plan["excluded_hosts"]))
+    if plan["excluded_paths"]:
+        lines.append("  scope excluded paths: " +
+                     ", ".join(plan["excluded_paths"]))
+    if not plan["strict"] and plan["gated_modules"]:
+        lines.append("  non-strict advisory: enabling --strict would "
+                     "additionally require --auth-ref, approved "
+                     "domains/modules, a validity window, and "
+                     "--ack-state-change for: " +
+                     ", ".join(plan["gated_modules"]))
     if not plan["budget_fit"]:
         lines.append("  BUDGET MISMATCH: " +
                      "; ".join(plan["budget_fit_reasons"]))

@@ -38,6 +38,8 @@ class SwapResult:
     generic_response: bool = False
     owner_snippet: str = ""
     tester_snippet: str = ""
+    # tester hit edge/bot-wall infrastructure instead of the app
+    edge_denied: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {"endpoint_url": self.endpoint_url, "param": self.param,
@@ -49,7 +51,8 @@ class SwapResult:
                 "markers_matched": list(self.markers_matched),
                 "generic_response": self.generic_response,
                 "owner_snippet": self.owner_snippet,
-                "tester_snippet": self.tester_snippet}
+                "tester_snippet": self.tester_snippet,
+                "edge_denied": self.edge_denied}
 
 
 def _with_param(url: str, name: str, value: str) -> str:
@@ -145,6 +148,13 @@ def swap_ids(http, harvested, tester, timeout: int = 10,
         comparison = {"level": "medium", "matched": [],
                       "detail": "shape match stands alone"}
         tester_snippet = ""
+        from ..validation.differential import looks_like_edge_deny
+        try:
+            edge_denied = looks_like_edge_deny(
+                norm.get("status", 0), r.text or "",
+                getattr(r, "headers", None))
+        except Exception:
+            edge_denied = False
         if match:
             comparison = compare_access(
                 markers, r.text or "",
@@ -156,6 +166,11 @@ def swap_ids(http, harvested, tester, timeout: int = 10,
                 tester_snippet = ""
             if comparison["level"] == "none":
                 match = False
+            elif edge_denied:
+                match = False
+                comparison = {"level": "none", "matched": [],
+                              "detail": "tester hit edge/bot-wall "
+                                        "infrastructure, not the app"}
         res = SwapResult(
             endpoint_url=url, param=h.param, victim_value=h.value,
             owner=h.owner, owner_tenant=h.owner_tenant,
@@ -165,7 +180,8 @@ def swap_ids(http, harvested, tester, timeout: int = 10,
             generic_response=comparison["level"] == "none" and
             "generic" in comparison.get("detail", ""),
             owner_snippet=getattr(h, "snippet", "") or "",
-            tester_snippet=tester_snippet)
+            tester_snippet=tester_snippet,
+            edge_denied=bool(edge_denied))
         if match:
             if tester_tenant and h.owner_tenant and \
                     tester_tenant != h.owner_tenant:

@@ -106,9 +106,13 @@ apex-fuzzer --update        # installs nuclei, httpx, katana, waybackurls,
 apex-fuzzer --doctor        # verify every tool is present
 ```
 
-`--doctor` reports each binary as present (with version) or MISSING. Every
-stage that depends on a missing binary logs the skip and continues — see
-[Tool dependency matrix](#tool-dependency-matrix).
+`--doctor` reports each binary as present (with version), present
+with version detection unsupported, MISSING, or present-but-failing
+self-check, always with its path. Every stage that depends on a missing
+binary logs the skip and continues — see
+[Tool dependency matrix](#tool-dependency-matrix). Invalid configuration
+blocks startup before any network activity (see `--config-check`); unknown
+config keys warn instead of hiding typos.
 
 Optional extras:
 
@@ -172,7 +176,8 @@ Results land in `output/<host>/`: `report.html`, `findings.jsonl`,
 `attack_chains.jsonl`, `proofs/`.
 
 For full operating instructions, see the
-[user guide](docs/user-guide.md). For a strict, bounded bounty workflow
+[user guide](docs/user-guide.md), or walk the fictional end-to-end
+[tutorial](docs/tutorial.md). For a strict, bounded bounty workflow
 with zero-network preflight, see
 [Authorized bounty scan workflow](docs/bounty-scan.md).
 For class-by-class coverage and the prioritized tool roadmap, see the
@@ -214,6 +219,8 @@ in [sample artifacts](docs/sample-artifacts/).
 --output OUTPUT         base output dir (default: output)
 --profile {passive,standard,deep,api,authenticated,validation}
 --doctor                check tool availability, exit 0/1
+--config-check          validate configuration and report the effective
+                        plan without sending any request
 --update                install/update external tools and templates
 -v, --verbose           debug logging
 ```
@@ -261,6 +268,8 @@ scan:
   timeout: 300          # per-tool subprocess budget (seconds)
   http_timeout: 10      # direct requests via _HTTPClient
   jitter_between_targets: 2
+  hacker_header: ''     # X-HackerOne value on direct requests (empty off)
+  user_agent: ''          # override for direct requests (empty = honest default)
 
 discovery:
   javascript: true
@@ -277,6 +286,10 @@ discovery:
   arjun_stable: false             # --stable: 1 thread, slower, steadier
   arjun_require_existing_param: false  # only mine endpoints with ≥1 param
   linkfinder: false               # passive JS param extraction (needs binary)
+  authenticated_recon: false  # repeat live crawlers + mapping fetches as
+                              # the first authenticated identity (Cookie/
+                              # Authorization only); archives never take
+                              # sessions
 
 validation:
   enabled: false
@@ -1363,9 +1376,13 @@ below every cap.
   every unmet condition and exits **2** (0 = completed, 1 = failure).
   Default scans are unchanged; strict adds gates only.
 - **Dry-run** (`--dry-run`): resolves modules, impact level, and
-  authorization, then prints worst-case request costs per stateful
-  module (upper bounds from config caps, or concrete counts from a
-  prior `endpoints.jsonl`) plus budget fit — sending zero requests.
+  authorization, then prints per-module reservations, state-changing
+  request estimates separately, scope exclusions, budget fit, and
+  refusals (or non-strict advisories) — sending zero requests.
+  `--config-check` validates the configuration alone with the same
+  zero-network guarantee: effective profile, enabled/disabled modules
+  with reasons, active validators, OAST/auth/AI/browser/scope/budget/
+  safety status.
 - **Cost reservation**: each sweep reserves its worst-case plan
   (`RequestPlan`: baseline + mutation + burst + verification) before
   firing; unaffordable sweeps record `blocked`, never `negative`.

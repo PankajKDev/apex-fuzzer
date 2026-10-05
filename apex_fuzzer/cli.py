@@ -7,7 +7,7 @@ from colorama import Fore, Style, init as _ca_init
 from . import __version__
 from .config import Config, apply_cli_overrides
 from .logging_setup import setup_logging, get_logger
-from .shell import which, tool_version
+from .shell import which, run
 from .orchestrator import Orchestrator
 from .profiles import get as get_profile
 
@@ -30,6 +30,9 @@ def build_parser() -> argparse.ArgumentParser:
                                 add_help=False)
     p.add_argument("-d", "--domain", help="Single domain")
     p.add_argument("-f", "--file", help="File with one target per line")
+    p.add_argument("--seed-urls", default=None,
+                   help="File with manual seed URLs (one per line), "
+                        "merged into discovery for every target")
     p.add_argument("-c", "--config", help="Path to config.yaml")
     p.add_argument("--fast", action="store_true")
     p.add_argument("--deep", action="store_true")
@@ -91,25 +94,58 @@ def build_parser() -> argparse.ArgumentParser:
                             "validation"],
                    help="Testing profile")
     p.add_argument("--doctor", action="store_true")
+    p.add_argument("--config-check", action="store_true",
+                   help="Validate configuration and report the effective "
+                        "plan without sending any request")
     p.add_argument("--update", action="store_true")
     p.add_argument("-v", "--verbose", action="store_true")
     p.add_argument("-h", "--help", action="help")
     return p
 
 
+def describe_tool(name: str, version_args=None) -> str:
+    """Four-state tool report: verified, unversioned, missing, or broken.
+
+    Version-probe failure never implies a broken tool: a passing `--help`
+    (or equivalent harmless probe) reports the install as present with
+    version detection unsupported. Network-free: local subprocess only.
+    """
+    path = which(name) or ""
+    if not path:
+        return "MISSING"
+    probe = run([name] + list(version_args or ["--version"]), timeout=10)
+    if probe.ok:
+        first = ((probe.stdout or probe.stderr) or "").strip().splitlines()
+        detail = first[0][:120] if first else "ok"
+        return f"present at {path} ({detail})"
+    fallback = run([name, "--help"], timeout=10)
+    if fallback.ok:
+        return (f"present at {path} (version detection unsupported; "
+                f"help probe passed)")
+    return (f"present at {path} BUT FAILED its self-check "
+            f"(not usable until fixed)")
+
+
 def doctor():
     import logging
     setup_logging(logging.INFO)
     log = get_logger("doctor")
+    # per-tool version probes: most tools answer --version, but some
+    # (e.g. subzy) only support a harmless help subcommand. A failed
+    # version probe is never treated as proof the tool is broken.
+    version_args = {
+        "subzy": ["run", "--help"],
+        "tko-subs": ["-h"],
+        "linkfinder": ["--help"],
+        "arjun": ["--help"],
+    }
     tools = ["nuclei", "httpx", "katana", "waybackurls", "gauplus",
              "hakrawler", "uro", "subzy", "sqlmap", "dalfox", "go",
              "arjun", "tko-subs", "linkfinder", "interactsh-client"]
     missing = 0
     for t in tools:
-        if which(t):
-            log.info("%s — %s", t, tool_version(t) or "ok")
-        else:
-            log.warning("%s — MISSING", t)
+        log.info("%s — %s", t, describe_tool(t, version_args.get(t)))
+        if not which(t):
             missing += 1
     ps = Path.home() / "ParamSpider" / "paramspider.py"
     if ps.exists():
@@ -125,7 +161,119 @@ def doctor():
     problems = doctor_config()
     for p in problems:
         log.warning("config: %s", p)
+    try:
+        notes = Config.load("config.yaml").validate()["warnings"]
+    except Exception:
+        notes = []
+    for note in notes:
+        log.info("config note: %s", note)
     sys.exit(0 if missing == 0 and not problems else 1)
+
+
+def config_check_report(cfg, profile_name: str) -> str:
+    """Zero-network configuration report (see --config-check)."""
+    import os
+    from .profiles import get as get_profile
+    from .safety.preflight import resolve_modules
+    lines = [f"Configuration check (profile: {profile_name})"]
+    result = cfg.validate()
+    for message in result["errors"]:
+        lines.append(f"  {message}")
+    for message in result["warnings"]:
+        lines.append(f"  {message}")
+    if not result["errors"] and not result["warnings"]:
+        lines.append("  configuration valid, no diagnostics")
+    try:
+        profile = get_profile(profile_name)
+    except Exception as exc:
+        return "\n".join(lines + [f"  ERROR: unknown profile: {exc}"])
+    states = resolve_modules(cfg, profile)
+    on = [s for s in states if s.enabled]
+    off = [s for s in states if not s.enabled]
+    lines.append(f"  enabled modules ({len(on)}): " +
+                 (", ".join(f"{s.name}[{s.level}]" for s in on) or "none"))
+    lines.append("  disabled modules:")
+    for s in off:
+        lines.append(f"    - {s.name}: {s.reason}")
+    stateful = [s.name for s in on if s.level in ("stateful", "burst")]
+    claiming = [s.name for s in on if s.level == "claiming"]
+    lines.append("  state-changing modules: " +
+                 (", ".join(stateful) or "none enabled"))
+    if claiming:
+        lines.append("  external claiming modules: " + ", ".join(claiming))
+    if cfg.validation.enabled or getattr(profile, "run_validation", False):
+        validators = []
+        if which("sqlmap"):
+            validators.append("sqlmap")
+        if which("dalfox"):
+            validators.append("dalfox")
+        lines.append("  active validators available: " +
+                     (", ".join(validators) or
+                      "none (sqlmap/dalfox missing)"))
+    oast_ready = []
+    if cfg.oast.callback_url:
+        oast_ready.append(f"static collector {cfg.oast.callback_url}")
+    if which("interactsh-client"):
+        oast_ready.append("interactsh-client present")
+    lines.append("  OAST: " + ("; ".join(oast_ready) or
+                               "no provider configured/present"))
+    contexts = list(getattr(cfg.auth, "contexts", []) or [])
+    authed = [c.name for c in contexts if c.name != "anonymous"
+              and dict(getattr(c, "headers", None) or {})]
+    lines.append(f"  auth contexts: {len(contexts)} configured, "
+                 f"{len(authed)} with credentials "
+                 f"({', '.join(authed) or 'anonymous only'})")
+    if getattr(cfg.auth.login, "enabled", False):
+        missing_pw = [i.name for i in
+                      (cfg.auth.login.identities or [])
+                      if not os.environ.get(i.password_env or "", "")]
+        lines.append("  login minting: " +
+                     ("missing passwords for: " + ", ".join(missing_pw)
+                      if missing_pw else "password env vars present"))
+    if cfg.ai.enabled:
+        import os as _os
+        keyed = bool(_os.environ.get("GEMINI_API_KEY") or
+                     _os.environ.get("GROQ_API_KEY"))
+        lines.append(f"  AI: provider={cfg.ai.provider} model={cfg.ai.model} "
+                     f"credentials={'present' if keyed else 'MISSING'}")
+    else:
+        lines.append("  AI: disabled")
+    try:
+        from .browser.browser import playwright_available
+        browser_ok = playwright_available()
+    except Exception:
+        browser_ok = False
+    browser_state = ("Playwright importable" if browser_ok else
+                     "Playwright NOT importable (browser stages will skip)")
+    lines.append(f"  browser: {browser_state}")
+    scope = cfg.scope
+    if scope.allowed_domains:
+        lines.append("  scope allowlist: " +
+                     ", ".join(scope.allowed_domains))
+    else:
+        lines.append("  scope allowlist: (empty — first target auto-seeds)")
+    if scope.excluded_hosts:
+        lines.append("  scope excluded hosts: " +
+                     ", ".join(scope.excluded_hosts))
+    if scope.excluded_paths:
+        lines.append("  scope excluded paths: " +
+                     ", ".join(scope.excluded_paths))
+    lines.append(f"  budgets: {cfg.budgets.requests_per_host}/host, "
+                 f"{cfg.budgets.requests_per_endpoint}/endpoint, "
+                 f"max_requests={cfg.safety.max_requests}, "
+                 f"max_state_changes={cfg.safety.max_state_changes}")
+    safety = cfg.safety
+    lines.append(f"  safety: strict={'on' if safety.strict else 'off'}, "
+                 f"authorization_ref="
+                 f"{'set' if safety.authorization_ref else 'MISSING'}, "
+                 f"allow_state_change={safety.allow_state_change}, "
+                 f"module_allowlist={list(safety.allowed_modules) or 'any'}")
+    if result["errors"]:
+        lines.append(f"  RESULT: {len(result['errors'])} error(s) — "
+                     f"fix before scanning")
+    else:
+        lines.append("  RESULT: configuration usable")
+    return "\n".join(lines)
 
 
 def doctor_config(cfg=None) -> list:
@@ -137,6 +285,8 @@ def doctor_config(cfg=None) -> list:
         cfg = cfg or Config.load("config.yaml")
     except Exception as e:
         return [f"config.yaml unreadable: {e}"]
+    for message in cfg.validate()["errors"]:
+        problems.append(f"config: {message}")
     if cfg.ai.enabled:
         if cfg.ai.provider == "gemini" and not (
                 os.environ.get("GEMINI_API_KEY") or
@@ -254,6 +404,27 @@ def main():
     log = get_logger("cli")
     print(BANNER)
     cfg = apply_cli_overrides(Config.load(args.config), args)
+    if getattr(args, "config_check", False):
+        print(config_check_report(cfg, args.profile))
+        result = cfg.validate()
+        sys.exit(1 if result["errors"] else 0)
+    problems = cfg.validate()
+    for message in problems["warnings"]:
+        log.warning("%s", message)
+    if problems["errors"]:
+        for message in problems["errors"]:
+            log.error("%s", message)
+        log.error("configuration has %d error(s); fix before scanning "
+                  "(see --config-check)", len(problems["errors"]))
+        sys.exit(1)
+    try:
+        from .safety.preflight import resolve_modules
+        states = resolve_modules(cfg, get_profile(args.profile))
+        enabled = [s.name for s in states if s.enabled]
+        log.info("effective modules (%d): %s", len(enabled),
+                 ", ".join(enabled) or "discovery only")
+    except Exception as exc:
+        log.debug("module listing failed: %s", exc)
     targets = []
     if args.domain:
         targets.append(args.domain)

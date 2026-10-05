@@ -19,7 +19,12 @@ apex-fuzzer --update        # nuclei, httpx, katana, waybackurls,
 apex-fuzzer --doctor        # verify every tool is present
 ```
 
-`--doctor` reports each binary as present or MISSING. Every stage that
+`--doctor` reports each binary as present (with version), present
+with version detection unsupported, MISSING, or failing self-check.
+`--config-check` validates the whole configuration and prints the
+effective modules, validators, OAST/auth/AI/browser/scope/budget/safety
+status without sending any request; invalid values block startup before
+any network activity. Every stage that
 depends on a missing binary logs the skip and continues — a scan never
 fails because one tool is absent, but the corresponding coverage is
 lost (see §9). Optional extras:
@@ -45,6 +50,9 @@ cp .env.example .env   # then fill in
 | `HEROKU_USERNAME` / `HEROKU_API_KEY` / `HEROKU_APP_NAME` | Heroku claims |
 
 ## 2. Your first scan
+
+> New here? Read the [tutorial](tutorial.md) first: it attacks the
+> fictional shop at `acme.com` step by step, using every feature once.
 
 ```bash
 # passive discovery only: no DAST, no validation payloads

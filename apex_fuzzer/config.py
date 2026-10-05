@@ -18,6 +18,16 @@ class ScanConfig:
     timeout: int = 300
     http_timeout: int = 10
     jitter_between_targets: int = 2
+    # Value sent as the X-HackerOne header on every request made through
+    # the tool's HTTP client (e.g. researcher handle or program ref).
+    # Empty disables it. Must be a short, single-line, non-secret label:
+    # newlines (header injection) are rejected at startup validation.
+    hacker_header: str = ""
+    # Default User-Agent override for direct HTTP requests. Empty keeps
+    # the honest ApexFuzzer default. Operators may set a browser string
+    # where program rules allow it; bot-wall evasion is the operator's
+    # call, never the default.
+    user_agent: str = ""
 
 
 @dataclass
@@ -40,6 +50,11 @@ class DiscoveryConfig:
     arjun_require_existing_param: bool = False
     # LinkFinder passive JS parameter extraction (spec §1, Gaia-style)
     linkfinder: bool = False
+    # Authenticated recon: repeat the live crawlers (katana, hakrawler)
+    # carrying the first authenticated identity's Cookie/Authorization.
+    # Public archives never take sessions. Off by default: it spends
+    # budget as somebody and changes what the crawlers can see.
+    authenticated_recon: bool = False
 
 
 @dataclass
@@ -367,6 +382,14 @@ class Config:
     auth: AuthConfig = field(default_factory=AuthConfig)
     reporting: ReportingConfig = field(default_factory=ReportingConfig)
     scope: ScopeConfig = field(default_factory=ScopeConfig)
+    # Operator-supplied seed URLs (e.g. panel API routes harvested from
+    # devtools on a JS SPA). Merged into the recon pool and scope-filtered
+    # like any discovered URL. Set via --seed-urls; never scanned directly.
+    seed_urls: List[str] = field(default_factory=list)
+    # dotted `section.key` paths from the file that match no known field.
+    # Unknown content stays ignored (backward compatibility), but the
+    # paths are reported so typos do not fail silently.
+    unknown_keys: List[str] = field(default_factory=list)
 
     @classmethod
     def load(cls, path) -> "Config":
@@ -383,12 +406,23 @@ class Config:
 
         cfg = cls()
         for section, values in data.items():
+            if section == "seed_urls" and isinstance(values, list):
+                cfg.seed_urls = [str(u).strip() for u in values
+                                 if str(u).strip()]
+                continue
             if not hasattr(cfg, section) or not isinstance(values, dict):
+                if isinstance(values, dict):
+                    for key in values:
+                        cfg.unknown_keys.append(f"{section}.{key}")
+                else:
+                    cfg.unknown_keys.append(str(section))
                 continue
             target = getattr(cfg, section)
             for k, v in values.items():
                 if hasattr(target, k):
                     setattr(target, k, v)
+                else:
+                    cfg.unknown_keys.append(f"{section}.{k}")
 
         # nested dataclass parsing (the generic setattr above can't build
         # lists of AuthContext from plain dicts)
@@ -437,6 +471,237 @@ class Config:
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)
+
+    def validate(self) -> Dict[str, List[str]]:
+        """Check types, enums, ranges, and impossible combinations.
+
+        Returns {"errors": [...], "warnings": [...]}. Errors must block
+        startup; warnings are advisory. Pure: no network, no secrets.
+        """
+        from .ai.planner import (FREE_GEMINI_MODELS, FREE_GROQ_MODELS)
+        errors: List[str] = []
+        warnings: List[str] = []
+
+        def err(message: str) -> None:
+            errors.append(f"ERROR: {message}")
+
+        def warn(message: str) -> None:
+            warnings.append(f"WARNING: {message}")
+
+        def _num(value: Any) -> Optional[float]:
+            if isinstance(value, bool):
+                return None
+            return float(value) if isinstance(value, (int, float)) else None
+
+        def need_positive(name: str, value: Any) -> None:
+            if _num(value) is None or value <= 0:
+                err(f"{name} must be a number > 0 (got {value!r})")
+
+        def need_non_negative(name: str, value: Any) -> None:
+            if _num(value) is None or value < 0:
+                err(f"{name} must be a number >= 0 (got {value!r})")
+
+        # scan numerics
+        need_positive("scan.rate_limit", self.scan.rate_limit)
+        need_positive("scan.concurrency", self.scan.concurrency)
+        need_positive("scan.timeout", self.scan.timeout)
+        need_positive("scan.http_timeout", self.scan.http_timeout)
+        if _num(self.scan.jitter_between_targets) is None or \
+                self.scan.jitter_between_targets < 0:
+            err("scan.jitter_between_targets must be a number >= 0 "
+                f"(got {self.scan.jitter_between_targets!r})")
+        hacker = getattr(self.scan, "hacker_header", "")
+        if hacker:
+            if not isinstance(hacker, str) or "\r" in hacker \
+                    or "\n" in hacker:
+                err("scan.hacker_header must be a single-line string "
+                    "(newlines would inject headers)")
+            elif len(hacker) > 200:
+                err("scan.hacker_header must be at most 200 characters")
+        user_agent = getattr(self.scan, "user_agent", "")
+        if user_agent:
+            if not isinstance(user_agent, str) or "\r" in user_agent \
+                    or "\n" in user_agent:
+                err("scan.user_agent must be a single-line string")
+            elif len(user_agent) > 200:
+                err("scan.user_agent must be at most 200 characters")
+
+        # discovery
+        need_non_negative("discovery.js_max_files",
+                          self.discovery.js_max_files)
+        need_non_negative("discovery.js_max_bytes_per_file",
+                          self.discovery.js_max_bytes_per_file)
+        need_non_negative("discovery.arjun_max_endpoints",
+                          self.discovery.arjun_max_endpoints)
+        need_positive("discovery.arjun_timeout",
+                      self.discovery.arjun_timeout)
+        for method in self.discovery.arjun_methods or []:
+            if str(method).upper() not in ("GET", "POST", "JSON"):
+                err(f"discovery.arjun_methods has unsupported method "
+                    f"{method!r} (GET, POST, JSON)")
+
+        # validation
+        for key in ("mutation_payloads", "differential_max_endpoints",
+                    "open_redirect_max_endpoints", "open_redirect_max_params",
+                    "cors_max_endpoints", "cors_max_identities",
+                    "second_order_max_endpoints", "second_order_max_renders",
+                    "second_order_ssrf_max_fields", "prescreen_max_endpoints",
+                    "prescreen_max_params", "cache_max_endpoints"):
+            need_non_negative(f"validation.{key}",
+                              getattr(self.validation, key, 0))
+        if self.validation.sqli_time_sec not in (1, 2, 3, 4, 5, 6, 7, 8,
+                                                 9, 10):
+            err("validation.sqli_time_sec must be 1-10 "
+                f"(got {self.validation.sqli_time_sec!r})")
+        if self.validation.path_traversal_max_depth not in (1, 2, 3, 4, 5,
+                                                             6):
+            err("validation.path_traversal_max_depth must be 1-6 "
+                f"(got {self.validation.path_traversal_max_depth!r})")
+        if self.validation.path_traversal and not (
+                self.validation.path_traversal_marker_path
+                and self.validation.path_traversal_marker_content):
+            warn("validation.path_traversal is enabled but no marker "
+                 "path/content is configured: the validator stays idle")
+        for section, name in (("reporting", "min_severity"),
+                              ("validation", "min_severity")):
+            value = getattr(getattr(self, section), name)
+            if value not in ("info", "low", "medium", "high", "critical"):
+                err(f"{section}.{name} must be "
+                    f"info|low|medium|high|critical (got {value!r})")
+
+        # authorization
+        known_methods = {"GET", "POST", "PUT", "PATCH", "DELETE",
+                         "OPTIONS", "HEAD"}
+        for method in self.authorization.methods or []:
+            if str(method).upper() not in known_methods:
+                err(f"authorization.methods has unsupported method "
+                    f"{method!r}")
+        if self.authorization.enabled and not self.authorization.methods:
+            err("authorization.enabled with empty authorization.methods: "
+                "nothing would be swept")
+        need_non_negative("authorization.max_endpoints",
+                          self.authorization.max_endpoints)
+        need_non_negative("authorization.max_ids_per_endpoint",
+                          self.authorization.max_ids_per_endpoint)
+
+        # business / race
+        need_non_negative("business.max_endpoints",
+                          self.business.max_endpoints)
+        need_non_negative("business.max_params", self.business.max_params)
+        if self.race.profile not in ("generic", "single_use",
+                                     "idempotency", "inventory"):
+            err(f"race.profile must be generic|single_use|idempotency|"
+                f"inventory (got {self.race.profile!r})")
+        need_positive("race.concurrency", self.race.concurrency)
+        need_positive("race.rounds", self.race.rounds)
+        need_non_negative("race.max_endpoints", self.race.max_endpoints)
+        if self.race.profile == "inventory" and not (
+                self.race.inventory_endpoint and self.race.inventory_read_url
+                and self.race.inventory_jsonpath):
+            err("race.profile=inventory needs inventory_endpoint, "
+                "inventory_read_url, and inventory_jsonpath")
+
+        # safety / budgets
+        for key in ("max_requests", "max_state_changes"):
+            value = getattr(self.safety, key)
+            if value is not None and (
+                    _num(value) is None or value < 0):
+                err(f"safety.{key} must be a number >= 0 or null "
+                    f"(got {value!r})")
+        if _num(self.safety.cooldown_ms) is None or \
+                self.safety.cooldown_ms < 0:
+            err("safety.cooldown_ms must be a number >= 0 "
+                f"(got {self.safety.cooldown_ms!r})")
+        for key in ("requests_per_host", "requests_per_endpoint",
+                    "authz_tests_per_endpoint", "browser_actions",
+                    "ai_experiments"):
+            need_non_negative(f"budgets.{key}", getattr(self.budgets, key))
+
+        # oast
+        need_positive("oast.poll_timeout", self.oast.poll_timeout)
+        if _num(self.oast.poll_interval) is None or \
+                self.oast.poll_interval < 0:
+            err("oast.poll_interval must be a number >= 0 "
+                f"(got {self.oast.poll_interval!r})")
+        need_non_negative("oast.max_endpoints", self.oast.max_endpoints)
+        need_non_negative("oast.max_params_per_endpoint",
+                          self.oast.max_params_per_endpoint)
+
+        # browser
+        for key in ("max_pages", "max_depth", "navigation_timeout_ms"):
+            need_non_negative(f"browser.{key}",
+                              getattr(self.browser, key))
+
+        # ai
+        if self.ai.provider not in ("gemini", "groq", "ollama"):
+            err(f"ai.provider must be gemini|groq|ollama "
+                f"(got {self.ai.provider!r})")
+        if _num(self.ai.max_output_tokens) is None or \
+                self.ai.max_output_tokens <= 0:
+            err("ai.max_output_tokens must be a number > 0 "
+                f"(got {self.ai.max_output_tokens!r})")
+        if _num(self.ai.js_chunk_budget) is None or \
+                self.ai.js_chunk_budget < 0:
+            err("ai.js_chunk_budget must be a number >= 0 "
+                f"(got {self.ai.js_chunk_budget!r})")
+        if _num(self.ai.max_hypothesis_tests) is None or \
+                self.ai.max_hypothesis_tests < 0:
+            err("ai.max_hypothesis_tests must be a number >= 0 "
+                f"(got {self.ai.max_hypothesis_tests!r})")
+        if self.ai.provider == "gemini" and self.ai.model \
+                not in FREE_GEMINI_MODELS:
+            warn(f"ai.model {self.ai.model!r} is outside the free-tier "
+                 f"allowlist; hosted planning may bill or refuse")
+        if self.ai.provider == "groq":
+            groq_model = (self.ai.groq or {}).get("model") or self.ai.model
+            if groq_model not in FREE_GROQ_MODELS:
+                warn(f"ai groq model {groq_model!r} is outside the "
+                     f"free-tier allowlist")
+
+        # auth
+        names = [c.name for c in self.auth.contexts or []]
+        if len(set(names)) != len(names):
+            err(f"auth.contexts has duplicate names: {names}")
+        for context in self.auth.contexts or []:
+            if not str(getattr(context, "name", "")).strip():
+                err("auth.contexts has an entry with an empty name")
+            headers = getattr(context, "headers", None) or {}
+            if not isinstance(headers, dict):
+                err(f"auth context {getattr(context, 'name', '?')!r}: "
+                    f"headers must be a mapping")
+        if self.auth.login.enabled and not (
+                self.auth.login.identities or []):
+            err("auth.login.enabled with no login.identities: nothing "
+                "can be minted")
+        if self.auth.login.enabled and self.auth.login.url:
+            try:
+                from urllib.parse import urlsplit
+                parts = urlsplit(self.auth.login.url)
+                if parts.scheme not in ("http", "https") \
+                        or not parts.hostname:
+                    err("auth.login.url must be an http(s) URL with a host")
+            except (TypeError, ValueError):
+                err("auth.login.url is unrepresentable")
+
+        # scope
+        for key in ("allowed_domains", "excluded_hosts", "excluded_paths",
+                    "crawl_exclude_exts", "active_test_exclude_exts"):
+            value = getattr(self.scope, key)
+            if not isinstance(value, list) or not all(
+                    isinstance(item, str) for item in value):
+                err(f"scope.{key} must be a list of strings")
+        if not self.scope.allowed_domains:
+            warn("scope.allowed_domains is empty: the first target host "
+                 "is auto-seeded (explicit scope is recommended)")
+
+        for url in self.seed_urls or []:
+            if not isinstance(url, str) or not url.startswith(
+                    ("http://", "https://")):
+                err(f"seed_urls entries must be http(s) URLs (got {url!r})")
+        for unknown in self.unknown_keys:
+            warn(f"unknown configuration key {unknown!r} is ignored "
+                 f"(possible typo)")
+        return {"errors": errors, "warnings": warnings}
 
 
 def apply_cli_overrides(cfg: Config, args) -> Config:
@@ -494,4 +759,12 @@ def apply_cli_overrides(cfg: Config, args) -> Config:
         cfg.safety.stop_on_candidate = True
     if getattr(args, "cooldown_ms", None) is not None:
         cfg.safety.cooldown_ms = args.cooldown_ms
+    if getattr(args, "seed_urls", None):
+        try:
+            seeds = Path(args.seed_urls).read_text(
+                errors="ignore").splitlines()
+        except Exception as exc:
+            raise SystemExit(f"seed file unreadable: {exc}")
+        cfg.seed_urls = [line.strip() for line in seeds
+                         if line.strip() and not line.startswith("#")]
     return cfg

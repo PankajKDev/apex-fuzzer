@@ -1,76 +1,108 @@
-scan:
-  rate_limit: 50
-  concurrency: 5
-  timeout: 300
-  http_timeout: 10
+# Apex-Fuzzer default configuration (v5.2.0).
+#
+# Traffic legend — what each section can send:
+#   [read-only]       GET navigations, fingerprinting, passive analysis
+#   [active]          payloads that hit the app but change no state
+#                     (scanning, mining, reflection/error probes, OAST pings)
+#   [state-changing]  requests that can write server-side state
+#   [burst]           synchronized bursts (load-heavy by design)
+#   [claim]           external ownership claims (DNS-visible, high impact)
+#   [OAST]            out-of-band callbacks to Interactsh or a collector
+#   [auth]            requests carrying configured test credentials
+#
+# Secrets never belong here: passwords via *_env, API keys via the
+# environment (.env). Unknown keys are ignored with a warning.
+# Validate any edit: apex-fuzzer --config-check (zero network).
 
+# [read-only] scan pacing and per-tool time boxes.
+scan:
+  rate_limit: 50        # nuclei -rl; direct HTTP uses rate_limit/10
+  concurrency: 5        # recon thread pool
+  timeout: 300          # per-tool subprocess budget (seconds)
+  http_timeout: 10      # direct requests via _HTTPClient
+  jitter_between_targets: 2  # idle seconds between targets
+  # Default User-Agent override (honest default kept when empty).
+  # Operators may set a browser string where program rules allow it.
+  user_agent: ''
+  # Value sent as the X-HackerOne header on every request made through
+  # the tool's HTTP client (researcher handle or program ref). Empty
+  # disables it. External tools (nuclei, sqlmap, dalfox) are unaffected.
+  hacker_header: ''
+
+# [read-only] discovery + [active] parameter mining.
 discovery:
   javascript: true
   js_max_files: 40
-  source_maps: true
+  js_max_bytes_per_file: 400000   # per-file fetch cap (analysis is chunked)
+  source_maps: true               # fetch + deep-parse .map files
   api_specs: true
   html_forms: true
-  # Arjun active hidden-parameter mining (spec §1)
-  arjun: true
-  arjun_methods: ["GET", "POST", "JSON"]
-  arjun_max_endpoints: 15
-  arjun_timeout: 180
-  arjun_stable: false
-  arjun_require_existing_param: false
-  linkfinder: false
+  robots_sitemap: true
+  arjun: true                     # [active] hidden-parameter mining
+  arjun_methods: ["GET", "POST", "JSON"]  # GET | POST | JSON only
+  arjun_max_endpoints: 15         # highest-param endpoints first
+  arjun_timeout: 180              # per-method subprocess timeout
+  arjun_stable: false             # --stable: 1 thread, slower, steadier
+  arjun_require_existing_param: false  # only mine endpoints with >=1 param
+  linkfinder: false               # passive JS param extraction (needs binary)
+  authenticated_recon: false  # repeat live crawlers + mapping fetches as
+  # the first authenticated identity (Cookie/Authorization only).
+  # Public archives never take sessions. Off by default: spends budget
+  # as somebody and changes what crawlers can see.
 
+# Validation gates every active/state-changing probe below.
 validation:
   enabled: false
-  ssrf: false
-  differential: false
-  ssti: true
-  xxe: true                 # OAST-only; observed XML POST + state-change gate
-  path_traversal: true      # requires a harmless operator-supplied marker
-  # Relative path to an owner-created canary file, not a system file.
-  path_traversal_marker_path: ""
-  path_traversal_marker_content: ""    # exact unique file contents
-  path_traversal_max_depth: 4
-  open_redirect: true
+  ssrf: false             # also enables the OAST sweep [active] [OAST]
+  differential: false     # [active] [auth] cross-context comparisons
+  ssti: true               # paired inert arithmetic checks on SSTI leads
+  xxe: true                 # OAST-only XXE proof on observed XML POST bodies
+  path_traversal: true      # uses only the configured harmless marker
+  path_traversal_marker_path: ""       # relative path on the target
+  path_traversal_marker_content: ""    # exact known contents; keep unique
+  path_traversal_max_depth: 4           # hard-capped at 6
+  open_redirect: true     # validation profile/enabled only; observed GET fields
   open_redirect_max_endpoints: 10
   open_redirect_max_params: 3
-  cors: true
-  cors_browser: false       # opt-in real-browser proof after CORS candidates
+  cors: true              # cookie-authenticated contexts only
+  cors_browser: false     # opt-in Chromium read confirmation (extra GET)
   cors_max_endpoints: 10
   cors_max_identities: 3
-  mutation: true
-  mutation_payloads: 8
+  mutation: true          # WAF-aware prescreen before sqlmap/dalfox [active]
+  mutation_payloads: 8    # ladder depth per class
   # Lead-independent prescreen sweep bounds (no Nuclei lead required).
   prescreen_max_endpoints: 30
   prescreen_max_params: 3
   # sqlmap time-based (delay) confirmation is a separate opt-in: delay
   # payloads hold DB connections open and are the heaviest SQLi check.
   sqli_time_based: false
-  sqli_time_sec: 2
+  sqli_time_sec: 2        # 1-10
   # Web-cache deception runs read-only GETs under unique cache keys
   # during validation passes. Cache poisoning is out of scope.
   cache: true
   cache_max_endpoints: 10
   differential_max_endpoints: 30
-  min_severity: medium
+  min_severity: medium     # reserved: info|low|medium|high|critical
   # Stored-XSS correlation persists canary data server-side: opt-in only.
-  second_order: false
-  # Stored-SSRF correlation persists OAST callback URLs: opt-in only;
-  # uses only URL-like body fields and in-scope page triggers.
+  second_order: false       # or --second-order / validation profile
+  # Stored-SSRF writes callback URLs; opt in separately.
   second_order_ssrf: false
   second_order_max_endpoints: 10
   second_order_max_renders: 40
   second_order_ssrf_max_fields: 3
 
 # Cross-user swap + per-method authz matrix (BOLA/BFLA/tenant isolation).
-# NOTE: the method sweep sends state-changing verbs with empty bodies.
+# [active] harvest/swap reads; NOTE: the method sweep sends state-changing
+# verbs with empty bodies.
 authorization:
-  enabled: false
-  methods: ["GET", "POST", "PUT", "PATCH", "DELETE"]
+  enabled: false           # or deep/api/authenticated profiles
+  methods: ["GET", "POST", "PUT", "PATCH", "DELETE"]  # subset allowed
   max_endpoints: 20
   max_ids_per_endpoint: 3
-  # MTN-pattern write replay: replays the attacker's observed mutating
-  # request with the victim's ID, verified via readback. Opt-in only for
-  # test accounts/objects; additionally requires --ack-state-change.
+  # MTN-pattern write replay [state-changing]: replays the attacker's
+  # observed mutating request with the victim's ID, verified via readback.
+  # Opt-in only for test accounts/objects; additionally requires
+  # --ack-state-change.
   write_replay: false
   # identifier fields proving ownership when equal in owner and
   # tester responses (Phase 7 comparison)
@@ -80,7 +112,7 @@ authorization:
   # ownership_fields_by_endpoint:
   #   /api/profile: ["account_ref", "email"]
 
-# Business-logic mutations (quantity/price/refund/token-reuse).
+# Business-logic mutations [state-changing] (quantity/price/refund/token-reuse).
 business:
   enabled: false           # or --business-logic / deep/validation profiles
   max_endpoints: 10
@@ -97,7 +129,7 @@ business:
   #       - jsonpath: "$.items[?(@.sku == 'SKU-1')].quantity"
   #         rule: "gte"    # gte | lte | eq | ne | contains
   #         value: 0
-# Race-condition engine. Off by default: synchronized bursts of
+# Race-condition engine [burst]. Off by default: synchronized bursts of
 # state-changing requests are the most aggressive test in the suite.
 race:
   enabled: false           # or --race
@@ -111,7 +143,7 @@ race:
   inventory_read_url: ""  # e.g. /api/items/42/inventory
   inventory_jsonpath: ""  # e.g. $.available
 
-# Browser-driven discovery + sessions (GET navigations only, safe).
+# Browser-driven discovery + sessions [read-only] (GET navigations only).
 # Needs: pip install "apex-fuzzer[browser]" (Playwright + Chromium).
 browser:
   enabled: false           # or --browser / deep profile
@@ -126,18 +158,18 @@ browser:
   capture_authenticated_requests: false  # opt-in; read-only, in-scope, same-origin request capture
   navigation_timeout_ms: 30000
 
-# Request budgets (§50) — backstop against runaway testing.
+# Request budgets — backstop against runaway testing.
 # Normal scans stay far below every cap.
 budgets:
   requests_per_host: 10000
   requests_per_endpoint: 100
   authz_tests_per_endpoint: 20
-  browser_actions: 500
-  ai_experiments: 50
+  browser_actions: 500    # browser engine
+  ai_experiments: 50      # AI agent
 
 # Safety gates + execution controls (Milestone 1). Everything here
 # defaults to today's behavior. Strict mode fails closed for
-# stateful/burst/claiming modules BEFORE any network activity.
+# stateful/burst/claim modules BEFORE any network activity.
 safety:
   strict: false                # or --strict
   authorization_ref: ""        # or --auth-ref (e.g. ENG-SEC-2026-041)
@@ -152,12 +184,12 @@ safety:
   stop_on_candidate: false     # or --stop-on-candidate
   cooldown_ms: 0               # delay between stateful probes
 
-# Interactsh out-of-band verification (spec §3)
+# Interactsh out-of-band verification [OAST] (spec §3)
 oast:
   enabled: true
-  server: "oast.pro"
-  api_base: null
-  callback_url: ""       # optional static collector, e.g. local lab
+  server: "oast.pro"      # callback domain; oast.live is the failover
+  api_base: null          # null → https://api.<server>; set for self-hosted
+  callback_url: ""        # local collector base, e.g. http://localhost:9001
   poll_timeout: 15
   poll_interval: 2
   max_endpoints: 10
@@ -165,26 +197,33 @@ oast:
 
 nuclei:
   bb_templates_dir: "~/nuclei-bb-templates"
-  workflows: false
-  ai_templates: true
+  workflows: false         # -workflow -workflow-threads 3
+  ai_templates: true       # run AI-generated gate templates
 
 ai:
   enabled: false
-  provider: gemini          # Gemini free tier, with free Groq fallback
+  provider: gemini          # gemini | groq | ollama (free tiers only)
   model: "gemini-3.5-flash-lite"
+  # gemini:                 # optional provider-scoped overrides
+  #   model: "gemini-3.5-flash-lite"
+  #   timeout: 30
   # groq:                   # optional free-tier model preference
   #   model: "openai/gpt-oss-20b"
+  # ollama:                 # optional local overrides
+  #   host: "http://localhost:11434"
+  #   model: "llama3.1"
   max_output_tokens: 8192
-  ollama_host: "http://localhost:11434"
-  ollama_model: "llama3.1"  # pull first: ollama pull llama3.1
-  ollama_timeout: 180
+  ollama_host: "http://localhost:11434"  # or OLLAMA_HOST env
+  ollama_model: "llama3.1"  # must be pulled: ollama pull llama3.1
+  ollama_timeout: 180       # local inference is slower than API calls
   js_chunk_budget: 6
-  max_hypothesis_tests: 5
+  max_hypothesis_tests: 5     # per test class fed back into testing
 
-# Differential auth contexts (spec §2). Fill in real session material
-# per engagement; anonymous is always probed implicitly.
+# Differential auth contexts [auth] (spec §2). Fill in real session
+# material per engagement; anonymous is always probed implicitly.
 # identity/roles/tenant attach the context to the application model;
 # storage_state points at a Playwright storage-state file (Phase 2).
+# mfa_pending marks a test session stuck before MFA (transition check).
 auth:
   contexts:
     - name: anonymous
@@ -201,8 +240,8 @@ auth:
     #   identity: user_b
     #   roles: ["member"]
     #   tenant: acme
-  # Automated form-login minting (agent Phase 2). Disabled unless set.
-  # Passwords come from the environment (never from this file).
+  # Automated form-login minting [auth] (agent Phase 2). Disabled unless
+  # set. Passwords come from the environment (never from this file).
   # Only contexts that exist above AND have no headers get enriched.
   login:
     enabled: false
@@ -220,10 +259,23 @@ auth:
 
 reporting:
   redact_secrets: true
-  min_severity: info
+  min_severity: info      # report filter: info|low|medium|high|critical
 
+# Scope: explicit allowlist wins; empty allowed_domains auto-seeds the
+# first target host (logged). Exclusions are unconditional: excluded
+# hosts/paths never receive any request; active-test extensions are
+# additionally excluded from probes (but still crawled for discovery).
 scope:
-  allowed_domains: []
+  allowed_domains: []     # empty + first target → auto-seeded with target host
   allow_subdomains: true
   excluded_hosts: []
-  excluded_paths: []
+  excluded_paths: []      # prefix matches, e.g. ["/static/"]
+  crawl_exclude_exts:     # skipped by recon merging
+    ["png", "jpg", "jpeg", "gif", "svg", "webp", "ico",
+     "woff", "woff2", "ttf", "otf", "eot",
+     "mp4", "webm", "mp3", "wav",
+     "pdf", "zip", "tar", "gz", "7z", "rar"]
+  active_test_exclude_exts:  # skipped by probes, still discovered
+    ["png", "jpg", "jpeg", "gif", "svg", "webp", "ico",
+     "woff", "woff2", "ttf", "otf", "eot",
+     "mp4", "webm", "mp3", "wav", "pdf"]

@@ -45,6 +45,7 @@ class GraphqlReplayResult:
     generic_response: bool = False
     owner_snippet: str = ""
     tester_snippet: str = ""
+    edge_denied: bool = False
 
     def to_dict(self) -> Dict[str, Any]:
         return {"endpoint_url": self.endpoint_url,
@@ -58,7 +59,8 @@ class GraphqlReplayResult:
                 "markers_matched": list(self.markers_matched),
                 "generic_response": self.generic_response,
                 "owner_snippet": self.owner_snippet,
-                "tester_snippet": self.tester_snippet}
+                "tester_snippet": self.tester_snippet,
+                "edge_denied": self.edge_denied}
 
 
 def _shape_operation(shape: Dict[str, Any]) -> Optional[Dict[str, Any]]:
@@ -254,17 +256,30 @@ def replay_operations(http, endpoint: Any, victims: List[Any], tester: Any,
             comparison = {"level": "medium", "matched": [],
                           "detail": "shape match stands alone"}
             tester_snippet = ""
+            from ..validation.differential import looks_like_edge_deny
+            try:
+                tester_edge = looks_like_edge_deny(
+                    norm.get("status", 0), resp.text or "",
+                    getattr(resp, "headers", None))
+            except Exception:
+                tester_edge = False
             if match:
-                comparison = compare_access(
-                    markers, resp.text or "", ownership_fields,
-                    exclude=variable_leaf(full_path),
-                    owner_generic=owner_generic)
-                try:
-                    tester_snippet = redact((resp.text or "")[:500])
-                except Exception:
-                    tester_snippet = ""
-                if comparison["level"] == "none":
+                if tester_edge:
                     match = False
+                    comparison = {"level": "none", "matched": [],
+                                  "detail": "tester hit edge/bot-wall "
+                                            "infrastructure, not the app"}
+                else:
+                    comparison = compare_access(
+                        markers, resp.text or "", ownership_fields,
+                        exclude=variable_leaf(full_path),
+                        owner_generic=owner_generic)
+                    try:
+                        tester_snippet = redact((resp.text or "")[:500])
+                    except Exception:
+                        tester_snippet = ""
+                    if comparison["level"] == "none":
+                        match = False
             res = GraphqlReplayResult(
                 endpoint_url=url, operation=operation,
                 variable=full_path, victim_value=value, owner=owner,
@@ -273,7 +288,8 @@ def replay_operations(http, endpoint: Any, victims: List[Any], tester: Any,
                 status=norm.get("status", 0), match=bool(match),
                 markers_matched=comparison.get("matched", []),
                 generic_response=comparison["level"] == "none" and
-                "generic" in comparison.get("detail", ""))
+                "generic" in comparison.get("detail", ""),
+                edge_denied=bool(tester_edge))
             try:
                 res.owner_snippet = redact((base.text or "")[:500])
             except Exception:

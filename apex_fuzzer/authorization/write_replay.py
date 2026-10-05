@@ -62,6 +62,7 @@ class WriteReplayResult:
     tester_tenant: str = ""
     status: int = 0
     replay_accepted: bool = False
+    edge_denied: bool = False
     readback: str = "unverified"
     verdict: str = "inconclusive"
     notes: str = ""
@@ -77,6 +78,7 @@ class WriteReplayResult:
                 "replay_accepted": self.replay_accepted,
                 "readback": self.readback, "verdict": self.verdict,
                 "notes": self.notes,
+                "edge_denied": self.edge_denied,
                 "markers_matched": list(self.markers_matched)}
 
 
@@ -465,12 +467,20 @@ def replay_writes(http, endpoint: Any, victims: List[Any], tester: Any,
             continue
         accepted = 200 <= response.status_code < 300 and (
             value in (response.text or ""))
+        from ..validation.differential import looks_like_edge_deny
+        try:
+            replay_edge = looks_like_edge_deny(
+                response.status_code, response.text or "",
+                getattr(response, "headers", None))
+        except Exception:
+            replay_edge = False
         res = WriteReplayResult(
             endpoint_url=replay["url"], method=replay["method"],
             param=param, victim_value=value, owner=owner,
             tester=tester_name, owner_tenant=owner_tenant,
             tester_tenant=tester_tenant, status=response.status_code,
-            replay_accepted=bool(accepted))
+            replay_accepted=bool(accepted),
+            edge_denied=bool(replay_edge))
         if not accepted:
             res.notes = (f"replay not accepted ({tester_name}→"
                          f"{response.status_code}); no write proven")

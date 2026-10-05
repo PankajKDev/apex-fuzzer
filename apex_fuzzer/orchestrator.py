@@ -87,6 +87,12 @@ def _is_public_archive_target(target: str) -> bool:
 
 LIVE_CODES = "200,204,301,302,401,403,405,500,502,503,504"
 
+
+def _header_arg(headers: dict) -> str:
+    """Join headers the way hakrawler's -h flag expects."""
+    return ";;".join(f"{name}: {value}" for name, value in
+                     (headers or {}).items())
+
 # Endpoint types that give OAST sink candidates extra priority.
 _OAST_PRIORITY_TYPES = ("proxy", "webhook", "callback", "import",
                         "export", "download", "api")
@@ -165,7 +171,16 @@ class Orchestrator:
             max(0.5, self.cfg.scan.rate_limit / 10.0))
         budgets = BudgetTracker(self.cfg)
         coverage = CoverageTracker()
-        client = _HTTPClient(limiter=limiter, budgets=budgets)
+        extra_headers = {}
+        hacker_header = str(getattr(self.cfg.scan, "hacker_header", "")
+                            or "").strip()
+        if hacker_header:
+            extra_headers["X-HackerOne"] = hacker_header
+        configured_ua = str(getattr(self.cfg.scan, "user_agent", "")
+                            or "").strip()
+        client = _HTTPClient(limiter=limiter, budgets=budgets,
+                             extra_headers=extra_headers,
+                             user_agent=configured_ua)
         app_graph = ApplicationGraph()
         application: Optional[Application] = None
         stop = StopFlag()
@@ -500,6 +515,20 @@ class Orchestrator:
             rl = 30 if self.cfg.scan.rate_limit >= 100 else 10
             jobs.append((["katana", "-d", "3", "-silent", "-rl", str(rl)],
                          "katana", url + "\n", out_dir / "katana.txt"))
+        auth_headers = self._recon_identity_headers()
+        if auth_headers:
+            if which("hakrawler"):
+                jobs.append((["hakrawler", "-d", "3", "-subs", "-u",
+                              "-h", _header_arg(auth_headers)],
+                             "hakrawler-authed", url + "\n",
+                             out_dir / "hakrawler-authed.txt"))
+            if which("katana"):
+                katana_args = ["katana", "-d", "3", "-silent", "-rl",
+                               str(rl)]
+                for name, value in auth_headers.items():
+                    katana_args.extend(["-H", f"{name}:{value}"])
+                jobs.append((katana_args, "katana-authed", url + "\n",
+                             out_dir / "katana-authed.txt"))
 
         import concurrent.futures
         def _run(job):
@@ -517,12 +546,40 @@ class Orchestrator:
         self._merge_recon(out_dir)
         return self._read_lines(out_dir / "raw.txt")
 
+    def _recon_identity_headers(self) -> dict:
+        """Session headers for authenticated recon, or {} when off."""
+        if not bool(getattr(self.cfg.discovery, "authenticated_recon",
+                            False)):
+            return {}
+        for context in list(getattr(self.cfg.auth, "contexts", []) or []):
+            if getattr(context, "name", "") == "anonymous":
+                continue
+            headers = dict(getattr(context, "headers", None) or {})
+            picked = {k: v for k, v in headers.items()
+                      if k.lower() in ("cookie", "authorization")
+                      and isinstance(v, str) and v.strip()}
+            if picked:
+                return picked
+        log.info("recon: authenticated_recon on but no authenticated "
+                 "identity carries Cookie/Authorization — crawling "
+                 "anonymously")
+        return {}
+
     def _merge_recon(self, out_dir: Path):
         """Merge recon files into raw.txt, applying crawl_exclude_exts."""
         excl = {e.lower() for e in self.cfg.scope.crawl_exclude_exts}
         raw: Set[str] = set()
+        for u in (getattr(self.cfg, "seed_urls", None) or []):
+            line = str(u).strip()
+            if not line.startswith("http"):
+                continue
+            ext = Path(line.split("?")[0]).suffix.lstrip(".").lower()
+            if ext and ext in excl:
+                continue
+            raw.add(line)
         for f in ("param.txt", "wayback.txt", "gau.txt",
                   "hakrawler.txt", "katana.txt",
+                  "hakrawler-authed.txt", "katana-authed.txt",
                   "robots.txt.out", "sitemap.txt"):
             p = out_dir / f
             if not p.exists():
@@ -998,46 +1055,55 @@ class Orchestrator:
         html_params: List[Parameter] = []
         all_headers: Dict[str, str] = {}
         page_ids: List[tuple] = []  # (url, param, value, source)
-        for ep in [e for e in endpoints if e.method == "GET"][:30]:
-            try:
-                r = client.get(ep.url, timeout=self.cfg.scan.http_timeout)
-                set_cookies = []
-                if r.headers.get("set-cookie"):
-                    set_cookies = [r.headers.get("set-cookie")]
-                for t in tech_mod.detect(r.headers, r.text[:200_000],
-                                         set_cookies):
-                    if t.name in tech_by_name:
-                        cur = tech_by_name[t.name]
-                        for e in t.evidence:
-                            if e not in cur.evidence:
-                                cur.evidence.append(e)
-                    else:
-                        tech_by_name[t.name] = t
-                for k, v in (r.headers or {}).items():
-                    all_headers.setdefault(k.lower(), v)
-                if self.cfg.discovery.html_forms:
-                    html_params.extend(param_mod.from_html(r.text))
-                # Phase 5: harvest IDs from already-fetched bodies —
-                # zero extra requests, feeds resource intel only
+        passes: List[Optional[dict]] = [None]
+        authed = self._recon_identity_headers()
+        if authed:
+            passes.append(authed)
+        for pass_headers in passes:
+            for ep in [e for e in endpoints
+                       if e.method == "GET"][:30]:
+                fetch_kwargs = {"timeout": self.cfg.scan.http_timeout}
+                if pass_headers:
+                    fetch_kwargs["headers"] = pass_headers
                 try:
-                    from .application.resources import (
-                        discover_ids_from_html, discover_ids_from_headers)
-                    ctype = str((r.headers or {}).get(
-                        "content-type", "")).lower()
-                    if "html" in ctype:
-                        for pname, pvalue in \
-                                discover_ids_from_html(
-                                    r.text or "").items():
+                    r = client.get(ep.url, **fetch_kwargs)
+                    set_cookies = []
+                    if r.headers.get("set-cookie"):
+                        set_cookies = [r.headers.get("set-cookie")]
+                    for t in tech_mod.detect(r.headers, r.text[:200_000],
+                                             set_cookies):
+                        if t.name in tech_by_name:
+                            cur = tech_by_name[t.name]
+                            for e in t.evidence:
+                                if e not in cur.evidence:
+                                    cur.evidence.append(e)
+                        else:
+                            tech_by_name[t.name] = t
+                    for k, v in (r.headers or {}).items():
+                        all_headers.setdefault(k.lower(), v)
+                    if self.cfg.discovery.html_forms:
+                        html_params.extend(param_mod.from_html(r.text))
+                    # Phase 5: harvest IDs from already-fetched bodies —
+                    # zero extra requests, feeds resource intel only
+                    try:
+                        from .application.resources import (
+                            discover_ids_from_html, discover_ids_from_headers)
+                        ctype = str((r.headers or {}).get(
+                            "content-type", "")).lower()
+                        if "html" in ctype:
+                            for pname, pvalue in \
+                                    discover_ids_from_html(
+                                        r.text or "").items():
+                                page_ids.append(
+                                    (ep.url, pname, pvalue, "html"))
+                        for pname, pvalue in discover_ids_from_headers(
+                                r.headers or {}).items():
                             page_ids.append(
-                                (ep.url, pname, pvalue, "html"))
-                    for pname, pvalue in discover_ids_from_headers(
-                            r.headers or {}).items():
-                        page_ids.append(
-                            (ep.url, pname, pvalue, "headers"))
-                except Exception as e:
-                    log.debug("page-id harvest failed: %s", e)
-            except Exception:
-                continue
+                                (ep.url, pname, pvalue, "headers"))
+                    except Exception as e:
+                        log.debug("page-id harvest failed: %s", e)
+                except Exception:
+                    continue
         self._page_ids = page_ids
         # techs discovered from JS bundles (spec §7)
         for entry in read_jsonl(out_dir / "js_analysis.jsonl"):
@@ -1910,6 +1976,8 @@ class Orchestrator:
             0 if has_idor_params(row[0]) else 1, row[0].url))
         candidates = candidates[:max_eps]
         if not candidates:
+            log.info("prescreen-sweep: no endpoints with parameters "
+                     "discovered — nothing to probe")
             return []
         log.info("prescreen-sweep: %d endpoints", len(candidates))
         if not self._reserve_or_block(
@@ -2015,6 +2083,8 @@ class Orchestrator:
         targets.sort(key=lambda e: 0 if has_idor_params(e) else 1)
         targets = targets[:self.cfg.validation.differential_max_endpoints]
         if not targets:
+            log.info("differential: no privileged/identifier endpoints "
+                     "discovered — nothing to compare")
             return []
         log.info("differential: probing %d endpoints "
                  "(contexts=%s)", len(targets),
@@ -2048,6 +2118,11 @@ class Orchestrator:
             metrics.authorization_tests += 1
             authed = [c.name for c in res.contexts
                       if c.name != "anonymous"]
+            if getattr(res, "edge_denied", False):
+                coverage.record("authz", "inconclusive",
+                                f"{ep.normalized_url}: edge/bot-wall "
+                                f"answers; app never reached")
+                continue
             if res.verdict != "strong_candidate":
                 # tested, no authorization gap observed (§45)
                 coverage.record("authz", "tested_negative",
@@ -2121,12 +2196,16 @@ class Orchestrator:
                  and getattr(i, "name", "") != "anonymous"
                  and dict(getattr(i, "auth_headers", None) or {})]
         if not pres or not fulls:
+            log.info("mfa-transition: needs one mfa_pending and one "
+                     "completed test session — skipping")
             return []
         targets = [e for e in endpoints
                    if e.endpoint_type in PRIVILEGED_TYPES
                    or (has_idor_params(e)
                        and e.endpoint_type != "static")][:10]
         if not targets:
+            log.info("mfa-transition: no privileged endpoints "
+                     "discovered — nothing to compare")
             return []
         log.info("mfa-transition: %d endpoints (%s vs %s)",
                  len(targets), pres[0].name, fulls[0].name)
@@ -2229,6 +2308,8 @@ class Orchestrator:
                 seen_urls.append(ep.url)
         authz_urls = find_authorize_urls(seen_urls, source="traffic")[:5]
         if not authz_urls:
+            log.info("oauth: no authorize URLs observed in traffic or "
+                     "endpoints — nothing to check")
             return []
         allow_state = bool(getattr(getattr(self.cfg, "safety", None),
                                    "allow_state_change", False))
@@ -2399,6 +2480,8 @@ class Orchestrator:
                    if getattr(i, "name", "") != "anonymous"
                    and dict(getattr(i, "auth_headers", None) or {})]
         if not victims:
+            log.info("cache: no authenticated test session configured — "
+                     "nothing to compare")
             return []
         targets = [e for e in endpoints
                    if (getattr(e, "method", "GET") or "GET").upper()
@@ -2408,6 +2491,8 @@ class Orchestrator:
                             and e.endpoint_type != "static"))]
         targets = targets[:max(0, cfg_v.cache_max_endpoints)]
         if not targets:
+            log.info("cache: no cacheable privileged endpoints "
+                     "discovered — nothing to probe")
             return []
         log.info("cache: probing %d endpoints", len(targets))
         if not self._reserve_or_block(
@@ -2498,6 +2583,8 @@ class Orchestrator:
         targets.sort(key=lambda e: 0 if has_idor_params(e) else 1)
         targets = targets[:cfg_a.max_endpoints]
         if not targets:
+            log.info("authz-matrix: no privileged/identifier endpoints "
+                     "discovered — nothing to test")
             return []
         log.info("authz-matrix: %d endpoints × %s as %d identities",
                  len(targets), cfg_a.methods,
@@ -2574,7 +2661,16 @@ class Orchestrator:
                 if sw.verdict != "strong_candidate":
                     # precondition rule (§20): owner baseline was 200 by
                     # construction and the tester request completed —
-                    # a denial/difference is a genuine negative
+                    # a denial/difference is a genuine negative. Edge or
+                    # bot-wall answers never reached the app, so they stay
+                    # inconclusive instead.
+                    if getattr(sw, "edge_denied", False):
+                        coverage.record(
+                            "tenant_isolation" if cross_tenant else "bola",
+                            "inconclusive",
+                            f"{ep.normalized_url}::{sw.param}: "
+                            f"{sw.tester} hit edge infrastructure")
+                        continue
                     if 400 <= sw.status < 500 or sw.status == 200:
                         coverage.record(
                             "tenant_isolation" if cross_tenant else "bola",
@@ -2837,6 +2933,12 @@ class Orchestrator:
                 max_ids=cfg_a.max_ids_per_endpoint, scope=self.scope)
             for res in results:
                 if res.verdict not in ("strong_candidate", "confirmed"):
+                    if getattr(res, "edge_denied", False):
+                        coverage.record(
+                            "bola", "inconclusive",
+                            f"{ep.normalized_url}::{res.param}: "
+                            f"{tester_name} hit edge infrastructure")
+                        continue
                     # completed denial with a finished request is a
                     # genuine negative (same precondition rule as swaps);
                     # timeouts and 5xx stay unrecorded, never negative
@@ -2935,6 +3037,9 @@ class Orchestrator:
                     continue
                 gql_targets.append(ep)
                 break
+        if not gql_targets:
+            log.info("authz-graphql: no observed GraphQL query operations "
+                     "— nothing to replay")
         for ep in gql_targets:
             if self._halted():
                 log.info("authz-graphql: halted by stop control")
@@ -2965,6 +3070,13 @@ class Orchestrator:
                     cross_tenant = bool(
                         res.tester_tenant and res.owner_tenant and
                         res.tester_tenant != res.owner_tenant)
+                    if getattr(res, "edge_denied", False):
+                        coverage.record(
+                            "tenant_isolation" if cross_tenant
+                            else "bola", "inconclusive",
+                            f"{ep.normalized_url}::{res.variable}: "
+                            f"{tester_name} hit edge infrastructure")
+                        continue
                     if res.verdict != "strong_candidate":
                         if 400 <= res.status < 500 or res.status == 200:
                             coverage.record(
@@ -4295,6 +4407,8 @@ class Orchestrator:
         targets = [endpoint for _, endpoint in ranked_targets][:
                    self.cfg.oast.max_endpoints]
         if not targets:
+            log.info("oast: no SSRF-suspect endpoints discovered — "
+                     "nothing to sweep")
             return []
         log.info("oast: sweeping %d SSRF-suspect endpoints",
                  len(targets))
@@ -4887,11 +5001,18 @@ def _classify_finding(f: Finding) -> str:
 
 class _HTTPClient:
     def __init__(self, limiter: Optional[AdaptiveRateLimiter] = None,
-                 budgets: Optional[BudgetTracker] = None):
+                 budgets: Optional[BudgetTracker] = None,
+                 extra_headers: Optional[Dict[str, str]] = None,
+                 user_agent: str = ""):
         import requests
         self.session = requests.Session()
         self.session.headers.update({
-            "User-Agent": "ApexFuzzer/5.2 (+authorized-testing)"})
+            "User-Agent": (user_agent.strip() or
+                           "ApexFuzzer/5.2 (+authorized-testing)")})
+        for name, value in (extra_headers or {}).items():
+            if isinstance(name, str) and isinstance(value, str) \
+                    and name.strip() and value:
+                self.session.headers[name.strip()] = value
         self.limiter = limiter
         self.budgets = budgets
 
