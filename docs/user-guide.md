@@ -70,7 +70,8 @@ apex-fuzzer -d example.com --profile validation --validate --output output
 
 Results land in `output/<host>/`: `report.html` (start here),
 `findings.jsonl`, `endpoints.jsonl`, `leads.jsonl` (ranked follow-ups,
-always written), `coverage.json`, `metrics.json`,
+always written), `burp/` (manual-testing handoff, always written),
+`coverage.json`, `metrics.json`,
 `proofs/` (per-finding evidence). Re-run with `--resume` to skip
 finished stages after an interruption.
 
@@ -109,6 +110,23 @@ Practical guidance:
 - `deep` is the broadest automated pass; `api`/`authenticated` focus
   the auth engines. Race and business-logic stay opt-in flags because
   they submit state-changing requests.
+
+## 3b. Burp handoff (verify leads by hand)
+
+Every run — including `passive` and `leads` — writes `burp/`:
+
+| file | use in Burp |
+|------|-------------|
+| `urls.txt` | Target > Scope, include rules (paste as URL prefixes); Content discovery seed; Intruder target list |
+| `requests/NNN-METHOD-host-path.txt` | open the file, paste the raw request into a Repeater tab (both editions), then Send to Intruder / Comparer |
+| `sitemap.xml` | Burp site-map schema (same shape as Save selected items): archive runs, diff coverage over time |
+| `lead-checklist.md` | per-lead clicks: id-param → Intruder Sniper over harvested IDs; url-param → Repeater + Collaborator; privileged endpoints → two-session Repeater + Comparer |
+
+Request bodies reuse observed sample values when present, else empty
+values — templates for manual testing, never probes. Cookie and
+Authorization values are never exported: attach your own session
+(session handling / a logged-in Burp browser) before replaying
+anything authenticated.
 
 ## 4. Configuration
 

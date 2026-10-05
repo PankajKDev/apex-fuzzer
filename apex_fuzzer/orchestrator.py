@@ -409,6 +409,10 @@ class Orchestrator:
         write_leads(out_dir / "leads.jsonl", leads)
         metrics.leads_total = len(leads)
         log.info("leads: %d ranked follow-ups -> leads.jsonl", len(leads))
+        from .reporting.burp import export_burp
+        burp_summary = export_burp(out_dir, endpoints, leads)
+        log.info("burp: %d requests + sitemap + checklist -> burp/",
+                 burp_summary["requests"])
 
         # ── 10. REPORT ──────────────────────────────────────────────────
         ck.mark("report", "running")
@@ -429,7 +433,8 @@ class Orchestrator:
                     output_dir=out_dir,
                     coverage=coverage.to_dict(),
                     safety_info=getattr(self, "_safety_info", None),
-                    leads=leads)
+                    leads=leads,
+                    burp=burp_summary)
         ck.mark("report")
         log.info("done: %s (%.1fs)", host, metrics.scan_duration_seconds)
 

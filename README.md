@@ -173,7 +173,13 @@ apex-fuzzer -d example.com --resume --output output
 Results land in `output/<host>/`: `report.html`, `findings.jsonl`,
 `endpoints.jsonl`, `technologies.jsonl`, `hypotheses.jsonl`, `metrics.json`,
 `coverage.json`, `application.json`, `application_graph.json`,
-`attack_chains.jsonl`, `proofs/`.
+`attack_chains.jsonl`, `leads.jsonl`, `burp/`, `proofs/`.
+
+`burp/` is the manual-testing handoff: `urls.txt` (scope seed),
+`requests/` (paste-ready raw requests, one per endpoint — drop one
+into a Repeater tab), `sitemap.xml` (Burp site-map schema for
+archiving/diffing), and `lead-checklist.md` (per-lead Burp clicks:
+which tool, which payload positions, what to compare).
 
 For full operating instructions, see the
 [user guide](docs/user-guide.md), or walk the fictional end-to-end

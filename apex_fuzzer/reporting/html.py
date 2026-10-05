@@ -21,7 +21,8 @@ def render_html(output: Path, target: str, findings: List[Finding],
                 output_dir: Optional[Path] = None,
                 coverage: Optional[Dict] = None,
                 safety_info: Optional[Dict] = None,
-                leads: Optional[List[Dict]] = None) -> None:
+                leads: Optional[List[Dict]] = None,
+                burp: Optional[Dict] = None) -> None:
     min_rank = MIN_RANK.get(min_severity, 0)
     findings = [f for f in findings
                 if MIN_RANK.get(f.severity, 4) >= min_rank]
@@ -48,6 +49,7 @@ def render_html(output: Path, target: str, findings: List[Finding],
         _section("🟦 Observations & Inconclusive", informational,
                  output_dir),
         _leads_block(leads),
+        _burp_block(burp),
         _hypotheses_block(hypotheses),
         "</body></html>"]
     output.write_text("".join(parts))
@@ -200,6 +202,19 @@ def _leads_block(leads: Optional[List[Dict]]) -> str:
             f"it.</em></p>"
             f"<table><tr><th>Priority</th><th>Lead</th>"
             f"<th>Where</th><th>Suggested follow-up</th></tr>{rows}</table>")
+
+
+def _burp_block(burp: Optional[Dict]) -> str:
+    """Burp handoff note: what was exported for manual verification."""
+    if not burp:
+        return ""
+    return (f"<h2>🔌 Burp handoff</h2>"
+            f"<p><code>burp/urls.txt</code> (scope seed), "
+            f"<code>burp/requests/</code> ({burp.get('requests', 0)} raw "
+            f"requests — paste into Repeater), "
+            f"<code>burp/sitemap.xml</code> (Burp site-map schema), "
+            f"<code>burp/lead-checklist.md</code> (per-lead Burp clicks)."
+            f"</p>")
 
 
 def _evidence_links(f: Finding, output_dir: Optional[Path]) -> str:
