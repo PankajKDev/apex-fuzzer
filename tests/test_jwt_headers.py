@@ -68,7 +68,9 @@ def test_denied_variants_are_negative():
     from main.validation.jwt_replay import jwt_confusion_probe
     http = FakeHttp([_Resp(200, '{"id": 1}'),
                      _Resp(401, "unauthorized"),
-                     _Resp(403, "forbidden")])
+                     _Resp(403, "forbidden"),
+                     _Resp(401, "expired"),
+                     _Resp(401, "forbidden")])
     res = jwt_confusion_probe(
         http, "https://example.com/api/me",
         {"Authorization": f"Bearer {GOOD}"}, "user_a")

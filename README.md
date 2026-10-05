@@ -341,6 +341,8 @@ validation:
   cors_browser: false     # opt-in Chromium read confirmation (extra GET)
   cors_max_endpoints: 10
   cors_max_identities: 3
+  csrf_browser: false     # opt-in Chromium cross-site form execution proof
+  csrf_max_endpoints: 5
   mutation: true          # WAF-aware prescreen before sqlmap/dalfox
   mutation_payloads: 8    # ladder depth per class
   prescreen_max_endpoints: 30  # lead-independent sweep bounds
@@ -659,8 +661,9 @@ sample; no file content is invented), and persisted traffic keeps only safe
 shape metadata (field name, filename, per-part content type/size) plus body
 length. Multipart prescreen replay is implemented from retained raw
 bytes (single text-field replacement; file bytes and boundaries
-preserved exactly); multipart BOLA/BFLA write replay and stateful
-BOLA/BFLA readback remain unimplemented. This capture does not replay
+preserved exactly); multipart BOLA/BFLA write replay remains
+unimplemented (non-multipart shapes replay under the
+`authorization.write_replay` opt-in). This capture does not replay
 mutating requests or prove BOLA/BFLA by itself. Without Playwright installed
 the stage logs a skip.
 
@@ -1007,6 +1010,8 @@ they are not vulnerability outcomes and cannot map to `negative`.
 | hpp | baseline vs duplicated param vs repeat control | inconsistent handling beyond input echo (candidate); identical or echo-only handling is a genuine negative |
 | mass-assignment | own observed shape + `role`/`is_admin` (inert value) | probe value persists on own object (candidate, impact needs human); completed 4xx denial is a genuine negative |
 | deser-oracle | scalar control + array/object JSON type confusion | deserializer exception with clean control (candidate only; gadget reachability unproven) |
+| postmessage-static | cached first-party JS patterns | unguarded message handler, wildcard targetOrigin, document.domain (static candidates; no code persisted) |
+| csrf-execution | null-origin auto-submit with victim session | server accepts 2xx with cookie (high finding); denial is a genuine negative |
 | business-logic | abuse value accepted (echoed, 200) **and** invariant violated | clean re-read shows the mutated value persisted (`verified-effect`) |
 | stored-XSS | inert canary persists and renders unescaped in active sink | — (confirm script execution manually) |
 | race | synchronized burst all-200 with divergent object IDs | sequential idempotency re-check accepts twice with different objects |
@@ -1147,8 +1152,9 @@ requests keep their exact body bytes and method/URL/headers in runtime-only
 endpoint material; the parser extracts field names, filenames, and per-part
 content types (capped at 50 parts / 1 MB, fail-closed), blanks file contents
 and credential/CSRF-like values, and persists only the safe shape metadata
-plus body length. Multipart BOLA/BFLA write replay and stateful BOLA/BFLA
-readback remain unimplemented. SQLi plugins may reuse one retained shape
+plus body length. Multipart BOLA/BFLA write replay remains unimplemented
+(non-multipart write replay and BFLA proof exist behind the
+`authorization.write_replay` opt-in). SQLi plugins may reuse one retained shape
 per finding through the raw-file path described under Validation semantics;
 binary shapes stay inconclusive there, and sqlmap finds no testable
 multipart parameters (prescreen covers text fields). The feature is a
@@ -1242,7 +1248,7 @@ invariants_tested, invariants_violated,
 effects_verified,
 logins_attempted, logins_succeeded,
 graph_nodes, graph_edges,
-workflows_discovered,
+workflows_discovered, attack_chains_built,
 scan_duration_seconds`.
 
 (`stage_durations` exists in the schema but is currently unpopulated —

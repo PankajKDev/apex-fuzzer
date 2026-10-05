@@ -272,7 +272,12 @@ Validation runs only in validation-enabled scans, in this order:
    state-change gate, so they need `--ack-state-change`.
 2. **Misconfiguration sweep** — read-only GETs over page endpoints:
    missing framing protection (clickjacking) and state-changing
-   forms without token fields (CSRF exposure). Parameterized
+   forms without token fields (CSRF exposure). Opt-in Chromium
+   proof (`validation.csrf_browser` plus `--ack-state-change`,
+   needs a victim session): a null-origin page auto-submits the
+   tokenless shape cross-site — server acceptance with the cookie
+   is a high `csrf-execution` finding, denial is a genuine
+   negative. Parameterized
    endpoints also get Host-override (redirect impact only) and
    CRLF marker checks; bare reflection never upgrades.
    Version banners (`Server` with versions, `X-Powered-By`,
@@ -280,12 +285,18 @@ Validation runs only in validation-enabled scans, in this order:
    informational info-disclosure candidates; response bodies are
    never persisted. Duplicated query parameters get an HPP check
    (baseline vs duplicate vs repeat-value control; echo-only
-   differences are not candidates).
+   differences are not candidates). Cached first-party JS gets a
+   postMessage/SOP sweep (unguarded message handlers, wildcard
+   targetOrigin, document.domain) — static candidates only, no
+   code excerpts persisted.
    Informational candidates only; protected pages record genuine
    negatives.
 3. **Differential testing** — same endpoint under each identity;
    JWT confusion replays each identity's own Bearer token with
-   neutralized signatures (alg-none, empty signature); acceptance
+   neutralized signatures (alg-none, empty signature), then
+   claim-tampering variants (exp removed, audience mismatched,
+   privilege claim upgraded or injected — original signature kept
+   so each variant isolates claim validation); acceptance
    like the baseline is a candidate, denial is a genuine negative.
    Two matching 200s (or anonymous 200 on admin/API) become BOLA /
    broken-access candidates. Shape matches require agreeing

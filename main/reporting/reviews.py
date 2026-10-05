@@ -163,21 +163,23 @@ def finding_test_class(finding) -> str:
         if alias in source:
             return mapped
     for candidate in ("sqli", "xss", "cmdi", "ssrf", "ssti", "xxe",
-                      "idor", "bola", "authz", "auth", "cors", "redirect",
+                      "idor", "bola", "authz", "auth", "cors", "csrf",
+                      "redirect",
                       "traversal", "cache", "jwt", "header_injection",
                       "clickjacking", "info_disclosure",
                       "mass_assignment", "parameter_pollution",
-                      "deserialization"):
+                      "deserialization", "postmessage"):
         if candidate in source or candidate.replace("_", "-") in source:
             return candidate
     tags = [str(t).lower() for t in
             (getattr(finding, "tags", None) or [])]
     for candidate in ("sqli", "xss", "cmdi", "ssrf", "ssti", "xxe",
-                      "idor", "bola", "authz", "auth", "cors", "redirect",
+                      "idor", "bola", "authz", "auth", "cors", "csrf",
+                      "redirect",
                       "traversal", "cache", "jwt", "header_injection",
                       "clickjacking", "info_disclosure",
                       "mass_assignment", "parameter_pollution",
-                      "deserialization"):
+                      "deserialization", "postmessage"):
         dashed = candidate.replace("_", "-")
         if any(candidate in tag or dashed in tag for tag in tags):
             return candidate

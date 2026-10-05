@@ -341,6 +341,184 @@ _MAX_HPP_ENDPOINTS = 10
 _MAX_HPP_PARAMS = 3
 
 
+def csrf_browser_probe(csrf_findings, evidence: EvidenceStore,
+                       metrics: Metrics, budgets: BudgetTracker,
+                       coverage: CoverageTracker, client, cfg, scope,
+                       controls: ProbeControls,
+                       identities) -> List[Finding]:
+    """Prove tokenless forms execute cross-site with a victim session.
+
+    Opt-in Chromium proof (validation.csrf_browser + state-change
+    ack): a null-origin page auto-submits the observed form shape
+    with victim cookies; server acceptance proves execution (a new
+    high finding). Denied executions are genuine negatives; anything
+    else leaves the tokenless-form candidate standing.
+    """
+    import importlib.util
+    from urllib.parse import urlencode, urljoin, urlsplit
+    from ...safety.preflight import plan_csrf
+    from ...validation.csrf_browser import prove_csrf_execution
+    if not getattr(getattr(cfg, "validation", None),
+                   "csrf_browser", False):
+        return []
+    if not getattr(getattr(cfg, "safety", None),
+                   "allow_state_change", False):
+        log.info("csrf-proof: needs --ack-state-change (executes a "
+                 "state change as the victim session) — skipping")
+        return []
+    if importlib.util.find_spec("playwright") is None:
+        log.info("csrf-proof: playwright not installed — skipping")
+        coverage.record("csrf", "untestable",
+                        "browser proof needs playwright")
+        return []
+    victims = [i for i in identities or []
+               if getattr(i, "name", "anonymous") != "anonymous"
+               and (dict(getattr(i, "auth_headers", None) or {})
+                    or str(getattr(i, "storage_state", "") or ""))]
+    if not victims:
+        log.info("csrf-proof: no authenticated victim identity — "
+                 "skipping")
+        coverage.record("csrf", "untestable",
+                        "browser proof needs a victim session")
+        return []
+    targets = []
+    for finding in csrf_findings or []:
+        raw = getattr(finding, "raw", None) or {}
+        if isinstance(raw, dict):
+            forms = raw.get("forms") or []
+        else:
+            forms = []
+        forms = [f for f in forms if isinstance(f, dict)
+                 and str(f.get("method", "GET")).upper()
+                 in ("GET", "POST")][:2]
+        if forms:
+            targets.append((finding, forms))
+    max_eps = max(0, int(getattr(cfg.validation, "csrf_max_endpoints",
+                                 5)))
+    targets = targets[:max_eps]
+    if not targets:
+        log.info("csrf-proof: no tokenless GET/POST forms — "
+                 "nothing to prove")
+        return []
+    if not reserve_or_block(
+            budgets, coverage, "csrf",
+            plan_csrf(len(targets))):
+        return []
+    findings: List[Finding] = []
+    victim = victims[0]
+    victim_name = getattr(victim, "name", "victim")
+    victim_headers = dict(getattr(victim, "auth_headers", None) or {})
+    for finding, forms in targets:
+        if controls.halted():
+            log.info("csrf-proof: halted by stop control")
+            break
+        base_url = str(getattr(finding, "endpoint_url", "") or
+                       getattr(finding, "matched_at", "") or "")
+        for form in forms:
+            action = urljoin(base_url, str(form.get("action", "") or ""))
+            try:
+                ok_url = urlsplit(action).scheme.lower() in (
+                    "http", "https")
+            except ValueError:
+                ok_url = False
+            if not ok_url or not scope.active_test_allowed(action):
+                continue
+            method = str(form.get("method", "GET")).upper()
+            fields = {str(item.get("name", "")): "1"
+                      for item in (form.get("inputs") or [])
+                      if isinstance(item, dict) and item.get("name")}
+            if not fields:
+                coverage.record("csrf", "untestable",
+                                f"{action}: form has no named inputs")
+                continue
+            norm = action.split("?")[0]
+            if not budgets.consume_test("csrf", norm, limit=3):
+                coverage.record("csrf", "blocked", f"budget: {norm}")
+                break
+            # Baseline: the shape must work same-origin first.
+            try:
+                if method == "POST":
+                    headers = dict(victim_headers)
+                    headers["Content-Type"] = \
+                        "application/x-www-form-urlencoded"
+                    base = client.post(
+                        action, data=urlencode(fields), headers=headers,
+                        timeout=cfg.scan.http_timeout)
+                else:
+                    sep = "&" if urlsplit(action).query else "?"
+                    base = client.get(
+                        action + sep + urlencode(fields),
+                        headers=victim_headers,
+                        timeout=cfg.scan.http_timeout)
+            except BudgetExceeded:
+                coverage.record("csrf", "blocked", f"budget: {norm}")
+                break
+            except Exception as exc:
+                log.debug("csrf-proof baseline failed %s: %s",
+                          action, exc)
+                coverage.record("csrf", "inconclusive",
+                                f"{norm}: baseline failed")
+                continue
+            if getattr(base, "status_code", 0) != 200:
+                coverage.record("csrf", "inconclusive",
+                                f"{norm}: same-origin baseline "
+                                f"{getattr(base, 'status_code', 0)}")
+                continue
+            controls.paced()
+            proof = prove_csrf_execution(
+                action, method, fields, victim, cfg,
+                timeout_ms=10000)
+            if proof.get("status") == "executed":
+                controls.noted()
+                coverage.record("csrf", "candidate",
+                                f"{norm}: {proof.get('reason')}")
+                f = Finding(
+                    id=stable_finding_id("csrfexec", norm, method),
+                    source="csrf-execution",
+                    name=(f"CSRF executes cross-site with victim "
+                          f"session ({urlsplit(action).path or '/'})"),
+                    severity="high",
+                    confidence=Confidence.PROBABLE.value,
+                    validation_status=ValidationStatus.
+                    STRONG_CANDIDATE.value,
+                    host=urlsplit(action).hostname or "",
+                    matched_at=action,
+                    endpoint_url=action, method=method,
+                    description=(f"{proof.get('reason')} "
+                                 f"(response {proof.get('response_status')}, "
+                                 f"cookie sent, {proof.get('request_count')} "
+                                 f"request(s) via "
+                                 f"{proof.get('browser')})"),
+                    tags=["csrf", "csrf-executed", "session-riding"],
+                    raw={"csrf_proof": dict(proof)},
+                    false_positive_notes=(
+                        "Cross-site execution with the victim session "
+                        "was observed in Chromium and the server "
+                        "accepted (2xx). Persistence of the state "
+                        "change was not verified — confirm the effect "
+                        "stuck (re-read as the victim) and that the "
+                        "session was genuinely privileged before "
+                        "reporting."),
+                    identity=victim_name,
+                )
+                evidence.allocate(f)
+                evidence.record(
+                    f,
+                    request_text=(f"{method} {action}\n(cross-site, "
+                                  f"as {victim_name}; fields: "
+                                  f"{', '.join(sorted(fields))})"),
+                    response_text=str(proof.get("reason") or ""))
+                findings.append(f)
+                log.info("csrf-proof: %s executes cross-site", norm)
+            elif proof.get("status") == "denied":
+                coverage.record("csrf", "tested_negative",
+                                f"{norm}: {proof.get('reason')}")
+            else:
+                coverage.record("csrf", "inconclusive",
+                                f"{norm}: {proof.get('reason')}")
+    return findings
+
+
 def hpp_probe(endpoints: List[Endpoint],
               evidence: EvidenceStore, metrics: Metrics,
               budgets: BudgetTracker,

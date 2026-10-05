@@ -95,6 +95,10 @@ class ValidationConfig:
     cors_browser: bool = False
     cors_max_endpoints: int = 10
     cors_max_identities: int = 3
+    # Cross-site form-execution proof is opt-in: Chromium submits a
+    # tokenless form shape cross-origin with the victim session.
+    csrf_browser: bool = False
+    csrf_max_endpoints: int = 5
     # stored-XSS correlation writes canary data: opt-in only
     second_order: bool = False
     # blind stored-SSRF correlation writes callback URLs: opt-in only
@@ -558,6 +562,7 @@ class Config:
         for key in ("mutation_payloads", "differential_max_endpoints",
                     "open_redirect_max_endpoints", "open_redirect_max_params",
                     "cors_max_endpoints", "cors_max_identities",
+                    "csrf_max_endpoints",
                     "second_order_max_endpoints", "second_order_max_renders",
                     "second_order_ssrf_max_fields", "prescreen_max_endpoints",
                     "prescreen_max_params", "cache_max_endpoints",

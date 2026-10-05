@@ -32,8 +32,9 @@ from .differential import differential_probe
 from .identity import (jwt_confusion_probe, mfa_transition_probe,
                         oauth_probe, otp_bypass_probe, reset_probe)
 from .introspection import graphql_introspection_probe
-from .misconfig import (header_probe, hpp_probe,
+from .misconfig import (csrf_browser_probe, header_probe, hpp_probe,
                          info_disclosure_probe, misconfig_probe)
+from .postmessage import postmessage_probe
 from .oast import maybe_register_oast, oast_sweep
 from .plugins import apply_plugin_results, finding_endpoint
 from .prescreen import deser_probe, prescreen_sweep
@@ -98,6 +99,8 @@ def run_validation(findings: List[Finding],
         out += hpp_probe(
             endpoints, evidence, metrics, budgets, coverage, client,
             cfg, scope, controls)
+        out += postmessage_probe(
+            out_dir, evidence, coverage, cfg, controls)
         out += reset_probe(
             endpoints, evidence, metrics, budgets, coverage, client,
             cfg, scope, controls)
@@ -181,6 +184,17 @@ def run_validation(findings: List[Finding],
                     "Chromium read a successful cross-origin response "
                     "with the configured cookie present")
         out += cors_findings
+
+    # CSRF cross-site execution proof over this run's tokenless-form
+    # findings (opt-in Chromium + state-change ack; needs a victim
+    # session from the configured identities).
+    if (profile.run_validation or cfg.validation.enabled):
+        csrf_targets = [f for f in out
+                        if f.source == "misconfig-csrf"]
+        if csrf_targets:
+            out += csrf_browser_probe(
+                csrf_targets, evidence, metrics, budgets, coverage,
+                client, cfg, scope, controls, identities)
 
     # 1) differential auth-context testing (spec §2)
     if (profile.differential or cfg.validation.differential):

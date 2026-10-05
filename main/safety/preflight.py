@@ -171,8 +171,9 @@ def plan_graphql_introspection(n_endpoints: int) -> RequestPlan:
 
 
 def plan_jwt(n_endpoints: int, n_identities: int) -> RequestPlan:
-    # baseline plus up to two confusion replays per identity
-    return RequestPlan("jwt", "*", 0, n_endpoints * n_identities * 3)
+    # baseline plus up to two confusion and three claim-tampering
+    # replays per identity
+    return RequestPlan("jwt", "*", 0, n_endpoints * n_identities * 6)
 
 
 def plan_header(n_endpoints: int, max_params: int) -> RequestPlan:
@@ -200,6 +201,11 @@ def plan_hpp(n_endpoints: int, max_params: int) -> RequestPlan:
     # baseline plus duplicate and repeat-control probes per parameter
     return RequestPlan("hpp", "*", 0,
                        n_endpoints * (1 + 2 * max_params))
+
+
+def plan_csrf(n_forms: int) -> RequestPlan:
+    # same-origin baseline plus one cross-site browser execution each
+    return RequestPlan("csrf", "*", 0, n_forms * 3)
 
 
 def plan_reset(n_endpoints: int) -> RequestPlan:

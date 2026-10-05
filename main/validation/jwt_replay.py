@@ -67,6 +67,82 @@ def tamper_variants(token: str) -> List[Tuple[str, str]]:
     return variants
 
 
+# Privilege-shaped claim names. Only these are ever upgraded or
+# injected — never sub/iss/jti (cross-user, issuer spoofing, and
+# replay are out of scope for this probe).
+_PRIVILEGE_CLAIMS = ("role", "roles", "admin", "is_admin", "isadmin",
+                     "scope", "scp", "groups", "permissions",
+                     "is_staff", "is_superuser")
+
+_INVALID_AUDIENCE = "apex-invalid-audience"
+
+
+def _already_privileged(value: Any) -> bool:
+    if value is True:
+        return True
+    if isinstance(value, str):
+        return value.strip().lower() == "admin"
+    if isinstance(value, (list, tuple)):
+        return any(isinstance(v, str) and v.strip().lower() == "admin"
+                   for v in value)
+    return False
+
+
+def claim_variants(token: str) -> List[Tuple[str, str]]:
+    """Bounded claim-tampering variants: (label, mutated token).
+
+    Only the caller's own token is mutated, and only exp/aud plus
+    privilege-shaped claims. The original header and signature
+    segments are preserved byte-identical so each variant isolates
+    claim validation (a server that skips signature checks is
+    already caught by the confusion variants; acceptance notes name
+    both possibilities).
+    """
+    claims = parse_jwt(token)
+    if claims is None:
+        return []
+    try:
+        payload = dict(claims.payload)
+        segments = str(token).strip().strip("'\"").split(".")
+    except (TypeError, ValueError, AttributeError):
+        return []
+    if len(segments) != 3:
+        return []
+    head, _, sig = segments
+
+    def _splice(mutated: dict) -> str:
+        return f"{head}.{_encode_segment(mutated)}.{sig}"
+
+    variants = []
+    if "exp" in payload:
+        stripped = {k: v for k, v in payload.items() if k != "exp"}
+        variants.append(("exp-removed", _splice(stripped)))
+    if "aud" in payload and payload.get("aud") != _INVALID_AUDIENCE:
+        mutated = dict(payload)
+        mutated["aud"] = _INVALID_AUDIENCE
+        variants.append(("aud-mismatched", _splice(mutated)))
+    priv_key = next((k for k in payload
+                     if str(k).lower() in _PRIVILEGE_CLAIMS), None)
+    if priv_key is not None:
+        current = payload[priv_key]
+        upgraded: Any = None
+        if isinstance(current, bool):
+            upgraded = True
+        elif isinstance(current, str):
+            upgraded = "admin"
+        elif isinstance(current, list):
+            upgraded = ["admin"]
+        if upgraded is not None and not _already_privileged(current):
+            mutated = dict(payload)
+            mutated[priv_key] = upgraded
+            variants.append(("privilege-upgraded", _splice(mutated)))
+    else:
+        mutated = dict(payload)
+        mutated["role"] = "admin"
+        variants.append(("privilege-injected", _splice(mutated)))
+    return variants[:3]
+
+
 @dataclass
 class JwtProbeResult:
     url: str
@@ -120,7 +196,11 @@ def jwt_confusion_probe(client, url: str, identity_headers: Dict,
                     f"expired or endpoint not authorized for this " \
                     f"identity — nothing to compare"
         return res
-    for label, mutated in tamper_variants(original):
+    attempts = [(label, mutated, False)
+                for label, mutated in tamper_variants(original)]
+    attempts += [(label, mutated, True)
+                 for label, mutated in claim_variants(original)]
+    for label, mutated, is_claim in attempts:
         try:
             r = client.get(url, headers=_swap_bearer(identity_headers,
                                                      mutated),
@@ -139,12 +219,23 @@ def jwt_confusion_probe(client, url: str, identity_headers: Dict,
                  norm["key_shape"] == base_norm["key_shape"])):
             res.verdict = "accepted"
             res.status = 200
+            reason = _claim_reason(label) if is_claim else \
+                "signature may not be enforced"
             res.notes = f"tampered token ({label}) served like the " \
-                        f"baseline — signature may not be enforced"
+                        f"baseline — {reason}"
             res.evidence = {"variant": label,
                             "baseline_hash": base_norm["body_hash"],
                             "replay_hash": norm["body_hash"]}
             return res
     res.verdict = "denied"
-    res.notes = "confusion variants rejected or diverged"
+    res.notes = "confusion and claim variants rejected or diverged"
     return res
+
+
+def _claim_reason(label: str) -> str:
+    if label == "exp-removed":
+        return "token expiry (and/or signature) may not be enforced"
+    if label == "aud-mismatched":
+        return "token audience (and/or signature) may not be enforced"
+    return "privilege claims (and/or signature) may not be enforced " \
+           "— confirm the privilege takes effect, not just acceptance"

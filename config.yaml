@@ -68,6 +68,8 @@ validation:
   cors_browser: false     # opt-in Chromium read confirmation (extra GET)
   cors_max_endpoints: 10
   cors_max_identities: 3
+  csrf_browser: false     # opt-in Chromium cross-site form execution proof
+  csrf_max_endpoints: 5
   mutation: true          # WAF-aware prescreen before sqlmap/dalfox [active]
   mutation_payloads: 8    # ladder depth per class
   # Lead-independent prescreen sweep bounds (no Nuclei lead required).

@@ -185,7 +185,7 @@ def test_planner_math():
     g = plan_graphql_introspection(4)
     assert (g.mutation_requests, g.total) == (4, 4)
     assert plan_misconfig(6).total == 6
-    assert plan_jwt(2, 2).total == 12
+    assert plan_jwt(2, 2).total == 24
     assert plan_header(4, 3).total == 20
 
 
