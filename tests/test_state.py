@@ -6,26 +6,26 @@ matrix observations land in the graph with snapshots, transitions,
 and resume-aware change detection. No network in any test.
 """
 
-from apex_fuzzer.graph.application_graph import (
+from main.graph.application_graph import (
     ApplicationGraph, NODE_TYPES, EDGE_TYPES, nid)
-from apex_fuzzer.state.graph import (
+from main.state.graph import (
     ensure_identity, ensure_endpoint, ensure_session,
     record_observation, record_transition, sync_matrix_observations,
     ensure_workflow)
-from apex_fuzzer.state.snapshots import StateSnapshot, SnapshotStore
-from apex_fuzzer.state.transitions import Transition, TransitionLog
-from apex_fuzzer.state.diff import (diff_snapshots, diff_graphs,
+from main.state.snapshots import StateSnapshot, SnapshotStore
+from main.state.transitions import Transition, TransitionLog
+from main.state.diff import (diff_snapshots, diff_graphs,
                                      summarize)
-from apex_fuzzer.state.resources import ResourceState, ResourceTracker
-from apex_fuzzer.state.lifecycle import (
+from main.state.resources import ResourceState, ResourceTracker
+from main.state.lifecycle import (
     Lifecycle, check_transition, DEFAULT_LIFECYCLES)
-from apex_fuzzer.authorization.matrix import (
+from main.authorization.matrix import (
     AuthorizationMatrix, AuthorizationObservation)
-from apex_fuzzer.models import Identity, Endpoint, Parameter
+from main.models import Identity, Endpoint, Parameter
 
 
 def _ep(url):
-    from apex_fuzzer.discovery.url_normalizer import normalize_url
+    from main.discovery.url_normalizer import normalize_url
     from urllib.parse import urlparse
     p = urlparse(url)
     return Endpoint(url=url, normalized_url=normalize_url(url),
@@ -259,13 +259,13 @@ def _matrix_http(mode):
 
 def _run_matrix(out_dir, http, identities, app_graph=None):
     from pathlib import Path
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.config import Config
-    from apex_fuzzer.profiles import get as get_profile
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.reporting.coverage import CoverageTracker
-    from apex_fuzzer.budgets import BudgetTracker
-    from apex_fuzzer.validation.evidence import EvidenceStore
+    from main.orchestrator import Orchestrator
+    from main.config import Config
+    from main.profiles import get as get_profile
+    from main.reporting.metrics import Metrics
+    from main.reporting.coverage import CoverageTracker
+    from main.budgets import BudgetTracker
+    from main.validation.evidence import EvidenceStore
     out = Path(out_dir)
     cfg = Config()
     cfg.authorization.enabled = True
@@ -282,7 +282,7 @@ def _run_matrix(out_dir, http, identities, app_graph=None):
 
 
 def test_matrix_observations_land_in_graph(tmp_path):
-    from apex_fuzzer.graph.application_graph import ApplicationGraph
+    from main.graph.application_graph import ApplicationGraph
     ids = [Identity(name="anonymous"),
            Identity(name="user_a", auth_headers={"Cookie": "s=A"}),
            Identity(name="user_b", auth_headers={"Cookie": "s=B"})]
@@ -299,8 +299,8 @@ def test_matrix_observations_land_in_graph(tmp_path):
 
 
 def test_resume_detects_behavior_change(tmp_path):
-    from apex_fuzzer.graph.application_graph import ApplicationGraph
-    from apex_fuzzer.state.transitions import TransitionLog
+    from main.graph.application_graph import ApplicationGraph
+    from main.state.transitions import TransitionLog
     ids = [Identity(name="anonymous"),
            Identity(name="user_a", auth_headers={"Cookie": "s=A"}),
            Identity(name="user_b", auth_headers={"Cookie": "s=B"})]

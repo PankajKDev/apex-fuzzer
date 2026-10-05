@@ -16,7 +16,7 @@ RUN useradd -m apex \
 
 WORKDIR /app
 COPY pyproject.toml README.md config.yaml ./
-COPY apex_fuzzer ./apex_fuzzer
+COPY main ./main
 RUN pip install --no-cache-dir . \
     && apex-fuzzer --help > /dev/null
 

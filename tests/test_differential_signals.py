@@ -1,8 +1,8 @@
 """Tests: redirect/error/latency differential signals (R/E/T)."""
 import json
 
-from apex_fuzzer.validation import differential as diff_mod
-from apex_fuzzer.validation.differential import DifferentialTester
+from main.validation import differential as diff_mod
+from main.validation.differential import DifferentialTester
 
 
 class _Resp:
@@ -86,7 +86,7 @@ def test_anon_redirect_with_authed_200_is_healthy():
 
 
 def test_probe_records_latency():
-    from apex_fuzzer.config import AuthContext, Config
+    from main.config import AuthContext, Config
 
     class Http:
         def get(self, url, headers=None, timeout=10):

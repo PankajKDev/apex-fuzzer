@@ -4,9 +4,9 @@ Fake cache implementations only. No network.
 """
 from types import SimpleNamespace
 
-from apex_fuzzer.budgets import BudgetExceeded
-from apex_fuzzer.safety.preflight import plan_cache
-from apex_fuzzer.validation.cache import (
+from main.budgets import BudgetExceeded
+from main.safety.preflight import plan_cache
+from main.validation.cache import (
     BUSTER_PREFIX, cache_hit_detail, probe_deception)
 
 

@@ -2,7 +2,7 @@ import json
 import textwrap
 from pathlib import Path
 
-from apex_fuzzer.validation.oast import InteractshProvider
+from main.validation.oast import InteractshProvider
 
 
 def _fake_interactsh_client(path):
@@ -30,7 +30,7 @@ def test_official_client_wrapper_registers_and_reads_jsonl(tmp_path,
                                                            monkeypatch):
     binary = tmp_path / "interactsh-client"
     _fake_interactsh_client(binary)
-    monkeypatch.setattr("apex_fuzzer.validation.oast.shutil.which",
+    monkeypatch.setattr("main.validation.oast.shutil.which",
                         lambda _name: str(binary))
     provider = InteractshProvider(timeout=2)
 
@@ -53,7 +53,7 @@ def test_official_client_wrapper_registers_and_reads_jsonl(tmp_path,
 
 
 def test_public_oast_fails_closed_without_official_client(monkeypatch):
-    monkeypatch.setattr("apex_fuzzer.validation.oast.shutil.which",
+    monkeypatch.setattr("main.validation.oast.shutil.which",
                         lambda _name: None)
     provider = InteractshProvider()
     assert not provider.register()
@@ -82,7 +82,7 @@ def test_official_client_retries_other_public_server(tmp_path, monkeypatch):
             time.sleep(0.1)
     """))
     binary.chmod(0o755)
-    monkeypatch.setattr("apex_fuzzer.validation.oast.shutil.which",
+    monkeypatch.setattr("main.validation.oast.shutil.which",
                         lambda _name: str(binary))
     provider = InteractshProvider(timeout=2)
 

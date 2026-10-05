@@ -3,11 +3,11 @@ from urllib.parse import parse_qs, urlparse
 
 import pytest
 
-from apex_fuzzer.budgets import BudgetExceeded
-from apex_fuzzer.config import Config
-from apex_fuzzer.models import Finding
-from apex_fuzzer.validation.base import Candidate
-from apex_fuzzer.validation.path_traversal import PathTraversalValidator
+from main.budgets import BudgetExceeded
+from main.config import Config
+from main.models import Finding
+from main.validation.base import Candidate
+from main.validation.path_traversal import PathTraversalValidator
 
 
 MARKER = "APEX_SAFE_FILE_MARKER_2026"

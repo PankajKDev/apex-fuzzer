@@ -4,13 +4,13 @@ No network. Fake HTTP clients and fake sqlmap runners only.
 """
 from types import SimpleNamespace
 
-from apex_fuzzer.config import Config
-from apex_fuzzer.models import Finding, Parameter
-from apex_fuzzer.validation import mutate as mut_mod
-from apex_fuzzer.validation import observed_sqli as obs_mod
-from apex_fuzzer.validation import sqli as sqli_mod
-from apex_fuzzer.validation.base import Candidate
-from apex_fuzzer.validation.multipart import (
+from main.config import Config
+from main.models import Finding, Parameter
+from main.validation import mutate as mut_mod
+from main.validation import observed_sqli as obs_mod
+from main.validation import sqli as sqli_mod
+from main.validation.base import Candidate
+from main.validation.multipart import (
     multipart_field_value, multipart_with_parameter)
 
 BOUNDARY = "----WebKitFormBoundary7MA4YWxkTrZu0gW"
@@ -209,7 +209,7 @@ def test_multipart_body_stays_off_without_state_ack():
 
 
 def test_observed_selection_pins_text_only_multipart():
-    from apex_fuzzer.models import Endpoint
+    from main.models import Endpoint
     ep = Endpoint(url="https://example.test/upload",
                   normalized_url="https://example.test/upload",
                   method="POST",
@@ -231,7 +231,7 @@ def test_observed_selection_pins_text_only_multipart():
 
 
 def test_observed_file_param_and_binary_fail_closed():
-    from apex_fuzzer.models import Endpoint
+    from main.models import Endpoint
     ep = Endpoint(url="https://example.test/upload",
                   normalized_url="https://example.test/upload",
                   method="POST")

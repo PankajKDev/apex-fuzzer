@@ -1,8 +1,8 @@
 """Tests: header/content-type signals in differential analysis."""
 import json
 
-from apex_fuzzer.validation import differential as diff_mod
-from apex_fuzzer.validation.differential import DifferentialTester
+from main.validation import differential as diff_mod
+from main.validation.differential import DifferentialTester
 
 
 class _Resp:
@@ -107,7 +107,7 @@ def test_anon_json_200_stays_candidate():
 
 
 def test_probe_carries_header_fields():
-    from apex_fuzzer.config import AuthContext, Config
+    from main.config import AuthContext, Config
 
     class Http:
         def get(self, url, headers=None, timeout=10):

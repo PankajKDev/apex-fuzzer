@@ -1,4 +1,4 @@
-from apex_fuzzer.discovery import parameters as p
+from main.discovery import parameters as p
 
 
 def test_from_url_basic():

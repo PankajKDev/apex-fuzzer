@@ -4,16 +4,16 @@ No network. Fake HTTP clients and fake sqlmap runners only.
 """
 from types import SimpleNamespace
 
-from apex_fuzzer.config import Config, ScopeConfig
-from apex_fuzzer.models import Endpoint, Finding, Parameter
-from apex_fuzzer.plugins.adapters import _candidate_from
-from apex_fuzzer.plugins.base import TestTarget, TestContext
-from apex_fuzzer.scope import Scope
-from apex_fuzzer.validation import mutate as mut_mod
-from apex_fuzzer.validation import observed_sqli as obs_mod
-from apex_fuzzer.validation import sqli as sqli_mod
-from apex_fuzzer.validation.base import Candidate
-from apex_fuzzer.validation.request_shape import (
+from main.config import Config, ScopeConfig
+from main.models import Endpoint, Finding, Parameter
+from main.plugins.adapters import _candidate_from
+from main.plugins.base import TestTarget, TestContext
+from main.scope import Scope
+from main.validation import mutate as mut_mod
+from main.validation import observed_sqli as obs_mod
+from main.validation import sqli as sqli_mod
+from main.validation.base import Candidate
+from main.validation.request_shape import (
     cookie_with_parameter, is_protected_parameter)
 
 
@@ -259,7 +259,7 @@ def test_sqlmap_stays_prescreen_only_for_headers(monkeypatch):
 
 
 def test_plugin_blocks_out_of_scope_header_target():
-    from apex_fuzzer.plugins.adapters import XssMutationPlugin
+    from main.plugins.adapters import XssMutationPlugin
     cfg = Config()
     target = TestTarget("https://other.example/api/who",
                         parameter="X-Custom-Id", method="GET",

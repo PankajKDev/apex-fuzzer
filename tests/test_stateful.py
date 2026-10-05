@@ -2,17 +2,17 @@
 producers, business-logic mutations, race engine. No network."""
 import json
 
-from apex_fuzzer.authorization.harvest import HarvestedId
-from apex_fuzzer.authorization.access_tests import swap_ids
-from apex_fuzzer.logic.observations import (
+from main.authorization.harvest import HarvestedId
+from main.authorization.access_tests import swap_ids
+from main.logic.observations import (
     observation_from_swap, observation_from_business,
     observation_from_race, evaluate_observation, violated)
-from apex_fuzzer.logic.business_logic import (
+from main.logic.business_logic import (
     BusinessLogicTester, candidate_params)
-from apex_fuzzer.logic.race import run_race
-from apex_fuzzer.budgets import BudgetExceeded
-from apex_fuzzer.models import Identity, Endpoint, Parameter, Finding
-from apex_fuzzer.config import Config
+from main.logic.race import run_race
+from main.budgets import BudgetExceeded
+from main.models import Identity, Endpoint, Parameter, Finding
+from main.config import Config
 
 
 class FakeResp:
@@ -23,7 +23,7 @@ class FakeResp:
 
 
 def _ep(url, qparams=None, bparams=None, etype="api"):
-    from apex_fuzzer.discovery.url_normalizer import normalize_url
+    from main.discovery.url_normalizer import normalize_url
     from urllib.parse import urlparse
     p = urlparse(url)
     e = Endpoint(url=url, normalized_url=normalize_url(url),
@@ -92,8 +92,8 @@ def test_swap_negative_recorded_by_orchestrator():
         def get(self, url, **kw):
             return FakeResp(403, "denied")
 
-    from apex_fuzzer.authorization.harvest import HarvestedId
-    from apex_fuzzer.validation.differential import normalize_response
+    from main.authorization.harvest import HarvestedId
+    from main.validation.differential import normalize_response
 
     class R:
         status_code = 200
@@ -110,7 +110,7 @@ def test_swap_negative_recorded_by_orchestrator():
 
 # ── invariant producers ───────────────────────────────────────────────
 def test_observation_from_swap_fires_cross_user_read():
-    from apex_fuzzer.authorization.access_tests import SwapResult
+    from main.authorization.access_tests import SwapResult
     sw = SwapResult(endpoint_url="https://t.com/api/u?id=1", param="id",
                     victim_value="1", owner="user_a", owner_tenant="t1",
                     tester="user_b", tester_tenant="t2")
@@ -121,7 +121,7 @@ def test_observation_from_swap_fires_cross_user_read():
 
 
 def test_observation_from_swap_same_owner_clean():
-    from apex_fuzzer.authorization.access_tests import SwapResult
+    from main.authorization.access_tests import SwapResult
     sw = SwapResult(endpoint_url="x", param="id", victim_value="1",
                     owner="user_a", tester="user_a")
     obs = observation_from_swap(sw)
@@ -183,7 +183,7 @@ def test_business_negative_quantity_violation():
     cfg = Config()
     t = BusinessLogicTester(cfg, _biz_http())
     ep = _ep("https://t.com/cart?qty=2", [("qty", "2")])
-    from apex_fuzzer.logic.business_logic import candidate_params
+    from main.logic.business_logic import candidate_params
     cands = candidate_params(ep)
     assert len(cands) == 1
     results = t.probe(ep, cands[0], _ident("user_a"))
@@ -198,7 +198,7 @@ def test_business_baseline_not_200_is_inconclusive():
     cfg = Config()
     t = BusinessLogicTester(cfg, _biz_http(baseline=401))
     ep = _ep("https://t.com/cart?qty=2", [("qty", "2")])
-    from apex_fuzzer.logic.business_logic import candidate_params
+    from main.logic.business_logic import candidate_params
     results = t.probe(ep, candidate_params(ep)[0], _ident("user_a"))
     assert results and all(r.verdict == "inconclusive"
                            for r in results)
@@ -209,7 +209,7 @@ def test_business_no_echo_no_finding():
     cfg = Config()
     t = BusinessLogicTester(cfg, _biz_http(echo=False))
     ep = _ep("https://t.com/cart?qty=2", [("qty", "2")])
-    from apex_fuzzer.logic.business_logic import candidate_params
+    from main.logic.business_logic import candidate_params
     results = t.probe(ep, candidate_params(ep)[0], _ident("user_a"))
     assert all(r.verdict != "strong_candidate" for r in results)
 
@@ -221,7 +221,7 @@ def test_token_reuse_double_accept():
     ep.body_parameters.append(Parameter(
         name="coupon", location="body", source=["html"],
         sample_value="SAVE10"))
-    from apex_fuzzer.logic.business_logic import candidate_params
+    from main.logic.business_logic import candidate_params
     cands = [c for c in candidate_params(ep) if c.kind == "token_reuse"]
     assert cands
     results = t.probe(ep, cands[0], _ident("user_a"))
@@ -332,7 +332,7 @@ def test_race_single_use_multiple_accepts_are_candidate():
 
 
 def test_inventory_value_requires_one_finite_number():
-    from apex_fuzzer.logic.race import inventory_value
+    from main.logic.race import inventory_value
     assert inventory_value('{"stock": 4}', "$.stock") == 4
     assert inventory_value('{"stock": null}', "$.stock") is None
     assert inventory_value('{"stock": 4, "other": 2}', "$") is None
@@ -341,12 +341,12 @@ def test_inventory_value_requires_one_finite_number():
 def test_single_use_profile_requires_sequential_replay_verification():
     import tempfile
     from pathlib import Path
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.reporting.coverage import CoverageTracker
-    from apex_fuzzer.budgets import BudgetTracker
-    from apex_fuzzer.validation.evidence import EvidenceStore
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
+    from main.reporting.metrics import Metrics
+    from main.reporting.coverage import CoverageTracker
+    from main.budgets import BudgetTracker
+    from main.validation.evidence import EvidenceStore
 
     class H:
         def post(self, url, **kw):
@@ -370,12 +370,12 @@ def test_single_use_profile_requires_sequential_replay_verification():
 def test_race_inventory_profile_verifies_negative_stock():
     import tempfile
     from pathlib import Path
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.reporting.coverage import CoverageTracker
-    from apex_fuzzer.budgets import BudgetTracker
-    from apex_fuzzer.validation.evidence import EvidenceStore
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
+    from main.reporting.metrics import Metrics
+    from main.reporting.coverage import CoverageTracker
+    from main.budgets import BudgetTracker
+    from main.validation.evidence import EvidenceStore
 
     class H:
         reads = 0
@@ -413,7 +413,7 @@ def test_race_inventory_profile_verifies_negative_stock():
 
 def test_stable_finding_id_deterministic():
     import hashlib
-    from apex_fuzzer.models import stable_finding_id
+    from main.models import stable_finding_id
     got = stable_finding_id("swap", "https://t.com/api/u", "id", "1")
     # pinned to an independently computed digest: immune to
     # PYTHONHASHSEED randomization, unlike the old abs(hash(...))
@@ -453,8 +453,8 @@ def test_race_budget_raises():
 def _orch(profile="standard"):
     import tempfile
     from pathlib import Path
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
     td = tempfile.mkdtemp()
     return (Orchestrator(Config(), Path(td),
                          profile=get_profile(profile)),
@@ -463,10 +463,10 @@ def _orch(profile="standard"):
 
 def test_business_probe_end_to_end():
     orch, out = _orch()
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.reporting.coverage import CoverageTracker
-    from apex_fuzzer.budgets import BudgetTracker
-    from apex_fuzzer.validation.evidence import EvidenceStore
+    from main.reporting.metrics import Metrics
+    from main.reporting.coverage import CoverageTracker
+    from main.budgets import BudgetTracker
+    from main.validation.evidence import EvidenceStore
     cfg = Config()
     eps = [_ep("https://t.com/cart?qty=2", [("qty", "2")])]
     m, cov = Metrics(), CoverageTracker()
@@ -485,10 +485,10 @@ def test_business_probe_end_to_end():
 
 def test_business_probe_no_params_untestable():
     orch, out = _orch()
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.reporting.coverage import CoverageTracker
-    from apex_fuzzer.budgets import BudgetTracker
-    from apex_fuzzer.validation.evidence import EvidenceStore
+    from main.reporting.metrics import Metrics
+    from main.reporting.coverage import CoverageTracker
+    from main.budgets import BudgetTracker
+    from main.validation.evidence import EvidenceStore
     cov = CoverageTracker()
     found = orch._business_logic_probe(
         [_ep("https://t.com/about")], EvidenceStore(out / "proofs"),
@@ -500,10 +500,10 @@ def test_business_probe_no_params_untestable():
 
 def test_race_probe_end_to_end():
     orch, out = _orch()
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.reporting.coverage import CoverageTracker
-    from apex_fuzzer.budgets import BudgetTracker
-    from apex_fuzzer.validation.evidence import EvidenceStore
+    from main.reporting.metrics import Metrics
+    from main.reporting.coverage import CoverageTracker
+    from main.budgets import BudgetTracker
+    from main.validation.evidence import EvidenceStore
     cfg = Config()
     cfg.race.concurrency = 3
     cfg.race.rounds = 1
@@ -530,10 +530,10 @@ def test_race_probe_end_to_end():
 def test_swap_negative_coverage_recorded():
     # precondition rule: completed denial → tested_negative
     orch, out = _orch()
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.reporting.coverage import CoverageTracker
-    from apex_fuzzer.budgets import BudgetTracker
-    from apex_fuzzer.validation.evidence import EvidenceStore
+    from main.reporting.metrics import Metrics
+    from main.reporting.coverage import CoverageTracker
+    from main.budgets import BudgetTracker
+    from main.validation.evidence import EvidenceStore
 
     class H:
         def get(self, url, **kw):
@@ -570,20 +570,20 @@ def test_config_and_cli_flags():
     assert cfg.business.enabled is False
     assert cfg.race.enabled is False
     assert cfg.race.concurrency == 10
-    from apex_fuzzer.cli import build_parser
-    from apex_fuzzer.config import apply_cli_overrides
+    from main.cli import build_parser
+    from main.config import apply_cli_overrides
     args = build_parser().parse_args(
         ["-d", "x.com", "--business-logic", "--race"])
     cfg2 = apply_cli_overrides(Config(), args)
     assert cfg2.business.enabled and cfg2.race.enabled
-    from apex_fuzzer.profiles import get as get_profile
+    from main.profiles import get as get_profile
     assert get_profile("deep").business_logic is True
     assert get_profile("deep").race is False
     assert get_profile("validation").business_logic is True
 
 
 def test_impact_business_and_race():
-    from apex_fuzzer.reporting import impact as im
+    from main.reporting import impact as im
     b = Finding(id="1", source="business-logic",
                 name="Business logic: qty=-1 accepted, violates inv",
                 matched_at="https://t.com/cart",

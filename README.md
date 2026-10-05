@@ -791,7 +791,7 @@ shared-template warning in every FP note.
 
 ### Phase 7 views (same stage, no new requests)
 
-`apex_fuzzer/authz/` replays the recorded data four ways into
+`main/authz/` replays the recorded data four ways into
 `authorization_matrix.json` (`extended` + `views` keys, additive —
 old artifacts still load):
 
@@ -855,7 +855,7 @@ a bare 200 is never enough. Non-200 baselines yield `inconclusive`,
 never negatives.
 
 Every accepted mutation then goes through **readback verification**
-(`apex_fuzzer/verify/`): the mutated value is re-observed via a clean
+(`main/verify/`): the mutated value is re-observed via a clean
 re-read (GET endpoints), user-supplied `after_read` URLs, or sequential
 double-submits (token reuse, idempotency keys). A persisted effect
 upgrades the finding to `confirmed` (`verified-effect` tag); a clean
@@ -884,7 +884,7 @@ requests per endpoint. Budget exhaustion is `blocked`, never a negative.
 
 ### 8f. Workflow discovery (always on, zero network)
 
-After validation, `apex_fuzzer/workflows/` infers multi-step flows
+After validation, `main/workflows/` infers multi-step flows
 purely from collected data — no requests are sent, so this stage
 always runs. Producers: REST stem grouping (collection/member
 folding, CRUD-ordered steps), timestamp-ordered browser traffic
@@ -1222,7 +1222,7 @@ reserved for per-stage timing.)
 
 ## Data models
 
-`apex_fuzzer/models.py` — dataclasses with `to_dict`/`from_dict` (unknown
+`main/models.py` — dataclasses with `to_dict`/`from_dict` (unknown
 JSONL keys are ignored on load, so old artifacts stay readable):
 
 - **`Parameter`**: `name, location` (query/body/header), `source` (url, html,
@@ -1288,7 +1288,7 @@ Query helpers: `neighbors()`, `nodes_of_type()`,
 
 ## Application state graph (agent Phase 3)
 
-`apex_fuzzer/state/` builds behavior onto the structural graph — same
+`main/state/` builds behavior onto the structural graph — same
 `ApplicationGraph` store, no parallel implementation:
 
 - **`graph.py`**: observation → edge builders. Every tested
@@ -1374,7 +1374,7 @@ below every cap.
 
 ## Safety gates and execution controls (Milestone 1)
 
-`apex_fuzzer/safety/` makes aggressive testing opt-in provable:
+`main/safety/` makes aggressive testing opt-in provable:
 
 | Module | Traffic mode | Could change state? | Default | Extra authorization |
 |---|---|---:|---:|---|
@@ -1458,7 +1458,7 @@ new file plus one `register()` line — no orchestrator surgery.
 
 ## Scope enforcement
 
-`Scope` (`apex_fuzzer/scope.py`) is consulted on every URL the pipeline
+`Scope` (`main/scope.py`) is consulted on every URL the pipeline
 emits, probes, or reports:
 
 - scheme must be http/https; `excluded_hosts` and `excluded_paths` (prefix)
@@ -1468,7 +1468,7 @@ emits, probes, or reports:
 - `active_test_allowed` additionally blocks `active_test_exclude_exts`
   (images, fonts, media, archives) from Arjun, differential, and OAST probes.
 
-Subprocess execution (`apex_fuzzer/shell.py`) takes argv arrays only (string
+Subprocess execution (`main/shell.py`) takes argv arrays only (string
 commands raise `TypeError`), with per-call timeouts and structured results.
 
 ---
@@ -1552,7 +1552,7 @@ workflows (login, sessions, JWT/OAuth/OIDC passive), and state graph
 ## Project structure
 
 ```
-apex_fuzzer/
+main/
   orchestrator.py        10-stage pipeline, AI loop closure
   cli.py                 argparse, --doctor, --update
   config.py              Scan/Discovery/Validation/Budgets/Oast/Nuclei/AI/Auth/Reporting/Scope

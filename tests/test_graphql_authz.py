@@ -5,15 +5,15 @@ No network. Fake HTTP clients only.
 import json
 from types import SimpleNamespace
 
-from apex_fuzzer.authorization import graphql_replay as gql_mod
-from apex_fuzzer.config import Config, ScopeConfig
-from apex_fuzzer.models import Endpoint, Finding, Parameter
-from apex_fuzzer.plugins.adapters import _candidate_from
-from apex_fuzzer.plugins.base import TestTarget
-from apex_fuzzer.scope import Scope
-from apex_fuzzer.validation import graphql as gql_val
-from apex_fuzzer.validation import mutate as mut_mod
-from apex_fuzzer.validation.base import Candidate
+from main.authorization import graphql_replay as gql_mod
+from main.config import Config, ScopeConfig
+from main.models import Endpoint, Finding, Parameter
+from main.plugins.adapters import _candidate_from
+from main.plugins.base import TestTarget
+from main.scope import Scope
+from main.validation import graphql as gql_val
+from main.validation import mutate as mut_mod
+from main.validation.base import Candidate
 
 QUERY = ("query GetUser($id: ID!) { user(id: $id) "
          "{ id name email } }")
@@ -247,7 +247,7 @@ def test_ambiguous_shapes_fail_closed():
 
 
 def test_budget_exhaustion_propagates():
-    from apex_fuzzer.budgets import BudgetExceeded
+    from main.budgets import BudgetExceeded
 
     class Http:
         def request(self, *args, **kwargs):
@@ -264,7 +264,7 @@ def test_budget_exhaustion_propagates():
 
 
 def test_plan_accounts_graphql_replays():
-    from apex_fuzzer.safety.preflight import plan_authz_matrix
+    from main.safety.preflight import plan_authz_matrix
     base = plan_authz_matrix(2, 3, 5, 3)
     assert base.total == 6 + 24 + 30
     extended = plan_authz_matrix(2, 3, 5, 3, 0, 4)

@@ -4,11 +4,11 @@ No network. Fake HTTP clients only.
 """
 from types import SimpleNamespace
 
-from apex_fuzzer.authorization import write_replay as wr_mod
-from apex_fuzzer.budgets import BudgetExceeded
-from apex_fuzzer.config import Config, ScopeConfig
-from apex_fuzzer.models import Endpoint
-from apex_fuzzer.scope import Scope
+from main.authorization import write_replay as wr_mod
+from main.budgets import BudgetExceeded
+from main.config import Config, ScopeConfig
+from main.models import Endpoint
+from main.scope import Scope
 
 
 def _scope():
@@ -249,7 +249,7 @@ def test_budget_exhaustion_propagates():
 
 
 def test_plan_accounts_write_replays():
-    from apex_fuzzer.safety.preflight import plan_authz_matrix
+    from main.safety.preflight import plan_authz_matrix
     base = plan_authz_matrix(2, 3, 5, 3)
     assert base.total == 6 + 24 + 30
     extended = plan_authz_matrix(2, 3, 5, 3, write_replays=4)
@@ -288,11 +288,11 @@ def test_duplicate_victims_replay_once():
 
 
 def test_orchestrator_emits_confirmed_write_finding(tmp_path):
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
-    from apex_fuzzer.reporting.coverage import CoverageTracker
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.validation.evidence import EvidenceStore
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
+    from main.reporting.coverage import CoverageTracker
+    from main.reporting.metrics import Metrics
+    from main.validation.evidence import EvidenceStore
 
     cfg = Config()
     cfg.authorization.write_replay = True

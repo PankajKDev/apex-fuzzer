@@ -13,14 +13,14 @@ from urllib.parse import parse_qs, urlsplit
 import pytest
 import requests
 
-from apex_fuzzer.config import Config
-from apex_fuzzer.models import Endpoint, Finding
-from apex_fuzzer.plugins.adapters import _xxe_candidate_from
-from apex_fuzzer.plugins.base import TestTarget
-from apex_fuzzer.validation.base import Candidate
-from apex_fuzzer.validation.path_traversal import PathTraversalValidator
-from apex_fuzzer.validation.ssti import SstiValidator
-from apex_fuzzer.validation.xxe import XxeValidator
+from main.config import Config
+from main.models import Endpoint, Finding
+from main.plugins.adapters import _xxe_candidate_from
+from main.plugins.base import TestTarget
+from main.validation.base import Candidate
+from main.validation.path_traversal import PathTraversalValidator
+from main.validation.ssti import SstiValidator
+from main.validation.xxe import XxeValidator
 
 
 MARKER = "APEX_LOCAL_INTEGRATION_MARKER_2026"

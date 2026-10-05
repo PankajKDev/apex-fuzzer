@@ -4,9 +4,9 @@ Fake providers/HTTP only, except where noted. No network.
 """
 from types import SimpleNamespace
 
-from apex_fuzzer.models import Endpoint, Parameter
-from apex_fuzzer.validation import ssrf_bypass as bypass_mod
-from apex_fuzzer.validation.oast import probe_endpoint
+from main.models import Endpoint, Parameter
+from main.validation import ssrf_bypass as bypass_mod
+from main.validation.oast import probe_endpoint
 
 
 def _ep(url="https://target.test/fetch?url=1"):
@@ -99,7 +99,7 @@ class _Provider:
 
 
 def _canary_paths():
-    from apex_fuzzer.validation.second_order import make_ssrf_canary
+    from main.validation.second_order import make_ssrf_canary
     return make_ssrf_canary("http://127.0.0.1:9001/cb", "http")
 
 
@@ -159,7 +159,7 @@ def test_response_reflecting_token_is_flagged_not_upgraded():
 
 
 def test_budget_exhaustion_propagates():
-    from apex_fuzzer.budgets import BudgetExceeded
+    from main.budgets import BudgetExceeded
 
     class Http:
         def get(self, *args, **kwargs):
@@ -174,11 +174,11 @@ def test_budget_exhaustion_propagates():
 
 
 def test_validator_surfaces_bypass_evidence(monkeypatch):
-    from apex_fuzzer.config import Config
-    from apex_fuzzer.validation.base import Candidate
-    from apex_fuzzer.models import Finding
-    from apex_fuzzer.validation.ssrf import SsrfValidator
-    import apex_fuzzer.validation.oast as oast_mod
+    from main.config import Config
+    from main.validation.base import Candidate
+    from main.models import Finding
+    from main.validation.ssrf import SsrfValidator
+    import main.validation.oast as oast_mod
 
     real_probe = oast_mod.probe_endpoint
 
@@ -208,10 +208,10 @@ def test_validator_surfaces_bypass_evidence(monkeypatch):
 
 
 def test_validator_honors_post_json_and_state_gate():
-    from apex_fuzzer.config import Config
-    from apex_fuzzer.validation.base import Candidate
-    from apex_fuzzer.models import Finding
-    from apex_fuzzer.validation.ssrf import SsrfValidator
+    from main.config import Config
+    from main.validation.base import Candidate
+    from main.models import Finding
+    from main.validation.ssrf import SsrfValidator
 
     seen = {}
 
@@ -251,10 +251,10 @@ def test_validator_honors_post_json_and_state_gate():
 
 
 def test_validator_sends_observed_auth_headers():
-    from apex_fuzzer.config import Config
-    from apex_fuzzer.validation.base import Candidate
-    from apex_fuzzer.models import Finding
-    from apex_fuzzer.validation.ssrf import SsrfValidator
+    from main.config import Config
+    from main.validation.base import Candidate
+    from main.models import Finding
+    from main.validation.ssrf import SsrfValidator
 
     seen = {}
 
@@ -304,15 +304,15 @@ def test_bypass_only_for_answering_schemes():
 
 def test_sweep_finding_carries_bypass_evidence(tmp_path):
     import urllib.parse
-    from apex_fuzzer.config import Config
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.reporting.coverage import CoverageTracker
-    from apex_fuzzer.budgets import BudgetTracker
-    from apex_fuzzer.validation.evidence import EvidenceStore
-    from apex_fuzzer.scope import Scope
-    from apex_fuzzer.config import ScopeConfig
+    from main.config import Config
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
+    from main.reporting.metrics import Metrics
+    from main.reporting.coverage import CoverageTracker
+    from main.budgets import BudgetTracker
+    from main.validation.evidence import EvidenceStore
+    from main.scope import Scope
+    from main.config import ScopeConfig
 
     cfg = Config()
     cfg.scope.allowed_domains = ["target.test"]
@@ -341,16 +341,16 @@ def test_sweep_finding_carries_bypass_evidence(tmp_path):
 
 
 def test_stored_trigger_reflection_recorded(tmp_path):
-    from apex_fuzzer.config import Config
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.reporting.coverage import CoverageTracker
-    from apex_fuzzer.budgets import BudgetTracker
-    from apex_fuzzer.validation.evidence import EvidenceStore
-    from apex_fuzzer.models import Identity
-    from apex_fuzzer.discovery.url_normalizer import normalize_url
-    from apex_fuzzer.models import Endpoint as EndpointModel
+    from main.config import Config
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
+    from main.reporting.metrics import Metrics
+    from main.reporting.coverage import CoverageTracker
+    from main.budgets import BudgetTracker
+    from main.validation.evidence import EvidenceStore
+    from main.models import Identity
+    from main.discovery.url_normalizer import normalize_url
+    from main.models import Endpoint as EndpointModel
     from urllib.parse import urlparse
 
     cfg = Config()
@@ -421,11 +421,11 @@ def test_stored_trigger_reflection_recorded(tmp_path):
 
 
 def test_ssrf_plugin_blocks_out_of_scope_target():
-    from apex_fuzzer.config import Config, ScopeConfig
-    from apex_fuzzer.models import Finding
-    from apex_fuzzer.plugins.adapters import SsrfPlugin
-    from apex_fuzzer.plugins.base import TestTarget, TestContext
-    from apex_fuzzer.scope import Scope
+    from main.config import Config, ScopeConfig
+    from main.models import Finding
+    from main.plugins.adapters import SsrfPlugin
+    from main.plugins.base import TestTarget, TestContext
+    from main.scope import Scope
 
     cfg = Config()
     scope = Scope(ScopeConfig(allowed_domains=["example.test"]))

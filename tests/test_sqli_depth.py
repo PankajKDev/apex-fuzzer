@@ -4,12 +4,12 @@ No network. Fake HTTP clients and fake sqlmap runners only.
 """
 from types import SimpleNamespace
 
-from apex_fuzzer.config import Config
-from apex_fuzzer.models import Finding
-from apex_fuzzer.validation import mutate as mut_mod
-from apex_fuzzer.validation import observed_sqli as obs_mod
-from apex_fuzzer.validation import sqli as sqli_mod
-from apex_fuzzer.validation.base import Candidate
+from main.config import Config
+from main.models import Finding
+from main.validation import mutate as mut_mod
+from main.validation import observed_sqli as obs_mod
+from main.validation import sqli as sqli_mod
+from main.validation.base import Candidate
 
 
 def _candidate(**overrides):
@@ -190,8 +190,8 @@ def test_time_opt_in_flows_through_observed_path(monkeypatch):
 
 
 def test_cli_flag_enables_time_opt_in():
-    from apex_fuzzer.cli import build_parser
-    from apex_fuzzer.config import apply_cli_overrides
+    from main.cli import build_parser
+    from main.config import apply_cli_overrides
     args = build_parser().parse_args(["-d", "example.test", "--sqli-time"])
     cfg = apply_cli_overrides(Config(), args)
     assert cfg.validation.sqli_time_based is True

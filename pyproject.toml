@@ -26,10 +26,10 @@ browser = ["playwright>=1.40"]
 integration = ["Jinja2>=3.1", "lxml>=5.0"]
 
 [project.scripts]
-apex-fuzzer = "apex_fuzzer.cli:main"
+apex-fuzzer = "main.cli:main"
 
 [tool.setuptools.packages.find]
-include = ["apex_fuzzer*"]
+include = ["main*"]
 
 [tool.ruff]
 target-version = "py310"
@@ -41,5 +41,5 @@ select = ["F", "E9"]
 python_version = "3.10"
 ignore_missing_imports = true
 # CI gates explicit module lists (see ci.yml), ratcheting outward
-# from new code. No blanket excludes: bare `mypy apex_fuzzer`
+# from new code. No blanket excludes: bare `mypy main`
 # still reports the legacy corpus for triage.

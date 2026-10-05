@@ -4,10 +4,10 @@ No network, no browser. Fake HTTP clients only.
 """
 from types import SimpleNamespace
 
-from apex_fuzzer.auth.mfa_checks import check_transition
-from apex_fuzzer.auth.oauth_checks import (
+from main.auth.mfa_checks import check_transition
+from main.auth.oauth_checks import (
     find_authorize_urls, check_pkce_strip, check_redirect_oast)
-from apex_fuzzer.budgets import BudgetExceeded
+from main.budgets import BudgetExceeded
 
 
 def _resp(status, text="", headers=None):
@@ -190,14 +190,14 @@ def test_oauth_probes_never_follow_redirects():
 
 
 def test_oauth_active_probe_skips_out_of_scope(tmp_path):
-    from apex_fuzzer.config import Config, ScopeConfig
-    from apex_fuzzer.models import Endpoint
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.reporting.coverage import CoverageTracker
-    from apex_fuzzer.scope import Scope
-    from apex_fuzzer.validation.evidence import EvidenceStore
+    from main.config import Config, ScopeConfig
+    from main.models import Endpoint
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
+    from main.reporting.metrics import Metrics
+    from main.reporting.coverage import CoverageTracker
+    from main.scope import Scope
+    from main.validation.evidence import EvidenceStore
 
     cfg = Config()
     cfg.scope.allowed_domains = ["example.test"]
@@ -217,17 +217,17 @@ def test_oauth_active_probe_skips_out_of_scope(tmp_path):
                              auth_headers={"Cookie": "s=1"})
     findings = orch._oauth_probe(
         [ep], tmp_path, EvidenceStore(tmp_path / "proofs"), Metrics(),
-        __import__("apex_fuzzer.budgets", fromlist=["BudgetTracker"])
+        __import__("main.budgets", fromlist=["BudgetTracker"])
         .BudgetTracker(cfg), CoverageTracker(), Http(), [tester], None)
     assert findings == []
 
 
 def test_ai_hypothesis_out_of_scope_never_sends(tmp_path):
-    from apex_fuzzer.config import Config, ScopeConfig
-    from apex_fuzzer.models import Hypothesis
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
-    from apex_fuzzer.scope import Scope
+    from main.config import Config, ScopeConfig
+    from main.models import Hypothesis
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
+    from main.scope import Scope
 
     cfg = Config()
     cfg.scope.allowed_domains = ["example.test"]

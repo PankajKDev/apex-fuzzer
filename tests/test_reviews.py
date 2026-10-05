@@ -1,7 +1,7 @@
 """Tests: operator review marks (feedback loop)."""
 import json
 
-from apex_fuzzer.reporting.reviews import (
+from main.reporting.reviews import (
     REVIEW_FALSE, REVIEW_TRUE, finding_test_class, load_reviews,
     resolve_finding_triples)
 
@@ -39,7 +39,7 @@ def test_missing_file_is_empty_index(tmp_path):
 
 
 def test_triple_canonicalization():
-    import apex_fuzzer.reporting.reviews as rev
+    import main.reporting.reviews as rev
     assert rev.canonical_test_class("BOLA") == "authz"
     assert rev.canonical_test_class("idor") == "authz"
     assert rev.canonical_test_class("SQLi") == "sqli"
@@ -53,8 +53,8 @@ def test_triple_canonicalization():
 
 
 def test_resolve_finding_id_to_triple():
-    from apex_fuzzer.models import Finding
-    import apex_fuzzer.reporting.reviews as rev
+    from main.models import Finding
+    import main.reporting.reviews as rev
     f = Finding(id="diff-abc", source="differential",
                 endpoint_url="https://example.com/api/u/1",
                 parameter="id")
@@ -67,7 +67,7 @@ def test_resolve_finding_id_to_triple():
 
 
 def test_finding_test_class_mapping():
-    from apex_fuzzer.models import Finding
+    from main.models import Finding
     assert finding_test_class(
         Finding(id="a", source="prescreen-sqli")) == "sqli"
     assert finding_test_class(
@@ -76,8 +76,8 @@ def test_finding_test_class_mapping():
 
 
 def test_apply_reviews_marks_findings(tmp_path):
-    from apex_fuzzer.models import Finding
-    from apex_fuzzer.orchestrator import Orchestrator
+    from main.models import Finding
+    from main.orchestrator import Orchestrator
     _write(tmp_path / "reviews.jsonl", [
         {"finding_id": "diff-abc", "verdict": "false_positive",
          "reason": "login wall"}])
@@ -89,15 +89,15 @@ def test_apply_reviews_marks_findings(tmp_path):
 
 
 def test_prescreen_skips_fp_triples(tmp_path):
-    from apex_fuzzer.budgets import BudgetTracker
-    from apex_fuzzer.config import Config
-    from apex_fuzzer.models import Endpoint, Parameter
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
-    from apex_fuzzer.reporting.coverage import CoverageTracker
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.validation.evidence import EvidenceStore
-    import apex_fuzzer.reporting.reviews as rev
+    from main.budgets import BudgetTracker
+    from main.config import Config
+    from main.models import Endpoint, Parameter
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
+    from main.reporting.coverage import CoverageTracker
+    from main.reporting.metrics import Metrics
+    from main.validation.evidence import EvidenceStore
+    import main.reporting.reviews as rev
     cfg = Config()
     cfg.validation.enabled = True
     orch = Orchestrator(cfg, tmp_path, profile=get_profile("standard"))
@@ -120,9 +120,9 @@ def test_prescreen_skips_fp_triples(tmp_path):
 
 
 def test_plugin_loop_suppression_by_finding_id():
-    from apex_fuzzer.models import Finding
-    from apex_fuzzer.orchestrator import Orchestrator
-    import apex_fuzzer.reporting.reviews as rev
+    from main.models import Finding
+    from main.orchestrator import Orchestrator
+    import main.reporting.reviews as rev
     idx = rev.ReviewIndex()
     idx.by_finding["diff-abc"] = {"verdict": "false_positive",
                                   "reason": "login wall"}
@@ -138,9 +138,9 @@ def test_plugin_loop_suppression_by_finding_id():
 
 
 def test_plugin_loop_suppression_by_rotating_swap_id():
-    from apex_fuzzer.models import Finding
-    from apex_fuzzer.orchestrator import Orchestrator
-    import apex_fuzzer.reporting.reviews as rev
+    from main.models import Finding
+    from main.orchestrator import Orchestrator
+    import main.reporting.reviews as rev
     idx = rev.ReviewIndex()
     # swap IDs embed victim values, so they rotate per run: the
     # triple (not the ID) is what sticks (stored canonical form).
@@ -153,9 +153,9 @@ def test_plugin_loop_suppression_by_rotating_swap_id():
 
 
 def test_plugin_loop_no_suppression_without_marks():
-    from apex_fuzzer.models import Finding
-    from apex_fuzzer.orchestrator import Orchestrator
-    import apex_fuzzer.reporting.reviews as rev
+    from main.models import Finding
+    from main.orchestrator import Orchestrator
+    import main.reporting.reviews as rev
     f = Finding(id="swap-x", source="idor-swap",
                 endpoint_url="https://example.com/api/u/1",
                 parameter="id")

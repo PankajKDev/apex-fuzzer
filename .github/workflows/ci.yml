@@ -16,7 +16,7 @@ jobs:
       - name: Install ruff
         run: pip install ruff
       - name: Ruff check (bug-catching subset, see pyproject)
-        run: ruff check --select F,E9 apex_fuzzer tests
+        run: ruff check --select F,E9 main tests
 
   types:
     runs-on: ubuntu-24.04
@@ -30,8 +30,8 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e . mypy
       - name: Mypy (gated scope — ratchets outward, see pyproject)
-        run: mypy apex_fuzzer/safety apex_fuzzer/verify
-          apex_fuzzer/budgets.py apex_fuzzer/ai
+        run: mypy main/safety main/verify
+          main/budgets.py main/ai
 
   tests:
     runs-on: ubuntu-24.04
@@ -48,7 +48,7 @@ jobs:
           python -m pip install --upgrade pip
           pip install -e '.[integration]' pytest pyyaml pytest-cov
       - name: "Test suite with coverage (floor: measured baseline)"
-        run: python -m pytest tests/ -q --cov=apex_fuzzer
+        run: python -m pytest tests/ -q --cov=main
           --cov-report=term-missing --cov-fail-under=70
 
   audit:
@@ -90,7 +90,7 @@ jobs:
       - name: Install from sdist (clean check)
         run: |
           pip install --force-reinstall --no-deps dist/*.tar.gz
-          python -c "import apex_fuzzer; print(apex_fuzzer.__version__)"
+          python -c "import main; print(main.__version__)"
 
   container:
     runs-on: ubuntu-24.04

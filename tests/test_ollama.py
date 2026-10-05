@@ -1,8 +1,8 @@
 """Ollama (local) AI backend tests. HTTP is fully mocked."""
 import json
 
-from apex_fuzzer.ai.planner import AIPlanner
-from apex_fuzzer.config import Config, apply_cli_overrides
+from main.ai.planner import AIPlanner
+from main.config import Config, apply_cli_overrides
 
 
 def _cfg(provider="ollama", enabled=True):
@@ -154,7 +154,7 @@ def test_ai_config_yaml(tmp_path):
 
 
 def test_cli_ai_provider_flag():
-    from apex_fuzzer.cli import build_parser
+    from main.cli import build_parser
     args = build_parser().parse_args(["-d", "x.com", "--ai",
                                       "--ai-provider", "ollama"])
     cfg = apply_cli_overrides(Config(), args)
@@ -164,7 +164,7 @@ def test_cli_ai_provider_flag():
 # ── M3.1 error classification + retry ───────────────────────────────
 def test_classify_errors():
     import requests
-    from apex_fuzzer.ai.planner import classify_http_error as cls
+    from main.ai.planner import classify_http_error as cls
     assert cls(status=401) == "auth"
     assert cls(status=403) == "auth"
     assert cls(status=404) == "malformed"
@@ -221,7 +221,7 @@ def test_malformed_json_body(monkeypatch):
 
 
 def test_bounded_log_bodies():
-    from apex_fuzzer.ai.planner import _truncate
+    from main.ai.planner import _truncate
     assert _truncate("x" * 500) == "x" * 300 + "…"
     assert _truncate("short") == "short"
 
@@ -314,7 +314,7 @@ def test_hosted_provider_rejects_non_free_models(monkeypatch):
 
 
 def test_cli_groq_provider_flag():
-    from apex_fuzzer.cli import build_parser
+    from main.cli import build_parser
     args = build_parser().parse_args(["-d", "x.com", "--ai",
                                       "--ai-provider", "groq"])
     cfg = apply_cli_overrides(Config(), args)

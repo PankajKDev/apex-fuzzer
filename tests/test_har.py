@@ -1,9 +1,9 @@
 """Tests for HAR import (inventory only: no network, no replay)."""
 import json
 
-from apex_fuzzer.config import ScopeConfig
-from apex_fuzzer.discovery import har as har_mod
-from apex_fuzzer.scope import Scope
+from main.config import ScopeConfig
+from main.discovery import har as har_mod
+from main.scope import Scope
 
 
 def _scope():
@@ -110,9 +110,9 @@ def test_oversized_body_keeps_inventory_drops_bytes():
 
 
 def test_merge_attributes_har_source():
-    from apex_fuzzer.discovery.url_normalizer import normalize_url
-    from apex_fuzzer.models import Endpoint
-    from apex_fuzzer.orchestrator import Orchestrator
+    from main.discovery.url_normalizer import normalize_url
+    from main.models import Endpoint
+    from main.orchestrator import Orchestrator
     data = _har(_req("https://example.com/api/docs?id=7",
                      query={"id": "7"}))
     (entry,) = har_mod.parse_har(data, _scope())
@@ -129,9 +129,9 @@ def test_merge_attributes_har_source():
 
 
 def test_orchestrator_har_import_skips_missing(tmp_path):
-    from apex_fuzzer.config import Config
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
+    from main.config import Config
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
     cfg = Config()
     cfg.scope.allowed_domains = ["example.com"]
     cfg.har_files = [str(tmp_path / "missing.har")]
@@ -140,9 +140,9 @@ def test_orchestrator_har_import_skips_missing(tmp_path):
 
 
 def test_orchestrator_har_import_merges_endpoints(tmp_path):
-    from apex_fuzzer.config import Config
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
+    from main.config import Config
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
     har = tmp_path / "capture.har"
     har.write_text(json.dumps(_har(
         _req("https://example.com/api/orders?order_id=9",

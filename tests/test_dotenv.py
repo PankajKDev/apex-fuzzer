@@ -1,6 +1,6 @@
 import os
 
-from apex_fuzzer.cli import load_dotenv
+from main.cli import load_dotenv
 
 
 def test_load_dotenv_parses_and_respects_env(tmp_path, monkeypatch):

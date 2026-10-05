@@ -1,4 +1,4 @@
-from apex_fuzzer.discovery.classifier import classify
+from main.discovery.classifier import classify
 
 
 def test_api():

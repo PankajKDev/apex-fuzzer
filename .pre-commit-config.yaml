@@ -10,7 +10,7 @@ repos:
     rev: v2.4.0
     hooks:
       - id: mypy
-        files: ^apex_fuzzer/(safety/|verify/|budgets\.py|ai/)
+        files: ^main/(safety/|verify/|budgets\.py|ai/)
         args: [--python-version, "3.10", --ignore-missing-imports]
   - repo: https://github.com/gitleaks/gitleaks
     rev: v8.18.0

@@ -2,23 +2,23 @@
 matrix views, graph sync. No network in any test."""
 import json
 
-from apex_fuzzer.authz.compare import (
+from main.authz.compare import (
     is_generic_response, compare_access)
-from apex_fuzzer.authz.matrix import (
+from main.authz.matrix import (
     ExtendedMatrix, AuthzCell, build_extended, display_status)
-from apex_fuzzer.authz.roles import (
+from main.authz.roles import (
     role_access_map, is_privileged_role, check_vertical_escalation)
-from apex_fuzzer.authz.tenants import tenant_view
-from apex_fuzzer.authz.resources import resource_access_map
-from apex_fuzzer.authz.actions import action_coverage
-from apex_fuzzer.authz.graph import sync_extended
-from apex_fuzzer.authorization.harvest import HarvestedId, harvest_ids
-from apex_fuzzer.authorization.access_tests import swap_ids
-from apex_fuzzer.authorization.matrix import (
+from main.authz.tenants import tenant_view
+from main.authz.resources import resource_access_map
+from main.authz.actions import action_coverage
+from main.authz.graph import sync_extended
+from main.authorization.harvest import HarvestedId, harvest_ids
+from main.authorization.access_tests import swap_ids
+from main.authorization.matrix import (
     AuthorizationMatrix, AuthorizationObservation)
-from apex_fuzzer.graph.application_graph import ApplicationGraph
-from apex_fuzzer.models import Identity, Endpoint, Parameter
-from apex_fuzzer.config import Config
+from main.graph.application_graph import ApplicationGraph
+from main.models import Identity, Endpoint, Parameter
+from main.config import Config
 
 
 class FakeResp:
@@ -29,7 +29,7 @@ class FakeResp:
 
 
 def _ep(url):
-    from apex_fuzzer.discovery.url_normalizer import normalize_url
+    from main.discovery.url_normalizer import normalize_url
     from urllib.parse import urlparse
     p = urlparse(url)
     return Endpoint(url=url, normalized_url=normalize_url(url),
@@ -144,13 +144,13 @@ def _swap_http(owner_body, tester_body):
 
 
 def _harvested(owner_body, owner="user_a"):
-    from apex_fuzzer.validation.differential import normalize_response
+    from main.validation.differential import normalize_response
 
     class R:
         status_code = 200
         text = owner_body
     n = normalize_response(R())
-    from apex_fuzzer.authorization.harvest import extract_ids_from_body
+    from main.authorization.harvest import extract_ids_from_body
     return HarvestedId(
         endpoint_url="https://t.com/api/u", normalized_url="https://t.com/api/u",
         param="id", value="1", owner=owner, shape=n["key_shape"],
@@ -227,7 +227,7 @@ def _obs(identity, status=200, shape='{"id":1}', role="", tenant="",
 
 
 def test_role_view_and_escalation():
-    from apex_fuzzer.authz.matrix import build_extended
+    from main.authz.matrix import build_extended
     ext = build_extended([_obs("admin", role="admin"),
                           _obs("u", role="member"),
                           _obs("anon", status=401)], [])
@@ -292,7 +292,7 @@ def test_resource_access_map():
 
 
 def test_action_coverage():
-    from apex_fuzzer.authz.matrix import build_extended
+    from main.authz.matrix import build_extended
     ext = build_extended([_obs("a", method="GET"),
                           _obs("a", method="POST")], [])
     cov = action_coverage(
@@ -307,7 +307,7 @@ def test_graph_sync_edges():
     h = HarvestedId(endpoint_url="https://t.com/a?id=1",
                     normalized_url="https://t.com/a", param="id",
                     value="1", owner="a", owner_tenant="t1")
-    from apex_fuzzer.graph.application_graph import nid
+    from main.graph.application_graph import nid
     assert sync_extended(g, [h]) == 2  # OWNS + CONTAINS (EXPOSED_BY
     # needs a pre-existing endpoint node, absent here by design)
     types = {(e["src"], e["dst"], e["type"]) for e in g.edges}
@@ -328,12 +328,12 @@ def test_ownership_fields_config():
 def test_extended_artifact_and_escalation_coverage(tmp_path):
     import tempfile
     from pathlib import Path
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.reporting.coverage import CoverageTracker
-    from apex_fuzzer.budgets import BudgetTracker
-    from apex_fuzzer.validation.evidence import EvidenceStore
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
+    from main.reporting.metrics import Metrics
+    from main.reporting.coverage import CoverageTracker
+    from main.budgets import BudgetTracker
+    from main.validation.evidence import EvidenceStore
     victim = json.dumps({"id": 1, "owner_id": "u_a"})
 
     class H:

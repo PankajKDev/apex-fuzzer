@@ -1,6 +1,6 @@
 """Public archive recon must not disclose local lab targets."""
-from apex_fuzzer.orchestrator import _is_public_archive_target
-from apex_fuzzer.profiles import get
+from main.orchestrator import _is_public_archive_target
+from main.profiles import get
 
 
 def test_public_archive_lookups_are_limited_to_public_targets():

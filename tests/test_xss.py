@@ -4,11 +4,11 @@ from pathlib import Path
 from types import SimpleNamespace
 from urllib.parse import urlencode
 
-from apex_fuzzer.config import Config
-from apex_fuzzer.models import Finding
-from apex_fuzzer.validation.base import Candidate
-from apex_fuzzer.validation import xss as xss_mod
-from apex_fuzzer.validation import xss_browser as xss_browser_mod
+from main.config import Config
+from main.models import Finding
+from main.validation.base import Candidate
+from main.validation import xss as xss_mod
+from main.validation import xss_browser as xss_browser_mod
 
 
 def _candidate(tmp_path, parameter="q"):

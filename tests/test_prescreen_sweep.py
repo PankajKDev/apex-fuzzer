@@ -4,15 +4,15 @@ Fake HTTP only. No network.
 """
 from types import SimpleNamespace
 
-from apex_fuzzer.config import Config, ScopeConfig
-from apex_fuzzer.models import Endpoint, Finding, Parameter
-from apex_fuzzer.orchestrator import Orchestrator
-from apex_fuzzer.profiles import get as get_profile
-from apex_fuzzer.reporting.coverage import CoverageTracker
-from apex_fuzzer.reporting.metrics import Metrics
-from apex_fuzzer.budgets import BudgetTracker, BudgetExceeded
-from apex_fuzzer.scope import Scope
-from apex_fuzzer.validation.evidence import EvidenceStore
+from main.config import Config, ScopeConfig
+from main.models import Endpoint, Finding, Parameter
+from main.orchestrator import Orchestrator
+from main.profiles import get as get_profile
+from main.reporting.coverage import CoverageTracker
+from main.reporting.metrics import Metrics
+from main.budgets import BudgetTracker, BudgetExceeded
+from main.scope import Scope
+from main.validation.evidence import EvidenceStore
 
 
 def _orch(tmp_path, cfg=None):
@@ -88,7 +88,7 @@ def test_sweep_skips_already_covered(tmp_path):
                        matched_at="https://example.test/items?id=1",
                        parameter="id", method="GET")
     existing.validation_status = "strong_candidate"
-    from apex_fuzzer.orchestrator import _classify_finding
+    from main.orchestrator import _classify_finding
     assert _classify_finding(existing) == "sqli"
     found = orch._prescreen_sweep(
         [_ep("https://example.test/items?id=1", ["id"])], [existing],
@@ -150,5 +150,5 @@ def test_sweep_disabled_by_zero_cap(tmp_path):
 
 
 def test_plan_prescreen_math():
-    from apex_fuzzer.safety.preflight import plan_prescreen
+    from main.safety.preflight import plan_prescreen
     assert plan_prescreen(4, 3).total == 120

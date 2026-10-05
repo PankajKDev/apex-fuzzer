@@ -1,4 +1,4 @@
-from apex_fuzzer.discovery.url_normalizer import normalize_url, \
+from main.discovery.url_normalizer import normalize_url, \
     extract_query_params
 
 

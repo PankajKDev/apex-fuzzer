@@ -8,10 +8,10 @@ import uuid
 
 import pytest
 
-from apex_fuzzer.browser.browser import BrowserEngine
-from apex_fuzzer.config import Config
-from apex_fuzzer.models import Confidence, Finding, ValidationStatus
-from apex_fuzzer.validation import cors_browser
+from main.browser.browser import BrowserEngine
+from main.config import Config
+from main.models import Confidence, Finding, ValidationStatus
+from main.validation import cors_browser
 
 
 if not importlib.util.find_spec("playwright"):

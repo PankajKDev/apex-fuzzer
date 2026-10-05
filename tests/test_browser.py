@@ -9,21 +9,21 @@ import threading
 
 import pytest
 
-from apex_fuzzer.browser.browser import (
+from main.browser.browser import (
     playwright_available, chromium_available)
-from apex_fuzzer.browser.network import (
+from main.browser.network import (
     NetworkRecorder, _query_names, _form_names,
     authenticated_capture_request_allowed)
-from apex_fuzzer.browser.storage import (
+from main.browser.storage import (
     cookies_to_dict, build_cookie_header, parse_storage_state,
     extract_tokens, extract_csrf_from_html, read_web_storage,
     StorageCapture)
-from apex_fuzzer.browser.actions import (
+from main.browser.actions import (
     snapshot_dom, fill_form, click, run_js, ActionLog)
-from apex_fuzzer.browser.sessions import (
+from main.browser.sessions import (
     BrowserSession, SessionManager, looks_logged_out)
-from apex_fuzzer.browser.workflows import BrowserWorkflow
-from apex_fuzzer.config import AuthContext, Config
+from main.browser.workflows import BrowserWorkflow
+from main.config import AuthContext, Config
 
 needs_browser = pytest.mark.skipif(
     not chromium_available(), reason="no launchable chromium")
@@ -106,8 +106,8 @@ class FakeContext:
 
 
 def _scope_for(hosts):
-    from apex_fuzzer.scope import Scope
-    from apex_fuzzer.config import ScopeConfig
+    from main.scope import Scope
+    from main.config import ScopeConfig
     return Scope(ScopeConfig(allowed_domains=list(hosts)))
 
 
@@ -187,9 +187,9 @@ def test_authenticated_capture_allows_only_in_scope_same_origin_reads():
 
 
 def test_authenticated_capture_request_material_is_runtime_only():
-    from apex_fuzzer.models import Endpoint
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.discovery.url_normalizer import normalize_url
+    from main.models import Endpoint
+    from main.orchestrator import Orchestrator
+    from main.discovery.url_normalizer import normalize_url
 
     url = ("https://user:pass@example.com/api?access_token=stored-secret"
            "&page=2#session=fragment-secret")
@@ -434,9 +434,9 @@ def test_workflow_unknown_action_and_break():
 
 # ── orchestrator merge helpers ────────────────────────────────────────
 def test_merge_browser_entry_and_resolve_link():
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.config import Config
-    from apex_fuzzer.profiles import get as get_profile
+    from main.orchestrator import Orchestrator
+    from main.config import Config
+    from main.profiles import get as get_profile
     import tempfile
     from pathlib import Path
     orch = Orchestrator(Config(), Path(tempfile.mkdtemp()),
@@ -472,11 +472,11 @@ def test_merge_browser_entry_and_resolve_link():
 
 
 def test_browser_discover_skip_paths(monkeypatch, tmp_path):
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.config import Config
-    from apex_fuzzer.profiles import get as get_profile
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.budgets import BudgetTracker
+    from main.orchestrator import Orchestrator
+    from main.config import Config
+    from main.profiles import get as get_profile
+    from main.reporting.metrics import Metrics
+    from main.budgets import BudgetTracker
     orch = Orchestrator(Config(), tmp_path,
                         profile=get_profile("standard"))
     # disabled by default profile
@@ -487,9 +487,9 @@ def test_browser_discover_skip_paths(monkeypatch, tmp_path):
     cfg = Config()
     cfg.browser.enabled = True
     orch2 = Orchestrator(cfg, tmp_path, profile=get_profile("standard"))
-    monkeypatch.setattr("apex_fuzzer.browser.browser.playwright_available",
+    monkeypatch.setattr("main.browser.browser.playwright_available",
                         lambda: True)
-    import apex_fuzzer.browser.browser as bmod
+    import main.browser.browser as bmod
     monkeypatch.setattr(bmod, "playwright_available", lambda: False)
     assert orch2._browser_discover(
         "https://t.com/", "t.com", tmp_path, BudgetTracker(cfg),
@@ -583,12 +583,12 @@ def local_site():
 
 @needs_browser
 def test_browser_login_capture_reuse(local_site):
-    from apex_fuzzer.browser.browser import BrowserEngine
-    from apex_fuzzer.browser.network import NetworkRecorder
-    from apex_fuzzer.browser.actions import snapshot_dom, fill_form
-    from apex_fuzzer.browser.storage import StorageCapture
-    from apex_fuzzer.browser.sessions import SessionManager
-    from apex_fuzzer.config import Config
+    from main.browser.browser import BrowserEngine
+    from main.browser.network import NetworkRecorder
+    from main.browser.actions import snapshot_dom, fill_form
+    from main.browser.storage import StorageCapture
+    from main.browser.sessions import SessionManager
+    from main.config import Config
 
     cfg = Config()
     with BrowserEngine(cfg, headless=True) as engine:
@@ -638,11 +638,11 @@ def e_method(eps, url):
 
 @needs_browser
 def test_orchestrator_browser_crawl(local_site, tmp_path):
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.config import Config
-    from apex_fuzzer.profiles import get as get_profile
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.budgets import BudgetTracker
+    from main.orchestrator import Orchestrator
+    from main.config import Config
+    from main.profiles import get as get_profile
+    from main.reporting.metrics import Metrics
+    from main.budgets import BudgetTracker
     from urllib.parse import urlparse
     host = urlparse(local_site).hostname
     cfg = Config()

@@ -27,7 +27,7 @@ class _PlainFormatter(logging.Formatter):
 
 
 def setup_logging(level=logging.INFO) -> logging.Logger:
-    root = logging.getLogger("apex_fuzzer")
+    root = logging.getLogger("main")
     root.setLevel(level)
     root.handlers.clear()
     sh = logging.StreamHandler(sys.stderr)
@@ -47,4 +47,4 @@ def attach_file_handler(logger: logging.Logger, log_path: Path):
 
 
 def get_logger(name: str) -> logging.Logger:
-    return logging.getLogger(f"apex_fuzzer.{name}")
+    return logging.getLogger(f"main.{name}")

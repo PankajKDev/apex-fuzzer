@@ -4,14 +4,14 @@ from urllib.parse import urlsplit
 
 import pytest
 
-from apex_fuzzer.budgets import BudgetExceeded
-from apex_fuzzer.config import Config
-from apex_fuzzer.models import Endpoint, Finding
-from apex_fuzzer.orchestrator import _classify_finding
-from apex_fuzzer.plugins.adapters import _xxe_candidate_from
-from apex_fuzzer.plugins.base import TestTarget
-from apex_fuzzer.validation.base import Candidate
-from apex_fuzzer.validation.xxe import XxeValidator
+from main.budgets import BudgetExceeded
+from main.config import Config
+from main.models import Endpoint, Finding
+from main.orchestrator import _classify_finding
+from main.plugins.adapters import _xxe_candidate_from
+from main.plugins.base import TestTarget
+from main.validation.base import Candidate
+from main.validation.xxe import XxeValidator
 
 
 class Response:
@@ -185,7 +185,7 @@ XMP = ('<x:xmpmeta xmlns:x="adobe:ns:meta/">'
 
 
 def test_svg_body_probed_with_callback():
-    from apex_fuzzer.validation.xxe import sniff_xml_shape
+    from main.validation.xxe import sniff_xml_shape
     assert sniff_xml_shape(SVG, "image/svg+xml") == "xml"
     result, http, _ = run(SVG, content_type="image/svg+xml")
     assert result.status == "confirmed"
@@ -198,7 +198,7 @@ def test_soap_namespaced_body_probed_with_callback():
 
 
 def test_sniffed_svg_without_xml_content_type():
-    from apex_fuzzer.validation.xxe import sniff_xml_shape
+    from main.validation.xxe import sniff_xml_shape
     assert sniff_xml_shape(SVG, "application/octet-stream") == "xml"
     assert sniff_xml_shape("<?xml version='1.0'?><r/>",
                            "text/plain") == "xml"
@@ -207,7 +207,7 @@ def test_sniffed_svg_without_xml_content_type():
 
 
 def test_office_containers_fail_closed_with_note():
-    from apex_fuzzer.validation.xxe import sniff_xml_shape, container_note
+    from main.validation.xxe import sniff_xml_shape, container_note
     assert sniff_xml_shape(b"\x50\x4b\x03\x04docx", "application/vnd.x") == \
         "container"
     assert "isolated" in container_note(b"\x50\x4b\x03\x04x")
@@ -226,7 +226,7 @@ def test_office_containers_fail_closed_with_note():
 
 
 def test_html_and_json_are_not_xml():
-    from apex_fuzzer.validation.xxe import sniff_xml_shape
+    from main.validation.xxe import sniff_xml_shape
     assert sniff_xml_shape("<html><body>hi</body></html>",
                            "text/html") == "other"
     assert sniff_xml_shape('{"a": 1}', "application/json") == "other"
@@ -236,7 +236,7 @@ def test_html_and_json_are_not_xml():
 
 
 def test_bom_prefixed_xml_is_sniffed():
-    from apex_fuzzer.validation.xxe import sniff_xml_shape
+    from main.validation.xxe import sniff_xml_shape
     assert sniff_xml_shape('\ufeff<?xml version="1.0"?><r/>',
                            "text/plain") == "xml"
     assert sniff_xml_shape('\ufeff<svg/>', "text/plain") == "xml"

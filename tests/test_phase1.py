@@ -4,35 +4,35 @@ wiring. No network access in any test."""
 
 import pytest
 
-from apex_fuzzer.models import (
+from main.models import (
     Identity, Resource, TestResult, AttackChain,
     Finding, Hypothesis,
     RESULT_INCONCLUSIVE,
 )
-from apex_fuzzer.config import Config, AuthContext
-from apex_fuzzer.budgets import BudgetTracker, BudgetExceeded, BudgetUsage
-from apex_fuzzer.checkpoints import Checkpoint
-from apex_fuzzer.application.application_model import (
+from main.config import Config, AuthContext
+from main.budgets import BudgetTracker, BudgetExceeded, BudgetUsage
+from main.checkpoints import Checkpoint
+from main.application.application_model import (
     Application, build_from_scan)
-from apex_fuzzer.application.identities import from_auth_contexts
-from apex_fuzzer.application.resources import (
+from main.application.identities import from_auth_contexts
+from main.application.resources import (
     extract_resources)
-from apex_fuzzer.application.workflows import Workflow, WorkflowStep
-from apex_fuzzer.graph.application_graph import (
+from main.application.workflows import Workflow, WorkflowStep
+from main.graph.application_graph import (
     ApplicationGraph, build_from_application, NODE_TYPES, EDGE_TYPES, nid)
-from apex_fuzzer.logic import invariants as inv_mod
-from apex_fuzzer.logic.invariants import (
+from main.logic import invariants as inv_mod
+from main.logic.invariants import (
     Invariant, evaluate, evaluate_all, default_invariants, register_check)
-from apex_fuzzer.reporting.coverage import (
+from main.reporting.coverage import (
     CoverageTracker, KNOWN_CLASSES)
-from apex_fuzzer.plugins.base import (
+from main.plugins.base import (
     SecurityTest, TestTarget, TestContext, run_plugins,
     register, get, registered)
-from apex_fuzzer.models import Endpoint, Parameter
+from main.models import Endpoint, Parameter
 
 
 def _ep(url, params=None, etype="api"):
-    from apex_fuzzer.discovery.url_normalizer import normalize_url
+    from main.discovery.url_normalizer import normalize_url
     from urllib.parse import urlparse
     p = urlparse(url)
     e = Endpoint(url=url, normalized_url=normalize_url(url),
@@ -153,7 +153,7 @@ def test_budget_usage_round_trip():
 
 
 def test_http_client_raises_on_exhaustion():
-    from apex_fuzzer.orchestrator import _HTTPClient
+    from main.orchestrator import _HTTPClient
     cfg = Config()
     cfg.budgets.requests_per_host = 0
     client = _HTTPClient(budgets=BudgetTracker(cfg))
@@ -162,7 +162,7 @@ def test_http_client_raises_on_exhaustion():
 
 
 def test_differential_reraises_budget():
-    from apex_fuzzer.validation.differential import DifferentialTester
+    from main.validation.differential import DifferentialTester
 
     class Boom:
         def get(self, *a, **k):
@@ -350,7 +350,7 @@ class _Echo(SecurityTest):
     prerequisites = ()
 
     def run(self, target, ctx):
-        from apex_fuzzer.models import TestResult
+        from main.models import TestResult
         return TestResult(status="candidate",
                           observations=["echo"],
                           evidence={"url": target.endpoint_url})
@@ -384,7 +384,7 @@ def test_plugin_supports_filter():
 
 
 def test_plugin_prerequisites():
-    from apex_fuzzer.models import Identity
+    from main.models import Identity
     ctx = TestContext(Config(), oast_provider=None,
                       identities=[Identity(name="user_a")],
                       technologies=[{"name": "nginx"}])
@@ -415,7 +415,7 @@ def test_plugin_prerequisites():
         prerequisites = ("tech:nginx",)
 
         def run(self, t, c):
-            from apex_fuzzer.models import TestResult
+            from main.models import TestResult
             return TestResult(status="candidate")
 
     for cls in (NeedOast, NeedAuth2, NeedTool, NeedTech):
@@ -471,8 +471,8 @@ def test_checkpoint_blobs(tmp_path):
 
 # ── orchestrator wiring ───────────────────────────────────────────────
 def _orch():
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
     import tempfile
     from pathlib import Path
     td = tempfile.mkdtemp()
@@ -483,8 +483,8 @@ def _orch():
 
 def test_build_app_state_fresh_and_resume():
     orch, out = _orch()
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.checkpoints import Checkpoint
+    from main.reporting.metrics import Metrics
+    from main.checkpoints import Checkpoint
     (out / "technologies.jsonl").write_text("")
     eps = [_ep("https://a.com/api/u?id=1", ["id"])]
     ck = Checkpoint(out / "checkpoint.json")
@@ -504,8 +504,8 @@ def test_build_app_state_fresh_and_resume():
 
 def test_apply_plugin_result_mappings(tmp_path):
     orch, out = _orch()
-    from apex_fuzzer.validation.evidence import EvidenceStore
-    from apex_fuzzer.models import TestResult
+    from main.validation.evidence import EvidenceStore
+    from main.models import TestResult
     ev = EvidenceStore(out / "proofs")
     cov = CoverageTracker()
 
@@ -547,7 +547,7 @@ def test_apply_plugin_result_mappings(tmp_path):
 
 
 def test_apply_plugin_results_aggregates_and_retains_each_tool(tmp_path):
-    from apex_fuzzer.validation.evidence import EvidenceStore
+    from main.validation.evidence import EvidenceStore
     orch, out = _orch()
     evidence = EvidenceStore(out / "proofs")
     coverage = CoverageTracker()
@@ -606,11 +606,11 @@ def test_finding_endpoint_lookup():
 def test_differential_probe_records_negative_and_blocked():
     import tempfile
     from pathlib import Path
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.validation.evidence import EvidenceStore
-    from apex_fuzzer.validation.differential import DifferentialTester
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
+    from main.reporting.metrics import Metrics
+    from main.validation.evidence import EvidenceStore
+    from main.validation.differential import DifferentialTester
 
     class Calm:
         def get(self, url, **kw):
@@ -648,7 +648,7 @@ def test_differential_probe_records_negative_and_blocked():
 
 
 def test_report_with_and_without_coverage(tmp_path):
-    from apex_fuzzer.reporting.html import render_html
+    from main.reporting.html import render_html
     out = tmp_path
     cov = CoverageTracker()
     cov.record("sqli", "confirmed")

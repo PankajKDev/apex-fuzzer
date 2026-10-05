@@ -6,16 +6,16 @@ matrix-cell producers, and the orchestrator second-opinion step
 """
 import json
 
-from apex_fuzzer.logic.invariants import (
+from main.logic.invariants import (
     Invariant, evaluate, default_invariants, BUILTIN_IDS)
-from apex_fuzzer.logic.invariant_engine import (
+from main.logic.invariant_engine import (
     InvariantEngine, EvaluationRecord)
-from apex_fuzzer.logic.invariant_discovery import (
+from main.logic.invariant_discovery import (
     DiscoveredRule, discover_holdings, discover_invariants)
-from apex_fuzzer.logic.observations import observation_from_matrix_cell
-from apex_fuzzer.authorization.matrix import AuthorizationObservation
-from apex_fuzzer.authorization.harvest import HarvestedId
-from apex_fuzzer.models import Finding
+from main.logic.observations import observation_from_matrix_cell
+from main.authorization.matrix import AuthorizationObservation
+from main.authorization.harvest import HarvestedId
+from main.models import Finding
 
 
 def _obs(identity="user_b", status=200, shape="s", tenant="t2",
@@ -187,16 +187,16 @@ def test_observation_from_matrix_cell():
 def _orch_matrix(monkeypatch=None):
     import tempfile
     from pathlib import Path
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.config import Config
-    from apex_fuzzer.profiles import get as get_profile
+    from main.orchestrator import Orchestrator
+    from main.config import Config
+    from main.profiles import get as get_profile
     out = Path(tempfile.mkdtemp())
     orch = Orchestrator(Config(), out, profile=get_profile("standard"))
     return orch, out
 
 
 def _stash_matrix(orch, observations):
-    from apex_fuzzer.authorization.matrix import AuthorizationMatrix
+    from main.authorization.matrix import AuthorizationMatrix
     m = AuthorizationMatrix()
     for o in observations:
         m.record(o)
@@ -207,12 +207,12 @@ def _stash_matrix(orch, observations):
 def test_invariants_new_finding_when_uncovered(tmp_path):
     import tempfile
     from pathlib import Path
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.config import Config
-    from apex_fuzzer.profiles import get as get_profile
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.reporting.coverage import CoverageTracker
-    from apex_fuzzer.validation.evidence import EvidenceStore
+    from main.orchestrator import Orchestrator
+    from main.config import Config
+    from main.profiles import get as get_profile
+    from main.reporting.metrics import Metrics
+    from main.reporting.coverage import CoverageTracker
+    from main.validation.evidence import EvidenceStore
     out = Path(tempfile.mkdtemp())
     orch = Orchestrator(Config(), out, profile=get_profile("standard"))
     owner = _obs("user_a", status=200, shape="s", tenant="t1", h="same")
@@ -237,12 +237,12 @@ def test_invariants_new_finding_when_uncovered(tmp_path):
 def test_invariants_corroborate_instead_of_duplicating(tmp_path):
     import tempfile
     from pathlib import Path
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.config import Config
-    from apex_fuzzer.profiles import get as get_profile
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.reporting.coverage import CoverageTracker
-    from apex_fuzzer.validation.evidence import EvidenceStore
+    from main.orchestrator import Orchestrator
+    from main.config import Config
+    from main.profiles import get as get_profile
+    from main.reporting.metrics import Metrics
+    from main.reporting.coverage import CoverageTracker
+    from main.validation.evidence import EvidenceStore
     out = Path(tempfile.mkdtemp())
     orch = Orchestrator(Config(), out, profile=get_profile("standard"))
     owner = _obs("user_a", status=200, shape="s", tenant="t1", h="same")
@@ -263,12 +263,12 @@ def test_invariants_corroborate_instead_of_duplicating(tmp_path):
 def test_invariants_silent_without_matrix(tmp_path):
     import tempfile
     from pathlib import Path
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.config import Config
-    from apex_fuzzer.profiles import get as get_profile
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.reporting.coverage import CoverageTracker
-    from apex_fuzzer.validation.evidence import EvidenceStore
+    from main.orchestrator import Orchestrator
+    from main.config import Config
+    from main.profiles import get as get_profile
+    from main.reporting.metrics import Metrics
+    from main.reporting.coverage import CoverageTracker
+    from main.validation.evidence import EvidenceStore
     out = Path(tempfile.mkdtemp())
     orch = Orchestrator(Config(), out, profile=get_profile("standard"))
     m = Metrics()

@@ -1,7 +1,7 @@
 """Tests for the centralized scope gate (default-deny)."""
-from apex_fuzzer.config import ScopeConfig
-from apex_fuzzer.scope import Scope
-from apex_fuzzer.safety import gate
+from main.config import ScopeConfig
+from main.scope import Scope
+from main.safety import gate
 
 
 class FakeResolver:

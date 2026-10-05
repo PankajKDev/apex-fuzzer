@@ -1,4 +1,4 @@
-from apex_fuzzer.shell import run
+from main.shell import run
 
 
 def test_rejects_string_command():

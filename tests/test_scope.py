@@ -1,5 +1,5 @@
-from apex_fuzzer.config import ScopeConfig
-from apex_fuzzer.scope import Scope, target_hostname
+from main.config import ScopeConfig
+from main.scope import Scope, target_hostname
 
 
 def test_allowed_domain():

@@ -8,15 +8,15 @@ test:  ## full suite
 	$(PY) -m pytest tests/ -q
 
 test-cov:  ## suite with coverage report + floor gate
-	$(PY) -m pytest tests/ -q --cov=apex_fuzzer --cov-report=term-missing \
+	$(PY) -m pytest tests/ -q --cov=main --cov-report=term-missing \
 		--cov-fail-under=70
 
 lint:  ## ruff bug-catching subset (see pyproject [tool.ruff])
-	$(PY) -m ruff check --select F,E9 apex_fuzzer tests
+	$(PY) -m ruff check --select F,E9 main tests
 
 typecheck:  ## mypy on the gated scope (ratchets outward, see pyproject)
-	$(PY) -m mypy apex_fuzzer/safety apex_fuzzer/verify \
-		apex_fuzzer/budgets.py apex_fuzzer/ai
+	$(PY) -m mypy main/safety main/verify \
+		main/budgets.py main/ai
 
 security:  ## dependency audit (gitleaks runs in CI + pre-commit)
 	$(PY) -m pip_audit --desc

@@ -6,14 +6,14 @@ No network in any test.
 """
 import json
 
-from apex_fuzzer.verify.base import (
+from main.verify.base import (
     verify_persisted, verify_idempotency, verify_token_reuse,
     VERIFIED, REFUTED, INCONCLUSIVE, StateVerifier)
-from apex_fuzzer.verify.assertions import (
+from main.verify.assertions import (
     jsonpath_get, check_rule, evaluate_assertions,
     matching_assertions)
-from apex_fuzzer.models import Endpoint, Parameter, Identity
-from apex_fuzzer.config import Config
+from main.models import Endpoint, Parameter, Identity
+from main.config import Config
 
 
 class FakeResp:
@@ -24,7 +24,7 @@ class FakeResp:
 
 
 def _ep(url, qparams=None, bparams=None):
-    from apex_fuzzer.discovery.url_normalizer import normalize_url
+    from main.discovery.url_normalizer import normalize_url
     from urllib.parse import urlparse
     p = urlparse(url)
     e = Endpoint(url=url, normalized_url=normalize_url(url),
@@ -264,12 +264,12 @@ def _biz_http(store):
 def test_business_verified_upgrade_and_metrics():
     import tempfile
     from pathlib import Path
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.reporting.coverage import CoverageTracker
-    from apex_fuzzer.budgets import BudgetTracker
-    from apex_fuzzer.validation.evidence import EvidenceStore
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
+    from main.reporting.metrics import Metrics
+    from main.reporting.coverage import CoverageTracker
+    from main.budgets import BudgetTracker
+    from main.validation.evidence import EvidenceStore
     out = Path(tempfile.mkdtemp())
     cfg = Config()
     store = {"qty": -1}  # server persisted the abuse value
@@ -292,12 +292,12 @@ def test_business_verified_upgrade_and_metrics():
 def test_business_refuted_downgrade():
     import tempfile
     from pathlib import Path
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.reporting.coverage import CoverageTracker
-    from apex_fuzzer.budgets import BudgetTracker
-    from apex_fuzzer.validation.evidence import EvidenceStore
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
+    from main.reporting.metrics import Metrics
+    from main.reporting.coverage import CoverageTracker
+    from main.budgets import BudgetTracker
+    from main.validation.evidence import EvidenceStore
     out = Path(tempfile.mkdtemp())
     cfg = Config()
     store = {"qty": 2}  # clean re-read: effect did NOT persist
@@ -315,12 +315,12 @@ def test_business_refuted_downgrade():
 def test_race_idempotency_upgrade():
     import tempfile
     from pathlib import Path
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.reporting.coverage import CoverageTracker
-    from apex_fuzzer.budgets import BudgetTracker
-    from apex_fuzzer.validation.evidence import EvidenceStore
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
+    from main.reporting.metrics import Metrics
+    from main.reporting.coverage import CoverageTracker
+    from main.budgets import BudgetTracker
+    from main.validation.evidence import EvidenceStore
     n = [0]
 
     class H:
@@ -336,11 +336,11 @@ def test_race_idempotency_upgrade():
     orch = Orchestrator(cfg, out, profile=get_profile("standard"))
     ep = _ep("https://t.com/pay", [], "api")
     ep.body_parameters.append(__import__(
-        "apex_fuzzer.models", fromlist=["Parameter"]).Parameter(
+        "main.models", fromlist=["Parameter"]).Parameter(
             name="Idempotency-Key", location="header",
             source=["test"], sample_value="K1"))
     # header-located params are not sent as body; put key in body too
-    from apex_fuzzer.models import Parameter as P
+    from main.models import Parameter as P
     ep.body_parameters.append(P(name="idem_key", location="body",
                                 source=["test"], sample_value="K1"))
     m = Metrics()
@@ -355,13 +355,13 @@ def test_race_idempotency_upgrade():
 def test_race_idempotency_profile_skips_without_key():
     import tempfile
     from pathlib import Path
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.reporting.coverage import CoverageTracker
-    from apex_fuzzer.budgets import BudgetTracker
-    from apex_fuzzer.validation.evidence import EvidenceStore
-    from apex_fuzzer.models import Parameter as P
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
+    from main.reporting.metrics import Metrics
+    from main.reporting.coverage import CoverageTracker
+    from main.budgets import BudgetTracker
+    from main.validation.evidence import EvidenceStore
+    from main.models import Parameter as P
     n = [0]
 
     class H:

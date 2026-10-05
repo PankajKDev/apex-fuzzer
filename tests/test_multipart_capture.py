@@ -4,14 +4,14 @@ In-memory fixtures and test doubles only. No network or public targets.
 """
 import json
 
-from apex_fuzzer.browser.network import (
+from main.browser.network import (
     NetworkRecorder, parse_multipart, _form_names)
-from apex_fuzzer.config import Config
-from apex_fuzzer.models import Endpoint, Finding
-from apex_fuzzer.validation import request_shape as shape_mod
-from apex_fuzzer.validation import sqli as sqli_mod
-from apex_fuzzer.validation import mutate as mut_mod
-from apex_fuzzer.validation.base import Candidate
+from main.config import Config
+from main.models import Endpoint, Finding
+from main.validation import request_shape as shape_mod
+from main.validation import sqli as sqli_mod
+from main.validation import mutate as mut_mod
+from main.validation.base import Candidate
 
 
 BOUNDARY = "bound123"
@@ -54,8 +54,8 @@ class _FakeRequest:
 
 
 def _scope_for(hosts):
-    from apex_fuzzer.scope import Scope
-    from apex_fuzzer.config import ScopeConfig
+    from main.scope import Scope
+    from main.config import ScopeConfig
     return Scope(ScopeConfig(allowed_domains=list(hosts)))
 
 
@@ -161,8 +161,8 @@ def test_authenticated_multipart_values_are_blanked():
 
 
 def test_merge_browser_entry_keeps_multipart_runtime_only():
-    from apex_fuzzer.discovery.url_normalizer import normalize_url
-    from apex_fuzzer.orchestrator import Orchestrator
+    from main.discovery.url_normalizer import normalize_url
+    from main.orchestrator import Orchestrator
     url = "https://example.com/upload"
     endpoint = Endpoint(url=url, normalized_url=normalize_url(url))
     entry = {"url": url, "method": "POST", "params": [],

@@ -1,14 +1,14 @@
 """Open redirect validator checks use synthetic HTTP responses only."""
 from urllib.parse import parse_qs, urlparse
 
-from apex_fuzzer.discovery.url_normalizer import normalize_url
-from apex_fuzzer.models import Endpoint, Parameter
-from apex_fuzzer.reporting.coverage import CoverageTracker
-from apex_fuzzer.reporting.metrics import Metrics
-from apex_fuzzer.scope import Scope
-from apex_fuzzer.config import Config
-from apex_fuzzer.validation.evidence import EvidenceStore
-from apex_fuzzer.validation.open_redirect import (
+from main.discovery.url_normalizer import normalize_url
+from main.models import Endpoint, Parameter
+from main.reporting.coverage import CoverageTracker
+from main.reporting.metrics import Metrics
+from main.scope import Scope
+from main.config import Config
+from main.validation.evidence import EvidenceStore
+from main.validation.open_redirect import (
     _is_external_marker, probe_open_redirects)
 
 

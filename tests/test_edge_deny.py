@@ -4,7 +4,7 @@ Fake HTTP only. No network.
 """
 from types import SimpleNamespace
 
-from apex_fuzzer.validation.differential import (
+from main.validation.differential import (
     DifferentialTester, looks_like_edge_deny)
 
 EDGE_BODY = ("<HTML><HEAD><TITLE>Access Denied</TITLE></HEAD><BODY>"
@@ -33,7 +33,7 @@ def test_edge_detector():
 
 
 def test_differential_all_edge_is_inconclusive():
-    from apex_fuzzer.config import Config
+    from main.config import Config
 
     class Http:
         def get(self, url, **kwargs):
@@ -53,7 +53,7 @@ def test_differential_all_edge_is_inconclusive():
 
 
 def test_differential_edge_200s_are_not_bola():
-    from apex_fuzzer.config import Config
+    from main.config import Config
 
     class Http:
         def get(self, url, **kwargs):
@@ -71,8 +71,8 @@ def test_differential_edge_200s_are_not_bola():
 
 
 def test_differential_real_denial_still_negative_path():
-    from apex_fuzzer.validation.differential import DifferentialResult
-    from apex_fuzzer.validation.differential import ContextResult
+    from main.validation.differential import DifferentialResult
+    from main.validation.differential import ContextResult
     res = DifferentialResult(url="https://example.test/api/u",
                              endpoint_type="api")
     res.contexts = [ContextResult(name="anonymous", status=401),
@@ -85,8 +85,8 @@ def test_differential_real_denial_still_negative_path():
 
 
 def test_swap_tester_edge_voids_and_flags():
-    from apex_fuzzer.authorization.access_tests import swap_ids
-    from apex_fuzzer.authorization.harvest import HarvestedId
+    from main.authorization.access_tests import swap_ids
+    from main.authorization.harvest import HarvestedId
 
     class Http:
         def get(self, url, **kwargs):
@@ -106,9 +106,9 @@ def test_swap_tester_edge_voids_and_flags():
 
 
 def test_swap_edge_200_match_voided():
-    from apex_fuzzer.authorization.access_tests import swap_ids
-    from apex_fuzzer.authorization.harvest import HarvestedId
-    from apex_fuzzer.validation.differential import normalize_response
+    from main.authorization.access_tests import swap_ids
+    from main.authorization.harvest import HarvestedId
+    from main.validation.differential import normalize_response
 
     baseline = normalize_response(_resp(200, BOT_PAGE))
 
@@ -130,7 +130,7 @@ def test_swap_edge_200_match_voided():
 
 
 def test_write_replay_marks_edge():
-    from apex_fuzzer.authorization import write_replay as wr_mod
+    from main.authorization import write_replay as wr_mod
 
     class Http:
         def get(self, url, **kwargs):
@@ -159,7 +159,7 @@ def test_write_replay_marks_edge():
 
 
 def test_graphql_replay_voids_edge_match():
-    from apex_fuzzer.authorization import graphql_replay as gql_mod
+    from main.authorization import graphql_replay as gql_mod
     import json
 
     body = json.dumps({"query": "query GetUser($id: ID!) { user { id } }",
@@ -188,8 +188,8 @@ def test_graphql_replay_voids_edge_match():
 
 
 def test_user_agent_default_and_override_and_validation():
-    from apex_fuzzer.config import Config
-    from apex_fuzzer.orchestrator import _HTTPClient
+    from main.config import Config
+    from main.orchestrator import _HTTPClient
 
     assert "ApexFuzzer" in _HTTPClient().session.headers["User-Agent"]
     custom = _HTTPClient(user_agent="Mozilla/5.0 Test")
@@ -202,14 +202,14 @@ def test_user_agent_default_and_override_and_validation():
 
 
 def test_orchestrator_records_edge_inconclusive_not_negative(tmp_path):
-    from apex_fuzzer.config import Config, ScopeConfig
-    from apex_fuzzer.models import Endpoint
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.reporting.coverage import CoverageTracker
-    from apex_fuzzer.scope import Scope
-    from apex_fuzzer.validation.differential import DifferentialTester
+    from main.config import Config, ScopeConfig
+    from main.models import Endpoint
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
+    from main.reporting.metrics import Metrics
+    from main.reporting.coverage import CoverageTracker
+    from main.scope import Scope
+    from main.validation.differential import DifferentialTester
 
     cfg = Config()
     cfg.scope.allowed_domains = ["example.test"]
@@ -228,8 +228,8 @@ def test_orchestrator_records_edge_inconclusive_not_negative(tmp_path):
     diff.http = Http()
     diff.contexts = [{"name": "anonymous", "headers": {}},
                      {"name": "user_a", "headers": {"Cookie": "s=a"}}]
-    from apex_fuzzer.validation.evidence import EvidenceStore
-    from apex_fuzzer.budgets import BudgetTracker
+    from main.validation.evidence import EvidenceStore
+    from main.budgets import BudgetTracker
     coverage = CoverageTracker()
     found = orch._differential_probe(
         [ep], diff, EvidenceStore(tmp_path / "proofs"), Metrics(),

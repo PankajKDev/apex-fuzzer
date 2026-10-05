@@ -4,14 +4,14 @@ No network. Fake HTTP clients only.
 """
 from types import SimpleNamespace
 
-from apex_fuzzer.config import Config, ScopeConfig
-from apex_fuzzer.models import Endpoint, Finding, Parameter
-from apex_fuzzer.plugins.adapters import _candidate_from, XssMutationPlugin
-from apex_fuzzer.plugins.base import TestTarget, TestContext
-from apex_fuzzer.scope import Scope
-from apex_fuzzer.validation import mutate as mut_mod
-from apex_fuzzer.validation.base import Candidate
-from apex_fuzzer.budgets import BudgetExceeded
+from main.config import Config, ScopeConfig
+from main.models import Endpoint, Finding, Parameter
+from main.plugins.adapters import _candidate_from, XssMutationPlugin
+from main.plugins.base import TestTarget, TestContext
+from main.scope import Scope
+from main.validation import mutate as mut_mod
+from main.validation.base import Candidate
+from main.budgets import BudgetExceeded
 
 
 def _scope():

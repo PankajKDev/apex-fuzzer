@@ -4,21 +4,21 @@ import json
 import time
 from types import SimpleNamespace
 
-from apex_fuzzer.discovery import param_miner, technologies as tech_mod
-from apex_fuzzer.discovery.javascript import chunk_js, parse_source_map
-from apex_fuzzer.models import Parameter, Hypothesis, Endpoint, Finding
-from apex_fuzzer.validation import differential as diff_mod
-from apex_fuzzer.validation import mutate as mut_mod
-from apex_fuzzer.validation import oast as oast_mod
-from apex_fuzzer.detection import nuclei as nuclei_mod
-from apex_fuzzer.shell import AdaptiveRateLimiter
-from apex_fuzzer.config import Config
-from apex_fuzzer.validation.base import Candidate
-from apex_fuzzer.validation import sqli as sqli_mod
-from apex_fuzzer.validation import request_shape as request_shape_mod
-from apex_fuzzer.plugins.base import TestTarget, TestContext
-from apex_fuzzer.plugins.adapters import _candidate_from, SqliMutationPlugin
-from apex_fuzzer.budgets import BudgetExceeded
+from main.discovery import param_miner, technologies as tech_mod
+from main.discovery.javascript import chunk_js, parse_source_map
+from main.models import Parameter, Hypothesis, Endpoint, Finding
+from main.validation import differential as diff_mod
+from main.validation import mutate as mut_mod
+from main.validation import oast as oast_mod
+from main.detection import nuclei as nuclei_mod
+from main.shell import AdaptiveRateLimiter
+from main.config import Config
+from main.validation.base import Candidate
+from main.validation import sqli as sqli_mod
+from main.validation import request_shape as request_shape_mod
+from main.plugins.base import TestTarget, TestContext
+from main.plugins.adapters import _candidate_from, SqliMutationPlugin
+from main.budgets import BudgetExceeded
 
 
 # ── arjun JSON parsing ────────────────────────────────────────────────
@@ -546,7 +546,7 @@ def test_static_callback_collector_tokens_and_poll(monkeypatch):
 def test_static_callback_collector_confirms_probe(monkeypatch):
     from types import SimpleNamespace
     from urllib.parse import parse_qs, urlsplit
-    from apex_fuzzer.validation.oast import probe_endpoint
+    from main.validation.oast import probe_endpoint
 
     provider = oast_mod.InteractshProvider(
         callback_url="http://localhost:9001")
@@ -579,15 +579,15 @@ def test_static_callback_collector_confirms_probe(monkeypatch):
 
 
 def test_static_callback_canary_preserves_local_port():
-    from apex_fuzzer.validation.second_order import make_ssrf_canary
+    from main.validation.second_order import make_ssrf_canary
     payload = make_ssrf_canary(
         "http://localhost:9001/abc123", scheme="https")
     assert payload.startswith("http://localhost:9001/abc123/stored/")
 
 
 def test_oast_callback_cli_override():
-    from apex_fuzzer.cli import build_parser
-    from apex_fuzzer.config import Config, apply_cli_overrides
+    from main.cli import build_parser
+    from main.config import Config, apply_cli_overrides
     args = build_parser().parse_args([
         "-d", "http://localhost:8000", "--oast-callback-url",
         "http://localhost:9001"])

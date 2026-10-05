@@ -7,20 +7,20 @@ in any test.
 """
 import json
 
-from apex_fuzzer.workflows.model import Flow, FlowStep
-from apex_fuzzer.workflows.dependencies import (
+from main.workflows.model import Flow, FlowStep
+from main.workflows.dependencies import (
     find_dependencies, prerequisite_map, endpoint_param_values)
-from apex_fuzzer.workflows.discovery import (
+from main.workflows.discovery import (
     discover_all, discover_rest_flows, discover_traffic_flows,
     discover_crud_flows, discover_dependency_flows)
-from apex_fuzzer.workflows.replay import replay_flow
-from apex_fuzzer.workflows.mutations import mutate, mutation_catalog
-from apex_fuzzer.models import Endpoint, Parameter, Identity
-from apex_fuzzer.budgets import BudgetExceeded
+from main.workflows.replay import replay_flow
+from main.workflows.mutations import mutate, mutation_catalog
+from main.models import Endpoint, Parameter, Identity
+from main.budgets import BudgetExceeded
 
 
 def _ep(url, method="GET", qparams=None, bparams=None, etype="page"):
-    from apex_fuzzer.discovery.url_normalizer import normalize_url
+    from main.discovery.url_normalizer import normalize_url
     from urllib.parse import urlparse
     p = urlparse(url)
     e = Endpoint(url=url, normalized_url=normalize_url(url),
@@ -36,7 +36,7 @@ def _ep(url, method="GET", qparams=None, bparams=None, etype="page"):
 
 
 def _hid(url, param, value, owner="u"):
-    from apex_fuzzer.authorization.harvest import HarvestedId
+    from main.authorization.harvest import HarvestedId
     return HarvestedId(endpoint_url=url, normalized_url=url, param=param,
                        value=value, owner=owner)
 
@@ -146,7 +146,7 @@ def test_traffic_chains_and_gaps():
 
 
 def test_crud_flows():
-    from apex_fuzzer.state.resources import ResourceState
+    from main.state.resources import ResourceState
     r = ResourceState("k", "order")
     r.link_crud("create", "https://t.com/orders")
     r.link_crud("read", "https://t.com/orders/1")
@@ -201,7 +201,7 @@ def _replay_http(bodies):
 
 
 def test_replay_order_and_param_binding():
-    from apex_fuzzer.models import Parameter as P
+    from main.models import Parameter as P
     http = _replay_http({})
     s1 = FlowStep(name="create", endpoint="https://t.com/p",
                   normalized_url="https://t.com/p", method="POST",
@@ -223,7 +223,7 @@ def test_replay_harvest_overrides_samples():
     s = FlowStep(name="use", endpoint="https://t.com/x",
                  normalized_url="https://t.com/x", method="GET",
                  parameters=[])
-    from apex_fuzzer.models import Parameter as P
+    from main.models import Parameter as P
     s.parameters = [P(name="pid", location="query", source=["t"],
                       sample_value="old")]
     flow = Flow(name="f", steps=[s])
@@ -348,11 +348,11 @@ def test_discover_workflows_end_to_end(tmp_path):
     import tempfile
     from pathlib import Path
     from types import SimpleNamespace
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.config import Config
-    from apex_fuzzer.profiles import get as get_profile
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.checkpoints import Checkpoint
+    from main.orchestrator import Orchestrator
+    from main.config import Config
+    from main.profiles import get as get_profile
+    from main.reporting.metrics import Metrics
+    from main.checkpoints import Checkpoint
     out = Path(tempfile.mkdtemp())
     orch = Orchestrator(Config(), out, profile=get_profile("standard"))
     eps = [_ep("https://t.com/api/p", method="POST"),

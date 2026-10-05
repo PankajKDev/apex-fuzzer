@@ -4,9 +4,9 @@ httpx/nuclei follow redirects themselves (outside the gate), so the
 tool must never hand them an out-of-scope starting line. No network,
 no binaries in any test.
 """
-from apex_fuzzer.config import Config
-from apex_fuzzer.orchestrator import Orchestrator
-from apex_fuzzer.profiles import get as get_profile
+from main.config import Config
+from main.orchestrator import Orchestrator
+from main.profiles import get as get_profile
 
 
 def _orch(tmp_path):
@@ -34,7 +34,7 @@ def test_scoped_input_missing_source(tmp_path):
 
 
 def test_probe_live_fallback_uses_filtered_set(tmp_path, monkeypatch):
-    import apex_fuzzer.orchestrator as orch_mod
+    import main.orchestrator as orch_mod
     orch = _orch(tmp_path)
     (tmp_path / "raw.txt").write_text(
         "https://example.com/a\nhttps://evil.com/b\n")
@@ -45,7 +45,7 @@ def test_probe_live_fallback_uses_filtered_set(tmp_path, monkeypatch):
 
 
 def test_probe_live_httpx_receives_filtered_file(tmp_path, monkeypatch):
-    import apex_fuzzer.orchestrator as orch_mod
+    import main.orchestrator as orch_mod
     orch = _orch(tmp_path)
     (tmp_path / "raw.txt").write_text(
         "https://example.com/a\nhttps://evil.com/b\n")
@@ -78,7 +78,7 @@ def test_probe_live_empty_scope_writes_empty(tmp_path):
 
 
 def test_nuclei_scoped_input(tmp_path):
-    from apex_fuzzer.detection.nuclei import NucleiRunner
+    from main.detection.nuclei import NucleiRunner
     cfg = Config()
     cfg.scope.allowed_domains = ["example.com"]
     runner = NucleiRunner(cfg, tmp_path)
@@ -90,8 +90,8 @@ def test_nuclei_scoped_input(tmp_path):
 
 
 def test_nuclei_run_scan_not_ready_runs_nothing(tmp_path, monkeypatch):
-    from apex_fuzzer.detection import nuclei as nuclei_mod
-    from apex_fuzzer.detection.nuclei import NucleiRunner
+    from main.detection import nuclei as nuclei_mod
+    from main.detection.nuclei import NucleiRunner
     cfg = Config()
     cfg.scope.allowed_domains = ["example.com"]
     runner = NucleiRunner(cfg, tmp_path)

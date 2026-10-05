@@ -7,15 +7,15 @@ import os
 import stat
 from types import SimpleNamespace
 
-from apex_fuzzer.config import Config, ScopeConfig
-from apex_fuzzer.models import Endpoint, Finding, Parameter
-from apex_fuzzer.plugins.adapters import _candidate_from, SqliPlugin
-from apex_fuzzer.plugins.base import TestTarget, TestContext
-from apex_fuzzer.scope import Scope
-from apex_fuzzer.validation import observed_sqli as obs_mod
-from apex_fuzzer.validation import sqli as sqli_mod
-from apex_fuzzer.validation.base import Candidate
-from apex_fuzzer.budgets import BudgetTracker
+from main.config import Config, ScopeConfig
+from main.models import Endpoint, Finding, Parameter
+from main.plugins.adapters import _candidate_from, SqliPlugin
+from main.plugins.base import TestTarget, TestContext
+from main.scope import Scope
+from main.validation import observed_sqli as obs_mod
+from main.validation import sqli as sqli_mod
+from main.validation.base import Candidate
+from main.budgets import BudgetTracker
 
 
 SECRET_COOKIE = "session=SECRET-ABC-123"

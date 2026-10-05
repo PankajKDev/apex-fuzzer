@@ -18,7 +18,7 @@ From the repository root, set the target to one exact in-scope host and run:
 
 ```bash
 TARGET=app.example.com
-./.venv/bin/python -m apex_fuzzer.cli \
+./.venv/bin/python -m main.cli \
   --domain "$TARGET" \
   --config examples/bounty-strict.yaml \
   --profile validation \
@@ -67,7 +67,7 @@ run the same command with `--dry-run` removed:
 
 ```bash
 TARGET=app.example.com
-./.venv/bin/python -m apex_fuzzer.cli \
+./.venv/bin/python -m main.cli \
   --domain "$TARGET" \
   --config examples/bounty-strict.yaml \
   --profile validation \

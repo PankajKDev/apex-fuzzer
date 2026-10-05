@@ -6,11 +6,11 @@ the virtual lab when browsers are installed.
 from types import SimpleNamespace
 from urllib.parse import urlencode
 
-from apex_fuzzer.config import Config
-from apex_fuzzer.models import Finding
-from apex_fuzzer.validation import xss_browser as xss_browser_mod
-from apex_fuzzer.validation import xss as xss_mod
-from apex_fuzzer.validation.base import Candidate
+from main.config import Config
+from main.models import Finding
+from main.validation import xss_browser as xss_browser_mod
+from main.validation import xss as xss_mod
+from main.validation.base import Candidate
 
 
 def _engine_for(exec_sources, seen):

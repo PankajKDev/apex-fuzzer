@@ -5,11 +5,11 @@ from urllib.parse import parse_qs, parse_qsl, urlparse
 
 import pytest
 
-from apex_fuzzer.budgets import BudgetExceeded
-from apex_fuzzer.config import Config
-from apex_fuzzer.models import Finding, Parameter
-from apex_fuzzer.validation.base import Candidate
-from apex_fuzzer.validation.ssti import SstiValidator
+from main.budgets import BudgetExceeded
+from main.config import Config
+from main.models import Finding, Parameter
+from main.validation.base import Candidate
+from main.validation.ssti import SstiValidator
 
 
 class Response:
@@ -148,10 +148,10 @@ def test_query_parameter_must_be_observed_on_target_url():
 
 
 def test_ssti_plugin_blocks_out_of_scope_target():
-    from apex_fuzzer.config import Config, ScopeConfig
-    from apex_fuzzer.plugins.adapters import SstiPlugin
-    from apex_fuzzer.plugins.base import TestTarget, TestContext
-    from apex_fuzzer.scope import Scope
+    from main.config import Config, ScopeConfig
+    from main.plugins.adapters import SstiPlugin
+    from main.plugins.base import TestTarget, TestContext
+    from main.scope import Scope
     from types import SimpleNamespace as _NS
 
     cfg = Config()

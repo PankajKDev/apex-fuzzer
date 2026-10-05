@@ -5,21 +5,21 @@ graph links, CRUD helper reuse, and the offline orchestrator intel
 step. No network in any test.
 """
 
-from apex_fuzzer.application.resources import (
+from main.application.resources import (
     discover_ids_from_html, discover_ids_from_headers,
     discover_ids_from_js, discover_ids_from_graphql,
     discover_ids_from_traffic, _guess_type)
-from apex_fuzzer.state.resources import (
+from main.state.resources import (
     ResourceTracker, link_crud_from_endpoints)
-from apex_fuzzer.authz.resources import enrich_resource_records
-from apex_fuzzer.authorization.harvest import HarvestedId
-from apex_fuzzer.authorization.matrix import AuthorizationObservation
-from apex_fuzzer.graph.application_graph import ApplicationGraph
-from apex_fuzzer.models import Endpoint, Parameter
+from main.authz.resources import enrich_resource_records
+from main.authorization.harvest import HarvestedId
+from main.authorization.matrix import AuthorizationObservation
+from main.graph.application_graph import ApplicationGraph
+from main.models import Endpoint, Parameter
 
 
 def _ep(url, method="GET", qparams=None):
-    from apex_fuzzer.discovery.url_normalizer import normalize_url
+    from main.discovery.url_normalizer import normalize_url
     from urllib.parse import urlparse
     p = urlparse(url)
     e = Endpoint(url=url, normalized_url=normalize_url(url),
@@ -137,7 +137,7 @@ def test_enrich_heuristic_type_and_empty_tracker():
 
 
 def test_crud_helper_shared_rule():
-    from apex_fuzzer.models import Resource
+    from main.models import Resource
     tracker = ResourceTracker()
     res = [Resource(key="https://t.com/o::query:order_id",
                     resource_type="order",
@@ -161,7 +161,7 @@ def test_crud_helper_shared_rule():
 
 # ── shared-identifier graph links ─────────────────────────────────────
 def test_shared_identifier_links():
-    from apex_fuzzer.authz.graph import sync_extended
+    from main.authz.graph import sync_extended
     g = ApplicationGraph()
     pool = [_hid("https://t.com/orders", "user_id", "u_9999",
                  owner="alice"),
@@ -183,9 +183,9 @@ def test_shared_identifier_links():
 def _orch():
     import tempfile
     from pathlib import Path
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.config import Config
-    from apex_fuzzer.profiles import get as get_profile
+    from main.orchestrator import Orchestrator
+    from main.config import Config
+    from main.profiles import get as get_profile
     td = tempfile.mkdtemp()
     return (Orchestrator(Config(), Path(td),
                          profile=get_profile("standard")),
@@ -195,12 +195,12 @@ def _orch():
 def test_intel_step_offline_end_to_end(tmp_path):
     import tempfile
     from pathlib import Path
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.config import Config
-    from apex_fuzzer.profiles import get as get_profile
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.checkpoints import Checkpoint
-    from apex_fuzzer.graph.application_graph import ApplicationGraph
+    from main.orchestrator import Orchestrator
+    from main.config import Config
+    from main.profiles import get as get_profile
+    from main.reporting.metrics import Metrics
+    from main.checkpoints import Checkpoint
+    from main.graph.application_graph import ApplicationGraph
     from types import SimpleNamespace
     out = Path(tempfile.mkdtemp())
     orch = Orchestrator(Config(), out, profile=get_profile("standard"))
@@ -252,8 +252,8 @@ def test_intel_step_offline_end_to_end(tmp_path):
 
 def test_intel_step_empty_inputs():
     orch, out = _orch()
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.checkpoints import Checkpoint
+    from main.reporting.metrics import Metrics
+    from main.checkpoints import Checkpoint
     m = Metrics()
     orch._build_resource_intel(out, [], None, None, m,
                                Checkpoint(out / "checkpoint.json"))

@@ -24,7 +24,7 @@ server bound to loopback.
 In another terminal, from the repository root:
 
 ```bash
-python -m apex_fuzzer.cli \
+python -m main.cli \
   --domain http://127.0.0.1:8765 \
   --profile passive \
   --output output/local-lab

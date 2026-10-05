@@ -1,5 +1,5 @@
 """Tests: GraphQL introspection exposure probe (no network)."""
-from apex_fuzzer.validation import graphql_introspection as gql
+from main.validation import graphql_introspection as gql
 
 
 class _Resp:
@@ -92,7 +92,7 @@ def test_transport_error_is_inconclusive():
 
 
 def test_budget_exceeded_propagates():
-    from apex_fuzzer.budgets import BudgetExceeded
+    from main.budgets import BudgetExceeded
     import pytest
     with pytest.raises(BudgetExceeded):
         gql.probe_introspection(
@@ -101,7 +101,7 @@ def test_budget_exceeded_propagates():
 
 
 def test_plan_cost():
-    from apex_fuzzer.safety.preflight import plan_graphql_introspection
+    from main.safety.preflight import plan_graphql_introspection
     assert plan_graphql_introspection(4).total == 4
 
 

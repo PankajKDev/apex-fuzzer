@@ -3,9 +3,9 @@ import json
 
 import pytest
 
-from apex_fuzzer.budgets import BudgetExceeded
-from apex_fuzzer.validation import differential as diff_mod
-from apex_fuzzer.validation.differential import DifferentialTester
+from main.budgets import BudgetExceeded
+from main.validation import differential as diff_mod
+from main.validation.differential import DifferentialTester
 
 
 class _Resp:
@@ -38,7 +38,7 @@ class ScriptedHttp:
 
 
 def _tester(http, authed=("AAA", "BBB")):
-    from apex_fuzzer.config import AuthContext, Config
+    from main.config import AuthContext, Config
     cfg = Config()
     cfg.auth.contexts = [AuthContext(name="anonymous", headers={})] + [
         AuthContext(name=f"user_{c}", headers={"Cookie": f"session={c}"})
@@ -101,14 +101,14 @@ def test_evaluate_all_error_is_inconclusive():
 
 
 def test_orchestrator_error_result_is_not_negative(tmp_path):
-    from apex_fuzzer.budgets import BudgetTracker
-    from apex_fuzzer.config import Config
-    from apex_fuzzer.models import Endpoint
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
-    from apex_fuzzer.reporting.coverage import CoverageTracker
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.validation.evidence import EvidenceStore
+    from main.budgets import BudgetTracker
+    from main.config import Config
+    from main.models import Endpoint
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
+    from main.reporting.coverage import CoverageTracker
+    from main.reporting.metrics import Metrics
+    from main.validation.evidence import EvidenceStore
     cfg = Config()
     cfg.scope.allowed_domains = ["example.com"]
     orch = Orchestrator(cfg, tmp_path, profile=get_profile("standard"))

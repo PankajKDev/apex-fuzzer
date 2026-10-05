@@ -1,10 +1,10 @@
 """Tests for the default-deny gate wired into _HTTPClient (no network)."""
 import pytest
 
-from apex_fuzzer.config import ScopeConfig
-from apex_fuzzer.orchestrator import _HTTPClient
-from apex_fuzzer.safety.gate import ScopeRefused, REASON_ALLOWED
-from apex_fuzzer.scope import Scope
+from main.config import ScopeConfig
+from main.orchestrator import _HTTPClient
+from main.safety.gate import ScopeRefused, REASON_ALLOWED
+from main.scope import Scope
 
 
 class FakeResolver:
@@ -154,7 +154,7 @@ def test_denial_consumes_no_budget():
 
 
 def test_reason_strings_stable_for_audit_db():
-    import apex_fuzzer.safety.gate as g
+    import main.safety.gate as g
     assert g.REASON_ALLOWED == "allowed"
     assert REASON_ALLOWED == "allowed"
 
@@ -162,8 +162,8 @@ def test_reason_strings_stable_for_audit_db():
 def test_scope_refused_is_budget_exceeded():
     """Contract: every `except BudgetExceeded → blocked` site in the
     tree handles gate denials with zero per-site edits."""
-    from apex_fuzzer.budgets import BudgetExceeded
-    from apex_fuzzer.safety.gate import ScopeRefused
+    from main.budgets import BudgetExceeded
+    from main.safety.gate import ScopeRefused
     assert issubclass(ScopeRefused, BudgetExceeded)
     c = _client()
     try:
@@ -177,9 +177,9 @@ def test_scope_refused_is_budget_exceeded():
 def test_differential_probe_propagates_denial_as_blocked():
     """A denied differential URL re-raises (caller records BLOCKED)
     instead of collapsing into per-context errors."""
-    from apex_fuzzer.budgets import BudgetExceeded
-    from apex_fuzzer.config import Config
-    from apex_fuzzer.validation.differential import DifferentialTester
+    from main.budgets import BudgetExceeded
+    from main.config import Config
+    from main.validation.differential import DifferentialTester
     import pytest as _pytest
     c = _client()
     with _pytest.raises(BudgetExceeded):
@@ -187,9 +187,9 @@ def test_differential_probe_propagates_denial_as_blocked():
 
 
 def test_mutation_fetch_propagates_denial():
-    from apex_fuzzer.budgets import BudgetExceeded
-    from apex_fuzzer.config import Config
-    from apex_fuzzer.validation.mutate import MutationEngine
+    from main.budgets import BudgetExceeded
+    from main.config import Config
+    from main.validation.mutate import MutationEngine
     import pytest as _pytest
     c = _client()
     with _pytest.raises(BudgetExceeded):

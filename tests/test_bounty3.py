@@ -2,20 +2,20 @@
 All HTTP is faked — no network in any test."""
 import json
 
-from apex_fuzzer.authorization.harvest import (
+from main.authorization.harvest import (
     harvest_ids, extract_ids_from_body)
-from apex_fuzzer.authorization.matrix import (
+from main.authorization.matrix import (
     AuthorizationMatrix, AuthorizationObservation, same_object,
     evaluate_cell, describe_cell)
-from apex_fuzzer.authorization.access_tests import (
+from main.authorization.access_tests import (
     swap_ids, sweep_methods)
-from apex_fuzzer.validation.second_order import (
+from main.validation.second_order import (
     make_canary, classify_context, inject_canary, find_renders,
     make_ssrf_canary, second_order_ssrf_fields, INERT_TAG)
-from apex_fuzzer.validation.oast import probe_endpoint
-from apex_fuzzer.budgets import BudgetExceeded
-from apex_fuzzer.models import Identity, Endpoint, Parameter, Finding
-from apex_fuzzer.config import Config
+from main.validation.oast import probe_endpoint
+from main.budgets import BudgetExceeded
+from main.models import Identity, Endpoint, Parameter, Finding
+from main.config import Config
 
 
 class FakeResp:
@@ -26,7 +26,7 @@ class FakeResp:
 
 
 def _ep(url, body_params=None, etype="api"):
-    from apex_fuzzer.discovery.url_normalizer import normalize_url
+    from main.discovery.url_normalizer import normalize_url
     from urllib.parse import urlparse
     p = urlparse(url)
     e = Endpoint(url=url, normalized_url=normalize_url(url),
@@ -163,7 +163,7 @@ def test_evaluate_cell_tenant_bola_bfla():
 # ── swap ──────────────────────────────────────────────────────────────
 def _harvested(owner="user_a", value="1", tenant="",
                shape='{"id":1}', h="h1"):
-    from apex_fuzzer.authorization.harvest import HarvestedId
+    from main.authorization.harvest import HarvestedId
     return HarvestedId(endpoint_url="https://t.com/api/u?id=1",
                        normalized_url="https://t.com/api/u",
                        param="id", value=value, owner=owner,
@@ -172,8 +172,8 @@ def _harvested(owner="user_a", value="1", tenant="",
 
 def _harvested_matching(body, owner="user_a", tenant=""):
     """Build a HarvestedId whose baseline equals ``body``'s fingerprint."""
-    from apex_fuzzer.authorization.harvest import HarvestedId
-    from apex_fuzzer.validation.differential import normalize_response
+    from main.authorization.harvest import HarvestedId
+    from main.validation.differential import normalize_response
 
     class R:
         status_code = 200
@@ -352,8 +352,8 @@ def test_find_renders_hits_and_skips():
 def _orch():
     import tempfile
     from pathlib import Path
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
     td = tempfile.mkdtemp()
     return (Orchestrator(Config(), Path(td),
                          profile=get_profile("standard")),
@@ -387,13 +387,13 @@ def _matrix_http():
 def test_authz_matrix_probe_bola_and_bfla():
     import tempfile
     from pathlib import Path
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.reporting.coverage import CoverageTracker
-    from apex_fuzzer.budgets import BudgetTracker
-    from apex_fuzzer.validation.evidence import EvidenceStore
-    from apex_fuzzer.models import Identity
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
+    from main.reporting.metrics import Metrics
+    from main.reporting.coverage import CoverageTracker
+    from main.budgets import BudgetTracker
+    from main.validation.evidence import EvidenceStore
+    from main.models import Identity
 
     out = Path(tempfile.mkdtemp())
     cfg = Config()
@@ -422,10 +422,10 @@ def test_authz_matrix_probe_bola_and_bfla():
 
 def test_authz_matrix_single_identity_untestable(tmp_path):
     orch, out = _orch()
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.reporting.coverage import CoverageTracker
-    from apex_fuzzer.budgets import BudgetTracker
-    from apex_fuzzer.validation.evidence import EvidenceStore
+    from main.reporting.metrics import Metrics
+    from main.reporting.coverage import CoverageTracker
+    from main.budgets import BudgetTracker
+    from main.validation.evidence import EvidenceStore
     cov = CoverageTracker()
     found = orch._authz_matrix_probe(
         [_ep("https://t.com/api/u")], EvidenceStore(out / "proofs"),
@@ -436,10 +436,10 @@ def test_authz_matrix_single_identity_untestable(tmp_path):
 
 def test_authz_matrix_budget_blocked():
     orch, out = _orch()
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.reporting.coverage import CoverageTracker
-    from apex_fuzzer.budgets import BudgetTracker
-    from apex_fuzzer.validation.evidence import EvidenceStore
+    from main.reporting.metrics import Metrics
+    from main.reporting.coverage import CoverageTracker
+    from main.budgets import BudgetTracker
+    from main.validation.evidence import EvidenceStore
     cfg = Config()
     cfg.budgets.authz_tests_per_endpoint = 0
     cov = CoverageTracker()
@@ -469,10 +469,10 @@ def _so_http(store):
 
 def test_second_order_probe_finds_stored():
     orch, out = _orch()
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.reporting.coverage import CoverageTracker
-    from apex_fuzzer.budgets import BudgetTracker
-    from apex_fuzzer.validation.evidence import EvidenceStore
+    from main.reporting.metrics import Metrics
+    from main.reporting.coverage import CoverageTracker
+    from main.budgets import BudgetTracker
+    from main.validation.evidence import EvidenceStore
     cfg = Config()
     eps = [_ep("https://t.com/comment", ["body"], "page"),
            _ep("https://t.com/list", [], "page")]
@@ -492,10 +492,10 @@ def test_second_order_probe_finds_stored():
 
 def test_second_order_encoded_is_negative():
     orch, out = _orch()
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.reporting.coverage import CoverageTracker
-    from apex_fuzzer.budgets import BudgetTracker
-    from apex_fuzzer.validation.evidence import EvidenceStore
+    from main.reporting.metrics import Metrics
+    from main.reporting.coverage import CoverageTracker
+    from main.budgets import BudgetTracker
+    from main.validation.evidence import EvidenceStore
 
     class H:
         def post(self, url, **kw):
@@ -517,10 +517,10 @@ def test_second_order_encoded_is_negative():
 
 def test_second_order_no_forms_untestable():
     orch, out = _orch()
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.reporting.coverage import CoverageTracker
-    from apex_fuzzer.budgets import BudgetTracker
-    from apex_fuzzer.validation.evidence import EvidenceStore
+    from main.reporting.metrics import Metrics
+    from main.reporting.coverage import CoverageTracker
+    from main.budgets import BudgetTracker
+    from main.validation.evidence import EvidenceStore
     cov = CoverageTracker()
     found = orch._second_order_probe(
         [_ep("https://t.com/api/x")], EvidenceStore(out / "proofs"),
@@ -548,7 +548,7 @@ def test_second_order_ssrf_selects_url_fields_and_builds_unique_callback():
 
 
 def test_second_order_ssrf_candidate_scoring_uses_operation_context():
-    from apex_fuzzer.validation.oast import ssrf_candidate_score
+    from main.validation.oast import ssrf_candidate_score
     endpoint = _ep("https://t.com/api/profile", ["file", "comment"], "api")
     file_param = endpoint.body_parameters[0]
     assert ssrf_candidate_score(file_param, endpoint)[0] == 0
@@ -634,7 +634,7 @@ def test_first_order_oast_stale_callback_is_inconclusive_with_response_signals()
 
 
 def test_openapi_ssrf_metadata_preserves_locations_and_nested_schema():
-    from apex_fuzzer.discovery.api_specs import _parse_spec
+    from main.discovery.api_specs import _parse_spec
     spec = _parse_spec({
         "openapi": "3.0.0",
         "components": {"schemas": {"Input": {
@@ -664,7 +664,7 @@ def test_openapi_ssrf_metadata_preserves_locations_and_nested_schema():
 
 
 def test_ssrf_trigger_ranking_prefers_related_result_routes():
-    from apex_fuzzer.orchestrator import (
+    from main.orchestrator import (
         _rank_ssrf_triggers, _materialize_trigger_urls)
     sink = _ep("https://t.com/api/imports", ["url"], "import")
     sink.path = "/api/imports"
@@ -684,13 +684,13 @@ def test_ssrf_trigger_ranking_prefers_related_result_routes():
 
 
 def test_second_order_ssrf_correlates_stored_callback(tmp_path):
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.reporting.coverage import CoverageTracker
-    from apex_fuzzer.budgets import BudgetTracker
-    from apex_fuzzer.validation.evidence import EvidenceStore
-    from apex_fuzzer.validation.oast import matching_interactions
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
+    from main.reporting.metrics import Metrics
+    from main.reporting.coverage import CoverageTracker
+    from main.budgets import BudgetTracker
+    from main.validation.evidence import EvidenceStore
+    from main.validation.oast import matching_interactions
     from urllib.parse import urlparse
 
     cfg = Config()
@@ -762,12 +762,12 @@ def test_second_order_ssrf_correlates_stored_callback(tmp_path):
 def test_validate_runs_authz_and_second_order_steps():
     import tempfile
     from pathlib import Path
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.reporting.coverage import CoverageTracker
-    from apex_fuzzer.budgets import BudgetTracker
-    from apex_fuzzer.validation.evidence import EvidenceStore
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
+    from main.reporting.metrics import Metrics
+    from main.reporting.coverage import CoverageTracker
+    from main.budgets import BudgetTracker
+    from main.validation.evidence import EvidenceStore
 
     store = {}
 
@@ -797,7 +797,7 @@ def test_validate_runs_authz_and_second_order_steps():
     cfg.authorization.enabled = True
     cfg.validation.second_order = True
     cfg.auth.contexts = []
-    from apex_fuzzer.config import AuthContext
+    from main.config import AuthContext
     cfg.auth.contexts = [AuthContext(name="user_a",
                                      headers={"Cookie": "s=A"}),
                          AuthContext(name="user_b",
@@ -826,7 +826,7 @@ def test_authorization_config_defaults():
 
 
 def test_profiles_wire_new_stages():
-    from apex_fuzzer.profiles import get as get_profile
+    from main.profiles import get as get_profile
     assert get_profile("deep").authz_matrix is True
     assert get_profile("deep").second_order is True
     assert get_profile("api").authz_matrix is True
@@ -836,8 +836,8 @@ def test_profiles_wire_new_stages():
 
 
 def test_cli_second_order_flag():
-    from apex_fuzzer.cli import build_parser
-    from apex_fuzzer.config import apply_cli_overrides
+    from main.cli import build_parser
+    from main.config import apply_cli_overrides
     args = build_parser().parse_args(["-d", "x.com", "--second-order"])
     cfg = apply_cli_overrides(Config(), args)
     assert cfg.validation.second_order is True
@@ -848,7 +848,7 @@ def test_cli_second_order_flag():
 
 
 def test_impact_new_classes():
-    from apex_fuzzer.reporting import impact as im
+    from main.reporting import impact as im
     bfla = Finding(id="1", source="authz-matrix",
                    name="BFLA: DELETE /api/users treats roles identically",
                    matched_at="https://t.com/api/users")

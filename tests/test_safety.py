@@ -3,19 +3,19 @@ planning, dry-run, budgets, stop controls, strict refusals. No
 network in any test (dry-run asserts zero HTTP explicitly)."""
 import pytest
 
-from apex_fuzzer.safety.impact import (
+from main.safety.impact import (
     max_level, needs_authorization, MODULE_LEVELS, ModuleState,
     PASSIVE, READ_ONLY, ACTIVE, STATEFUL, BURST, CLAIMING)
-from apex_fuzzer.safety.authorization import (
+from main.safety.authorization import (
     Authorization, AuthorizationRefused, EXIT_OK, EXIT_FAIL, EXIT_REFUSED)
-from apex_fuzzer.safety.preflight import (
+from main.safety.preflight import (
     resolve_modules, RequestPlan, plan_differential, plan_authz_matrix,
     plan_race, plan_business, plan_second_order, plan_oast,
     plan_second_order_ssrf, plan_graphql_introspection,
     render_plan_text, check_fit, StopFlag, Pacer,
     get_interrupt_flag, install_signal_handlers)
-from apex_fuzzer.config import Config
-from apex_fuzzer.budgets import BudgetTracker, BudgetExceeded
+from main.config import Config
+from main.budgets import BudgetTracker, BudgetExceeded
 
 
 def _strict_cfg(**kw):
@@ -50,7 +50,7 @@ def test_max_level_and_gating():
 
 
 def test_resolve_modules_mirrors_orchestrator(monkeypatch):
-    from apex_fuzzer.profiles import get as get_profile
+    from main.profiles import get as get_profile
     monkeypatch.delenv("GITHUB_TOKEN", raising=False)
     cfg = Config()
     states = {s.name: s for s in
@@ -187,8 +187,8 @@ def test_planner_math():
 
 # ── dry-run: zero network ─────────────────────────────────────────────
 def test_dry_run_sends_zero_requests(tmp_path, monkeypatch):
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
 
     def _boom(*a, **k):
         raise AssertionError("dry-run must not touch the network")
@@ -212,8 +212,8 @@ def test_dry_run_sends_zero_requests(tmp_path, monkeypatch):
 
 
 def test_dry_run_uses_inventory_when_present(tmp_path):
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
     cfg = Config()
     orch = Orchestrator(cfg, tmp_path, profile=get_profile("standard"))
     host_dir = tmp_path / "t.com"
@@ -227,8 +227,8 @@ def test_dry_run_uses_inventory_when_present(tmp_path):
 
 
 def test_dry_run_flags_out_of_scope_target(tmp_path):
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
     cfg = Config()
     cfg.scope.allowed_domains = ["other.com"]
     orch = Orchestrator(cfg, tmp_path, profile=get_profile("standard"))
@@ -238,8 +238,8 @@ def test_dry_run_flags_out_of_scope_target(tmp_path):
 
 
 def test_dry_run_refusal_reported_not_raised(tmp_path):
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
     cfg = _strict_cfg(allowed_modules=[])  # business not allowlisted
     cfg.business.enabled = True
     orch = Orchestrator(cfg, tmp_path, profile=get_profile("standard"))
@@ -294,7 +294,7 @@ def test_caps_unset_by_default():
 
 
 def test_budget_usage_roundtrip_with_new_counters():
-    from apex_fuzzer.budgets import BudgetUsage
+    from main.budgets import BudgetUsage
     u = BudgetUsage(total_requests=3, mutating_requests=1, blocked=2)
     rt = BudgetUsage.from_dict(u.to_dict())
     assert (rt.total_requests, rt.mutating_requests, rt.blocked) == \
@@ -305,7 +305,7 @@ def test_budget_usage_roundtrip_with_new_counters():
 
 
 def test_http_client_mutation_gate():
-    from apex_fuzzer.orchestrator import _HTTPClient
+    from main.orchestrator import _HTTPClient
     cfg = Config()
     cfg.safety.max_state_changes = 0
     client = _HTTPClient(budgets=BudgetTracker(cfg))
@@ -329,8 +329,8 @@ def test_http_client_mutation_gate():
 
 # ── stop flag, pacer, signals ─────────────────────────────────────────
 def test_stop_flag_halts_sweep():
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
     import tempfile
     from pathlib import Path
     orch = Orchestrator(Config(), Path(tempfile.mkdtemp()),
@@ -343,14 +343,14 @@ def test_stop_flag_halts_sweep():
 def test_stop_on_candidate_halts_remaining_targets():
     import tempfile
     from pathlib import Path
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
-    from apex_fuzzer.reporting.metrics import Metrics
-    from apex_fuzzer.reporting.coverage import CoverageTracker
-    from apex_fuzzer.validation.evidence import EvidenceStore
-    from apex_fuzzer.validation.differential import DifferentialTester
-    from apex_fuzzer.models import Endpoint, Parameter
-    from apex_fuzzer.config import AuthContext
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
+    from main.reporting.metrics import Metrics
+    from main.reporting.coverage import CoverageTracker
+    from main.validation.evidence import EvidenceStore
+    from main.validation.differential import DifferentialTester
+    from main.models import Endpoint, Parameter
+    from main.config import AuthContext
     import json as _json
 
     class H:
@@ -411,8 +411,8 @@ def test_signal_handler_sets_flag_and_second_forces_exit():
 
 
 def test_cli_safety_flags():
-    from apex_fuzzer.cli import build_parser
-    from apex_fuzzer.config import apply_cli_overrides
+    from main.cli import build_parser
+    from main.config import apply_cli_overrides
     args = build_parser().parse_args(
         ["-d", "x.com", "--strict", "--auth-ref", "R-1",
          "--ack-state-change", "--dry-run", "--max-requests", "50",
@@ -445,8 +445,8 @@ def test_safety_config_yaml_and_defaults(tmp_path):
 
 
 def test_strict_refusal_end_to_end(tmp_path):
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
     cfg = Config()
     cfg.safety.strict = True  # nothing else configured
     cfg.race.enabled = True
@@ -460,8 +460,8 @@ def test_strict_refusal_end_to_end(tmp_path):
 
 
 def test_non_strict_never_refuses(tmp_path):
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
     cfg = Config()
     cfg.race.enabled = True  # would need 4+ gates under strict
     orch = Orchestrator(cfg, tmp_path, profile=get_profile("standard"))
@@ -472,7 +472,7 @@ def test_non_strict_never_refuses(tmp_path):
 
 
 def test_report_safety_block(tmp_path):
-    from apex_fuzzer.reporting.html import render_html
+    from main.reporting.html import render_html
     out = tmp_path / "r.html"
     render_html(out, "t.com", [], [], {},
                 safety_info={"strict": True, "max_impact": "burst",
@@ -486,7 +486,7 @@ def test_report_safety_block(tmp_path):
 
 
 def test_doctor_config_checks(tmp_path, monkeypatch):
-    from apex_fuzzer.cli import doctor_config
+    from main.cli import doctor_config
     monkeypatch.chdir(tmp_path)
     # default config.yaml absent → defaults → clean
     assert doctor_config(Config()) == []
@@ -503,7 +503,7 @@ def test_doctor_config_checks(tmp_path, monkeypatch):
     assert any("strict" in p for p in doctor_config(cfg))
     cfg = Config()
     cfg.auth.login.enabled = True
-    from apex_fuzzer.config import LoginIdentityConfig
+    from main.config import LoginIdentityConfig
     cfg.auth.login.identities = [LoginIdentityConfig(
         name="a", username="u", password_env="PW_MISSING_XYZ")]
     problems = doctor_config(cfg)

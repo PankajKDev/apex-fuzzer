@@ -2,7 +2,7 @@
 import json
 import sqlite3
 
-from apex_fuzzer.reporting.run_store import RunStore, SCHEMA_VERSION
+from main.reporting.run_store import RunStore, SCHEMA_VERSION
 
 
 def test_begin_record_finish_roundtrip(tmp_path):
@@ -47,9 +47,9 @@ def test_empty_denials_and_unknown_target(tmp_path):
 
 
 def test_flush_run_audit_persists_denials(tmp_path):
-    from apex_fuzzer.config import Config
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
+    from main.config import Config
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
     import time
     orch = Orchestrator(Config(), tmp_path,
                         profile=get_profile("standard"))
@@ -64,7 +64,7 @@ def test_flush_run_audit_persists_denials(tmp_path):
 
 
 def test_endpoint_inventory_roundtrip(tmp_path):
-    from apex_fuzzer.models import Endpoint, Parameter
+    from main.models import Endpoint, Parameter
     eps = [Endpoint(url="https://example.com/api/u/1?x=1",
                     normalized_url="https://example.com/api/u/1?x=1",
                     host="example.com", path="/api/u/1", method="GET",
@@ -91,10 +91,10 @@ def test_endpoint_inventory_roundtrip(tmp_path):
 
 
 def test_flush_persists_stashed_inventory(tmp_path):
-    from apex_fuzzer.config import Config
-    from apex_fuzzer.models import Endpoint
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
+    from main.config import Config
+    from main.models import Endpoint
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
     import time
     orch = Orchestrator(Config(), tmp_path,
                         profile=get_profile("standard"))
@@ -113,9 +113,9 @@ def test_flush_persists_stashed_inventory(tmp_path):
 
 
 def test_flush_run_audit_never_fails_scan(tmp_path):
-    from apex_fuzzer.config import Config
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
+    from main.config import Config
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
     import time
     orch = Orchestrator(Config(), tmp_path,
                         profile=get_profile("standard"))
@@ -139,7 +139,7 @@ def _row(url, method="GET", etype="api", query="[]", body="[]",
 
 
 def test_endpoint_fingerprint_ignores_sources():
-    from apex_fuzzer.reporting.run_store import endpoint_fingerprint
+    from main.reporting.run_store import endpoint_fingerprint
     a = _row("https://e.com/a")
     b = dict(a, sources='["har"]')
     assert endpoint_fingerprint(a) == endpoint_fingerprint(b)
@@ -148,7 +148,7 @@ def test_endpoint_fingerprint_ignores_sources():
 
 
 def test_diff_new_changed_gone():
-    from apex_fuzzer.reporting.run_store import diff_endpoint_runs
+    from main.reporting.run_store import diff_endpoint_runs
     old = [_row("https://e.com/a"),
            _row("https://e.com/b", query='["id"]'),
            _row("https://e.com/gone")]
@@ -166,7 +166,7 @@ def test_diff_new_changed_gone():
 
 
 def test_diff_empty_old_is_baseline():
-    from apex_fuzzer.reporting.run_store import diff_endpoint_runs
+    from main.reporting.run_store import diff_endpoint_runs
     diff = diff_endpoint_runs([], [_row("https://e.com/a")])
     assert diff["baseline"] is True
     assert diff["new"] == [] and diff["gone"] == [] \
@@ -174,10 +174,10 @@ def test_diff_empty_old_is_baseline():
 
 
 def test_flush_writes_changes_against_previous_run(tmp_path):
-    from apex_fuzzer.config import Config
-    from apex_fuzzer.models import Endpoint
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
+    from main.config import Config
+    from main.models import Endpoint
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
     import time
     orch = Orchestrator(Config(), tmp_path,
                         profile=get_profile("standard"))
@@ -200,7 +200,7 @@ def test_flush_writes_changes_against_previous_run(tmp_path):
 
 
 def test_changes_block_renders_and_skips_baseline(tmp_path):
-    from apex_fuzzer.reporting.html import _changes_block, render_html
+    from main.reporting.html import _changes_block, render_html
     assert _changes_block(None) == ""
     assert _changes_block({"baseline": True, "new": []}) == ""
     diff = {"baseline": False, "against_run": 1,

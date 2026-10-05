@@ -3,14 +3,14 @@ import json
 from pathlib import Path
 from urllib.parse import urlparse
 
-from apex_fuzzer.config import Config
-from apex_fuzzer.discovery.url_normalizer import normalize_url
-from apex_fuzzer.models import Endpoint, Identity
-from apex_fuzzer.reporting.coverage import CoverageTracker
-from apex_fuzzer.reporting.metrics import Metrics
-from apex_fuzzer.scope import Scope
-from apex_fuzzer.validation.cors import probe_cors
-from apex_fuzzer.validation.evidence import EvidenceStore
+from main.config import Config
+from main.discovery.url_normalizer import normalize_url
+from main.models import Endpoint, Identity
+from main.reporting.coverage import CoverageTracker
+from main.reporting.metrics import Metrics
+from main.scope import Scope
+from main.validation.cors import probe_cors
+from main.validation.evidence import EvidenceStore
 
 
 class Response:

@@ -7,8 +7,8 @@ import textwrap
 
 import pytest
 
-from apex_fuzzer.config import Config, apply_cli_overrides
-from apex_fuzzer.cli import build_parser, doctor_config
+from main.config import Config, apply_cli_overrides
+from main.cli import build_parser, doctor_config
 
 
 def _write(tmp_path, text):
@@ -172,8 +172,8 @@ def test_profile_names_rejected_by_cli():
 
 
 def test_scope_enforcement_and_exclusions():
-    from apex_fuzzer.config import ScopeConfig
-    from apex_fuzzer.scope import Scope
+    from main.config import ScopeConfig
+    from main.scope import Scope
     scope = Scope(ScopeConfig(
         allowed_domains=["example.test"], allow_subdomains=True,
         excluded_hosts=["internal.example.test"],
@@ -186,8 +186,8 @@ def test_scope_enforcement_and_exclusions():
 
 
 def test_active_test_exclusions_independent_from_crawl():
-    from apex_fuzzer.config import ScopeConfig
-    from apex_fuzzer.scope import Scope
+    from main.config import ScopeConfig
+    from main.scope import Scope
     scope = Scope(ScopeConfig(
         allowed_domains=["example.test"],
         crawl_exclude_exts=["png"],
@@ -220,7 +220,7 @@ def test_missing_credentials_flagged_only_when_enabled(tmp_path):
     assert any("GROQ_API_KEY" in p for p in doctor_config(cfg))
     cfg2 = Config()
     cfg2.auth.login.enabled = True
-    from apex_fuzzer.config import LoginIdentityConfig
+    from main.config import LoginIdentityConfig
     cfg2.auth.login.identities = [
         LoginIdentityConfig(name="u", password_env="NOPE_UNSET_VAR")]
     assert any("resolvable passwords" in p
@@ -228,14 +228,14 @@ def test_missing_credentials_flagged_only_when_enabled(tmp_path):
 
 
 def test_missing_oast_prerequisites_noted():
-    from apex_fuzzer.validation.oast import InteractshProvider
+    from main.validation.oast import InteractshProvider
     provider = InteractshProvider(server="oast.pro")
     assert not provider.available()
     provider.close()
 
 
 def test_missing_browser_prerequisites_skip_cleanly():
-    from apex_fuzzer.browser.browser import playwright_available
+    from main.browser.browser import playwright_available
     assert isinstance(playwright_available(), bool)
 
 
@@ -246,8 +246,8 @@ def test_invalid_ai_provider_rejected(tmp_path):
 
 
 def test_doctor_tool_states_no_version(monkeypatch):
-    import apex_fuzzer.cli as cli_mod
-    from apex_fuzzer.shell import run as _real_run
+    import main.cli as cli_mod
+    from main.shell import run as _real_run
 
     def fake_run(args, timeout=10):
         from types import SimpleNamespace
@@ -268,7 +268,7 @@ def test_doctor_tool_states_no_version(monkeypatch):
 
 
 def test_doctor_unusable_tool_reported(monkeypatch):
-    import apex_fuzzer.cli as cli_mod
+    import main.cli as cli_mod
     from types import SimpleNamespace
     monkeypatch.setattr(cli_mod, "which", lambda name: f"/bin/{name}")
     monkeypatch.setattr(
@@ -280,8 +280,8 @@ def test_doctor_unusable_tool_reported(monkeypatch):
 
 def test_dry_run_sends_zero_requests(tmp_path, monkeypatch):
     import requests
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
 
     def _boom(*args, **kwargs):
         raise AssertionError("dry-run must not touch the network")
@@ -295,14 +295,14 @@ def test_dry_run_sends_zero_requests(tmp_path, monkeypatch):
     plan = orch.dry_run("https://staging.example.com")
     assert plan["target_in_scope"] is True
     assert plan["excluded_hosts"] == []
-    from apex_fuzzer.safety.preflight import render_plan_text
+    from main.safety.preflight import render_plan_text
     text = render_plan_text(plan)
     assert "state-changing" in text
     assert "reservation" in text
 
 
 def test_secret_redaction_by_default():
-    from apex_fuzzer.shell import redact
+    from main.shell import redact
     assert "session=AAA" not in redact(
         "Cookie: session=AAA subscribed")
     assert Config().reporting.redact_secrets is True
@@ -324,8 +324,8 @@ def test_everything_disabled_loads_clean(tmp_path):
     cfg = Config.load(path)
     result = cfg.validate()
     assert result["errors"] == []
-    from apex_fuzzer.safety.preflight import resolve_modules
-    from apex_fuzzer.profiles import get as get_profile
+    from main.safety.preflight import resolve_modules
+    from main.profiles import get as get_profile
     states = resolve_modules(cfg, get_profile("passive"))
     assert [s.name for s in states if s.enabled] == [
         "recon", "discovery", "mapping", "probe"]
@@ -341,7 +341,7 @@ def test_everything_enabled_reports_state_changing():
     cfg.validation.second_order = True
     cfg.validation.sqli_time_based = True
     assert cfg.validate()["errors"] == []
-    report = __import__("apex_fuzzer.cli", fromlist=[
+    report = __import__("main.cli", fromlist=[
         "config_check_report"]).config_check_report(cfg, "validation")
     assert "business_logic" in report
     assert "race" in report
@@ -351,7 +351,7 @@ def test_everything_enabled_reports_state_changing():
 
 def test_config_check_is_zero_network(tmp_path, monkeypatch):
     import requests
-    from apex_fuzzer.cli import config_check_report
+    from main.cli import config_check_report
 
     def _boom(*args, **kwargs):
         raise AssertionError("config-check must not touch the network")
@@ -372,7 +372,7 @@ def test_bad_config_surfaces_in_doctor(tmp_path):
 
 
 def test_hacker_header_flows_to_http_client():
-    from apex_fuzzer.orchestrator import _HTTPClient
+    from main.orchestrator import _HTTPClient
     client = _HTTPClient(extra_headers={"X-HackerOne": "researcher-42"})
     assert client.session.headers.get("X-HackerOne") == "researcher-42"
     assert "ApexFuzzer" in client.session.headers.get("User-Agent", "")
@@ -395,8 +395,8 @@ def test_hacker_header_rejects_injection_and_nonstrings(tmp_path):
 
 
 def test_seed_urls_cli_override_and_merge(tmp_path):
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
 
     seed = tmp_path / "seeds.txt"
     seed.write_text("https://example.test/panel/api/orders?order_id=1\n"
@@ -427,8 +427,8 @@ def test_seed_urls_config_file_and_scope_filter(tmp_path):
 
 
 def test_har_files_cli_config_and_missing_warns(tmp_path):
-    from apex_fuzzer.cli import build_parser
-    from apex_fuzzer.config import apply_cli_overrides
+    from main.cli import build_parser
+    from main.config import apply_cli_overrides
     har = tmp_path / "capture.har"
     har.write_text('{"log": {"entries": []}}')
     args = build_parser().parse_args(
@@ -445,8 +445,8 @@ def test_har_files_cli_config_and_missing_warns(tmp_path):
 
 
 def test_authenticated_recon_identity_headers(tmp_path):
-    from apex_fuzzer.orchestrator import Orchestrator, _header_arg
-    from apex_fuzzer.profiles import get as get_profile
+    from main.orchestrator import Orchestrator, _header_arg
+    from main.profiles import get as get_profile
 
     orch = Orchestrator(Config(), tmp_path,
                         profile=get_profile("standard"))
@@ -456,7 +456,7 @@ def test_authenticated_recon_identity_headers(tmp_path):
     cfg = Config()
     cfg.discovery.authenticated_recon = True
     cfg.auth.contexts = []
-    from apex_fuzzer.config import AuthContext
+    from main.config import AuthContext
     cfg.auth.contexts = [
         AuthContext(name="anonymous", headers={}),
         AuthContext(name="u", headers={"Cookie": "s=1",
@@ -466,10 +466,10 @@ def test_authenticated_recon_identity_headers(tmp_path):
 
 
 def test_authenticated_recon_crawler_args(tmp_path, monkeypatch):
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
-    from apex_fuzzer.config import AuthContext
-    import apex_fuzzer.orchestrator as orch_mod
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
+    from main.config import AuthContext
+    import main.orchestrator as orch_mod
 
     cfg = Config()
     cfg.discovery.authenticated_recon = True
@@ -503,10 +503,10 @@ def test_authenticated_recon_crawler_args(tmp_path, monkeypatch):
 
 
 def test_recon_stays_anonymous_by_default(tmp_path, monkeypatch):
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
-    from apex_fuzzer.config import AuthContext
-    import apex_fuzzer.orchestrator as orch_mod
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
+    from main.config import AuthContext
+    import main.orchestrator as orch_mod
 
     cfg = Config()
     cfg.auth.contexts = [AuthContext(name="u", headers={"Cookie": "s=1"})]
@@ -527,7 +527,7 @@ def test_recon_stays_anonymous_by_default(tmp_path, monkeypatch):
 
 def test_fail_on_flag_and_threshold(tmp_path):
     import json
-    from apex_fuzzer.cli import build_parser, fail_on_triggered
+    from main.cli import build_parser, fail_on_triggered
     args = build_parser().parse_args(["-d", "example.test",
                                       "--fail-on", "high"])
     assert args.fail_on == "high"

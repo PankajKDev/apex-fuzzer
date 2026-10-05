@@ -5,11 +5,11 @@ Fake objects only. No network.
 import json
 from types import SimpleNamespace
 
-from apex_fuzzer.config import Config
-from apex_fuzzer.leads import MAX_LEADS, collect_leads, write_leads
-from apex_fuzzer.orchestrator import katana_rl, takeover_notes_from_file
-from apex_fuzzer.profiles import get as get_profile
-from apex_fuzzer.safety.preflight import resolve_modules
+from main.config import Config
+from main.leads import MAX_LEADS, collect_leads, write_leads
+from main.orchestrator import katana_rl, takeover_notes_from_file
+from main.profiles import get as get_profile
+from main.safety.preflight import resolve_modules
 
 
 def _ep(url, endpoint_type="unknown", params=(), forms=()):
@@ -140,7 +140,7 @@ def test_write_leads_roundtrip(tmp_path):
 
 
 def test_report_renders_leads_section(tmp_path):
-    from apex_fuzzer.reporting.html import render_html
+    from main.reporting.html import render_html
     endpoints = [_ep("https://example.test/admin", "admin")]
     leads = collect_leads(endpoints, [], [])
     out = tmp_path / "report.html"
@@ -179,9 +179,9 @@ def test_robots_harvest_reaches_endpoint_pool(tmp_path):
     had already run, so its URLs never became endpoints (live run on a
     login-walled target kept 1 endpoint while robots named 19 paths).
     """
-    from apex_fuzzer.config import Config
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
+    from main.config import Config
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
     (tmp_path / "raw.txt").write_text("http://example.test/\n")
     (tmp_path / "robots.txt.out").write_text(
         "https://example.test/panel/\nhttps://example.test/inv/\n")

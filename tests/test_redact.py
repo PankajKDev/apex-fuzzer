@@ -1,4 +1,4 @@
-from apex_fuzzer.shell import redact
+from main.shell import redact
 
 
 def test_masks_authorization():

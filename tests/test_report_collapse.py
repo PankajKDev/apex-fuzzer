@@ -1,6 +1,6 @@
 """Tests: report-level collapse of combinatorial findings."""
-from apex_fuzzer.models import Finding
-from apex_fuzzer.reporting.html import _collapse_key, _section
+from main.models import Finding
+from main.reporting.html import _collapse_key, _section
 
 
 def _swap(i, tester, victim, param="id"):
@@ -42,7 +42,7 @@ def test_singleton_renders_unchanged():
 
 
 def test_render_html_with_swap_volume(tmp_path):
-    from apex_fuzzer.reporting.html import render_html
+    from main.reporting.html import render_html
     findings = [_swap(i, f"user_{i % 3}", f"victim-{i}")
                 for i in range(6)]
     out = tmp_path / "report.html"

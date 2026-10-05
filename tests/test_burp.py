@@ -6,7 +6,7 @@ import base64
 import xml.etree.ElementTree as ET
 from types import SimpleNamespace
 
-from apex_fuzzer.reporting.burp import (
+from main.reporting.burp import (
     BURP_STEPS, build_raw_request, export_burp, lead_checklist,
     sitemap_xml)
 
@@ -114,7 +114,7 @@ def test_export_writes_burp_dir(tmp_path):
 
 
 def test_report_renders_burp_block(tmp_path):
-    from apex_fuzzer.reporting.html import render_html
+    from main.reporting.html import render_html
     out = tmp_path / "report.html"
     render_html(out, "example.test", [], [], {},
                 burp={"requests": 3, "urls": 3,

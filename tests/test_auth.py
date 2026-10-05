@@ -11,20 +11,20 @@ import time
 
 import pytest
 
-from apex_fuzzer.auth.identities import (
+from main.auth.identities import (
     Permission, IdentityRegistry, build_registry)
-from apex_fuzzer.auth.sessions import (
+from main.auth.sessions import (
     AuthSession, SessionStore, from_browser_session)
-from apex_fuzzer.auth.jwt import parse_jwt, find_jwts
-from apex_fuzzer.auth.oauth import (
+from main.auth.jwt import parse_jwt, find_jwts
+from main.auth.oauth import (
     pkce_pair, new_pkce_flow, find_token_leaks)
-from apex_fuzzer.auth.oidc import (
+from main.auth.oidc import (
     check_issuer, NonceTracker, parse_id_token, fetch_discovery)
-from apex_fuzzer.auth.workflows import (
+from main.auth.workflows import (
     LoginIdentity, MfaCheckpoint, LoginManager, looks_like_mfa)
-from apex_fuzzer.browser.browser import chromium_available
-from apex_fuzzer.config import AuthContext, Config
-from apex_fuzzer.models import Identity
+from main.browser.browser import chromium_available
+from main.config import AuthContext, Config
+from main.models import Identity
 
 needs_browser = pytest.mark.skipif(
     not chromium_available(), reason="no launchable chromium")
@@ -47,7 +47,7 @@ def test_permission_round_trip():
 def test_registry_relationships():
     reg = IdentityRegistry()
     reg.add_role(__import__(
-        "apex_fuzzer.models", fromlist=["Role"]).Role(
+        "main.models", fromlist=["Role"]).Role(
             name="admin", permissions=["users:read", "users:write"]))
     reg.add_identity(Identity(name="a", roles=["admin"], tenant="t1"))
     reg.add_identity(Identity(name="b", roles=[], tenant="t1"))
@@ -298,7 +298,7 @@ def test_looks_like_mfa():
 
 
 def test_build_workflow_masks_password():
-    from apex_fuzzer.config import LoginConfig
+    from main.config import LoginConfig
     cfg = LoginConfig(enabled=True, url="https://t.com/login")
     mgr = LoginManager(cfg)
     wf = mgr.build_workflow(LoginIdentity(name="a", username="u"),
@@ -379,7 +379,7 @@ class _LoginCtx:
 
 
 def _login_cfg(**kw):
-    from apex_fuzzer.config import LoginConfig
+    from main.config import LoginConfig
     base = dict(enabled=True, url="https://t.com/login")
     base.update(kw)
     return LoginConfig(**base)
@@ -469,9 +469,9 @@ def test_login_config_defaults():
 
 
 def test_login_skipped_paths(tmp_path, monkeypatch):
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
-    from apex_fuzzer.reporting.metrics import Metrics
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
+    from main.reporting.metrics import Metrics
     import tempfile
     from pathlib import Path
     out = Path(tempfile.mkdtemp())
@@ -495,9 +495,9 @@ def test_login_skipped_paths(tmp_path, monkeypatch):
     cfg2.scope.allowed_domains = ["t.com"]
     orch3 = Orchestrator(cfg2, out, profile=get_profile("standard"))
     monkeypatch.setattr(
-        "apex_fuzzer.browser.browser.playwright_available",
+        "main.browser.browser.playwright_available",
         lambda: False)
-    import apex_fuzzer.browser.browser as bmod
+    import main.browser.browser as bmod
     monkeypatch.setattr(bmod, "playwright_available", lambda: False)
     orch3._login_identities(out, m)
     assert m.logins_attempted == 0
@@ -576,9 +576,9 @@ def auth_site():
 @needs_browser
 def test_browser_login_mints_reusable_session(auth_site, tmp_path,
                                               monkeypatch):
-    from apex_fuzzer.browser.browser import BrowserEngine
-    from apex_fuzzer.auth.workflows import LoginManager
-    from apex_fuzzer.config import LoginConfig
+    from main.browser.browser import BrowserEngine
+    from main.auth.workflows import LoginManager
+    from main.config import LoginConfig
     monkeypatch.setenv("PW_ALICE", "wonder")
     cfg = LoginConfig(enabled=True, url=auth_site + "/login",
                       success_url_contains="/dash")
@@ -608,9 +608,9 @@ def test_browser_login_mints_reusable_session(auth_site, tmp_path,
 @needs_browser
 def test_orchestrator_login_enriches_context(auth_site, tmp_path,
                                              monkeypatch):
-    from apex_fuzzer.orchestrator import Orchestrator
-    from apex_fuzzer.profiles import get as get_profile
-    from apex_fuzzer.reporting.metrics import Metrics
+    from main.orchestrator import Orchestrator
+    from main.profiles import get as get_profile
+    from main.reporting.metrics import Metrics
     from urllib.parse import urlparse
     host = urlparse(auth_site).hostname
     monkeypatch.setenv("PW_ALICE", "wonder")
@@ -620,7 +620,7 @@ def test_orchestrator_login_enriches_context(auth_site, tmp_path,
     cfg.auth.login.enabled = True
     cfg.auth.login.url = auth_site + "/login"
     cfg.auth.login.success_url_contains = "/dash"
-    from apex_fuzzer.config import LoginIdentityConfig
+    from main.config import LoginIdentityConfig
     cfg.auth.login.identities = [LoginIdentityConfig(
         name="alice", username="alice", password_env="PW_ALICE")]
     orch = Orchestrator(cfg, tmp_path, profile=get_profile("deep"))
