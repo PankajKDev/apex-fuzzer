@@ -93,6 +93,38 @@ def _header_arg(headers: dict) -> str:
     return ";;".join(f"{name}: {value}" for name, value in
                      (headers or {}).items())
 
+
+def katana_rl(profile_name: str, rate_limit: int) -> int:
+    """Katana request rate: leads mode stays at a quiet floor."""
+    if profile_name == "leads":
+        return 5
+    return 30 if rate_limit >= 100 else 10
+
+
+def takeover_notes_from_file(path) -> List[str]:
+    """Vulnerable-host lines from subzy stdout.
+
+    Subzy prints banner/config lines even with zero hits; only lines
+    naming a vulnerable host become leads. Pure file read, no network.
+    """
+    import re as _re
+    notes: List[str] = []
+    try:
+        text = Path(path).read_text(errors="ignore")
+    except OSError:
+        return []
+    for line in text.splitlines():
+        clean = _re.sub(r"\x1b\[[0-9;]*m", "", line).strip()
+        # subzy prints banner/config lines even with zero hits; only
+        # lines naming a vulnerable host become leads. Flag
+        # descriptions (e.g. --hide_fails) mention "vulnerable" too,
+        # so lines documenting a CLI flag are excluded.
+        if clean and "vuln" in clean.lower() and "(--" not in clean:
+            notes.append(clean)
+        if len(notes) >= 20:
+            break
+    return notes
+
 # Endpoint types that give OAST sink candidates extra priority.
 _OAST_PRIORITY_TYPES = ("proxy", "webhook", "callback", "import",
                         "export", "download", "api")
@@ -366,6 +398,18 @@ class Orchestrator:
         else:
             ck.mark("ai", "skipped")
 
+        # ── 9b. LEAD COLLECTION (offline, always runs) ──────────────
+        # Pure ranking over collected artifacts: zero network. Leads
+        # mode exists for this output; every other profile gets it as
+        # a free work list alongside findings.
+        from .leads import collect_leads, write_leads
+        takeover_notes = takeover_notes_from_file(out_dir / "takeover.txt")
+        tech_dicts = read_jsonl(out_dir / "technologies.jsonl")
+        leads = collect_leads(endpoints, tech_dicts, takeover_notes)
+        write_leads(out_dir / "leads.jsonl", leads)
+        metrics.leads_total = len(leads)
+        log.info("leads: %d ranked follow-ups -> leads.jsonl", len(leads))
+
         # ── 10. REPORT ──────────────────────────────────────────────────
         ck.mark("report", "running")
         metrics.scan_duration_seconds = time.time() - started
@@ -384,7 +428,8 @@ class Orchestrator:
                     min_severity=self.cfg.reporting.min_severity,
                     output_dir=out_dir,
                     coverage=coverage.to_dict(),
-                    safety_info=getattr(self, "_safety_info", None))
+                    safety_info=getattr(self, "_safety_info", None),
+                    leads=leads)
         ck.mark("report")
         log.info("done: %s (%.1fs)", host, metrics.scan_duration_seconds)
 
@@ -492,6 +537,13 @@ class Orchestrator:
         host = target.replace("http://", "").replace(
             "https://", "").split("/")[0]
         jobs = []
+        # Leads mode crawls shallow and slow: discovery without alarming
+        # edge defenses. All other profiles keep the standard depth.
+        quiet = self.profile.name == "leads"
+        crawl_depth = "1" if quiet else "3"
+        if quiet:
+            log.info("recon: leads mode - quiet crawl (depth 1, "
+                     "katana -rl 5), no active probes will follow")
         if _is_public_archive_target(target):
             ps = Path.home() / "ParamSpider" / "paramspider.py"
             if ps.exists():
@@ -509,22 +561,23 @@ class Orchestrator:
             log.info("recon: skipping public archive lookups for local or "
                      "non-public target %s", host)
         if which("hakrawler"):
-            jobs.append((["hakrawler", "-d", "3", "-subs", "-u"],
+            jobs.append((["hakrawler", "-d", crawl_depth, "-subs", "-u"],
                          "hakrawler", url + "\n", out_dir / "hakrawler.txt"))
         if which("katana"):
-            rl = 30 if self.cfg.scan.rate_limit >= 100 else 10
-            jobs.append((["katana", "-d", "3", "-silent", "-rl", str(rl)],
+            rl = katana_rl(self.profile.name, self.cfg.scan.rate_limit)
+            jobs.append((["katana", "-d", crawl_depth, "-silent",
+                          "-rl", str(rl)],
                          "katana", url + "\n", out_dir / "katana.txt"))
         auth_headers = self._recon_identity_headers()
         if auth_headers:
             if which("hakrawler"):
-                jobs.append((["hakrawler", "-d", "3", "-subs", "-u",
+                jobs.append((["hakrawler", "-d", crawl_depth, "-subs", "-u",
                               "-h", _header_arg(auth_headers)],
                              "hakrawler-authed", url + "\n",
                              out_dir / "hakrawler-authed.txt"))
             if which("katana"):
-                katana_args = ["katana", "-d", "3", "-silent", "-rl",
-                               str(rl)]
+                katana_args = ["katana", "-d", crawl_depth, "-silent",
+                               "-rl", str(rl)]
                 for name, value in auth_headers.items():
                     katana_args.extend(["-H", f"{name}:{value}"])
                 jobs.append((katana_args, "katana-authed", url + "\n",

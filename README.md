@@ -217,7 +217,7 @@ in [sample artifacts](docs/sample-artifacts/).
                         minimum severity rendered in the report
 --resume                skip checkpoint-complete stages
 --output OUTPUT         base output dir (default: output)
---profile {passive,standard,deep,api,authenticated,validation}
+--profile {passive,standard,deep,api,authenticated,validation,leads}
 --doctor                check tool availability, exit 0/1
 --config-check          validate configuration and report the effective
                         plan without sending any request
@@ -237,6 +237,17 @@ in [sample artifacts](docs/sample-artifacts/).
 | `api`           | ✓      | –          | –  | ✓  | ✓         | –      | ✓            | ✓     | ✓    | ✓ (subzy)| ✓            | –         |
 | `authenticated` | ✓      | –          | –  | ✓  | ✓         | ✓      | ✓            | ✓     | ✓    | ✓ (subzy)| ✓            | –         |
 | `validation`    | ✓      | ✓          | –  | ✓  | ✓         | ✓      | –            | ✓     | ✓    | ✓ (subzy)| –            | ✓         |
+| `leads`         | –      | –          | –  | ✓  | ✓         | ✓      | –            | –     | –    | ✓ (subzy)| –            | –         |
+
+The `leads` profile is the quiet lead-finder mode: read-only discovery
+that never sends an active payload. Crawlers run shallow and slow
+(katana/hakrawler depth 1, katana `-rl 5`); Nuclei, validation,
+parameter mining, OAST, takeover claims, and the browser stay off.
+Subzy runs fingerprint-only (DNS/HTTP reads, no claims). Output is
+`leads.jsonl` — ranked discovered-but-untested surface where each lead
+names its follow-up run — plus a 🧭 Leads section in `report.html`.
+Every other profile also writes `leads.jsonl` as a free work list
+alongside findings. A lead is not a vulnerability verdict.
 
 Combine profiles with flags: `--validate`, `--ai`, `--oast`, `--differential`,
 `--second-order` and `--second-order-ssrf` force-enable their stages

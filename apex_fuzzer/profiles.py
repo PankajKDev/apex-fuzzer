@@ -38,6 +38,17 @@ PROFILES = {
         run_ai=False, differential=False, param_mining=False,
         oast=False, run_subzy=False,
     ),
+    # Lead finder: read-only discovery that never sends an active
+    # payload. Crawlers run shallow and slow; every probe stage stays
+    # off. Output is leads.jsonl (ranked follow-ups), not findings.
+    # Traffic: archive lookups (third-party), robots/sitemap, spec
+    # probes, JS/tech fetches, httpx status checks, subzy DNS/HTTP
+    # fingerprint reads. No nuclei, validation, mining, or claims.
+    "leads": Profile(
+        name="leads", run_nuclei=False, run_validation=False,
+        run_ai=False, differential=False, param_mining=False,
+        oast=False, run_subzy=True,
+    ),
     "standard": Profile(name="standard"),
     "deep": Profile(
         name="deep", differential=True, js_analysis=True,

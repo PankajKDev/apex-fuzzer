@@ -91,7 +91,7 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--profile", default="standard",
                    choices=["passive", "standard", "deep",
                             "api", "authenticated",
-                            "validation"],
+                            "validation", "leads"],
                    help="Testing profile")
     p.add_argument("--doctor", action="store_true")
     p.add_argument("--config-check", action="store_true",

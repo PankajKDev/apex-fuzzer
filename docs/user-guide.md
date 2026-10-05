@@ -55,6 +55,9 @@ cp .env.example .env   # then fill in
 > fictional shop at `acme.com` step by step, using every feature once.
 
 ```bash
+# lead finder: quiet read-only discovery, ranked follow-ups, no payloads
+apex-fuzzer -d example.com --profile leads --output output
+
 # passive discovery only: no DAST, no validation payloads
 apex-fuzzer -d example.com -c config.yaml --output output
 
@@ -66,7 +69,8 @@ apex-fuzzer -d example.com --profile validation --validate --output output
 ```
 
 Results land in `output/<host>/`: `report.html` (start here),
-`findings.jsonl`, `endpoints.jsonl`, `coverage.json`, `metrics.json`,
+`findings.jsonl`, `endpoints.jsonl`, `leads.jsonl` (ranked follow-ups,
+always written), `coverage.json`, `metrics.json`,
 `proofs/` (per-finding evidence). Re-run with `--resume` to skip
 finished stages after an interruption.
 
@@ -85,6 +89,14 @@ finished stages after an interruption.
 | `api` | ✓ | – | ✓ | ✓ | ✓ | – | – |
 | `authenticated` | ✓ | – | ✓ | ✓ | ✓ | – | – |
 | `validation` | ✓ | ✓ | ✓ | – | – | ✓ | – |
+| `leads` | – | – | – | – | – | – | – |
+
+The `leads` profile is the quiet mode: crawlers run shallow and slow
+(depth 1, katana `-rl 5`), everything active stays off, and the output
+is `leads.jsonl` — discovered-but-untested surface where each lead
+names its follow-up. It sends no payloads: archive lookups hit third
+parties, and the target sees only robots/sitemap reads, spec probes,
+JS/tech fetches, httpx status checks, and subzy fingerprint reads.
 
 Flags force-enable stages regardless of profile: `--validate`,
 `--differential`, `--oast`, `--second-order`, `--business-logic`,

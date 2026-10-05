@@ -59,6 +59,8 @@ class Metrics:
     invariants_violated: int = 0
     # Final persisted finding counts in the canonical M2.3 taxonomy.
     result_status_counts: Dict[str, int] = field(default_factory=dict)
+    # Lead-finder mode output (offline ranking, always collected).
+    leads_total: int = 0
 
     def to_dict(self) -> Dict[str, Any]:
         return asdict(self)

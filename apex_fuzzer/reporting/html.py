@@ -20,7 +20,8 @@ def render_html(output: Path, target: str, findings: List[Finding],
                 min_severity: str = "info",
                 output_dir: Optional[Path] = None,
                 coverage: Optional[Dict] = None,
-                safety_info: Optional[Dict] = None) -> None:
+                safety_info: Optional[Dict] = None,
+                leads: Optional[List[Dict]] = None) -> None:
     min_rank = MIN_RANK.get(min_severity, 0)
     findings = [f for f in findings
                 if MIN_RANK.get(f.severity, 4) >= min_rank]
@@ -46,6 +47,7 @@ def render_html(output: Path, target: str, findings: List[Finding],
         _section("🟧 Candidates", candidates, output_dir),
         _section("🟦 Observations & Inconclusive", informational,
                  output_dir),
+        _leads_block(leads),
         _hypotheses_block(hypotheses),
         "</body></html>"]
     output.write_text("".join(parts))
@@ -178,6 +180,26 @@ def _safety_block(safety_info: Optional[Dict]) -> str:
             _h.escape("; ".join(safety_info["refusal"])) + "</em></p>"
     return (f"<h2>🛡 Authorization &amp; Safety</h2>"
             f"<table>{rows}</table>{refused}")
+
+
+def _leads_block(leads: Optional[List[Dict]]) -> str:
+    """Ranked follow-ups, not verdicts: what to test next and how."""
+    if not leads:
+        return ""
+    rows = "".join(
+        f"<tr><td class='sev'>{_h.escape(lead.get('priority', ''))}</td>"
+        f"<td><code>{_h.escape(lead.get('kind', ''))}</code><br>"
+        f"{_h.escape(lead.get('reason', ''))}</td>"
+        f"<td><code>{_h.escape(lead.get('url', '') or '—')}</code>"
+        f"{('<br>param: <code>' + _h.escape(lead['param']) + '</code>') if lead.get('param') else ''}</td>"
+        f"<td>{_h.escape(lead.get('suggested_followup', ''))}</td></tr>"
+        for lead in leads)
+    return (f"<h2>🧭 Leads ({len(leads)})</h2>"
+            f"<p><em>Discovered-but-untested surface. A lead is not a "
+            f"vulnerability — it names the follow-up run that would test "
+            f"it.</em></p>"
+            f"<table><tr><th>Priority</th><th>Lead</th>"
+            f"<th>Where</th><th>Suggested follow-up</th></tr>{rows}</table>")
 
 
 def _evidence_links(f: Finding, output_dir: Optional[Path]) -> str:
