@@ -130,9 +130,12 @@ def test_orchestrator_error_result_is_not_negative(tmp_path):
                   host="example.com", path="/api/u/1",
                   method="GET", endpoint_type="api")
     coverage = CoverageTracker()
-    findings = orch._differential_probe(
+    from main.stages.validation import ProbeControls
+    from main.stages.validation.differential import differential_probe
+    findings = differential_probe(
         [ep], StubDiff(), EvidenceStore(tmp_path), Metrics(),
-        BudgetTracker(cfg), coverage)
+        BudgetTracker(cfg), coverage, orch.cfg, orch.scope,
+        ProbeControls.from_orchestrator(orch))
     assert findings == []
     flat = json.dumps(coverage.to_dict())
     assert "tested_negative" not in flat

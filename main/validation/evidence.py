@@ -4,6 +4,14 @@ from pathlib import Path
 from datetime import datetime
 from ..shell import redact
 from ..models import Finding
+from typing import Dict
+
+
+def interaction_line(i: Dict) -> str:
+    """One-line evidence summary for an OAST interaction record."""
+    proto = i.get("proto") or i.get("type", "?")
+    return f"[{proto}] " + " ".join(str(v)[:120] for v in i.values()
+                                    if isinstance(v, str))[:240]
 
 
 class EvidenceStore:

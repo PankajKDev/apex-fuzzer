@@ -380,9 +380,12 @@ def test_stop_on_candidate_halts_remaining_targets():
                                             source=["url"]))
         eps.append(e)
     m = Metrics()
-    found = orch._differential_probe(
+    from main.stages.validation import ProbeControls
+    from main.stages.validation.differential import differential_probe
+    found = differential_probe(
         eps, DifferentialTester(cfg, H()), EvidenceStore(out / "proofs"),
-        m, BudgetTracker(cfg), CoverageTracker())
+        m, BudgetTracker(cfg), CoverageTracker(), orch.cfg, orch.scope,
+        ProbeControls.from_orchestrator(orch))
     # first endpoint yields BOLA (identical bodies) → flag set → rest
     # of the sweep halts; only one endpoint's probes ran
     assert m.differential_probes == 1

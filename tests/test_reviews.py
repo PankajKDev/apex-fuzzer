@@ -111,9 +111,12 @@ def test_prescreen_skips_fp_triples(tmp_path):
                   query_parameters=[
                       Parameter(name="id", location="query")])
     coverage = CoverageTracker()
-    out = orch._prescreen_sweep(
+    from main.stages.validation import ProbeControls
+    from main.stages.validation.prescreen import prescreen_sweep
+    out = prescreen_sweep(
         [ep], [], EvidenceStore(tmp_path), Metrics(),
-        BudgetTracker(cfg), coverage, object(), idx)
+        BudgetTracker(cfg), coverage, object(), cfg, orch.scope,
+        ProbeControls.from_orchestrator(orch), None, idx)
     assert out == []
     flat = json.dumps(coverage.to_dict())
     assert "operator-marked false positive" in flat

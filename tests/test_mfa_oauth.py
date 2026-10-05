@@ -215,10 +215,13 @@ def test_oauth_active_probe_skips_out_of_scope(tmp_path):
                   method="GET", host="other.test", path="/authorize")
     tester = SimpleNamespace(name="user_a", tenant="",
                              auth_headers={"Cookie": "s=1"})
-    findings = orch._oauth_probe(
+    from main.stages.validation import ProbeControls
+    from main.stages.validation.identity import oauth_probe
+    findings = oauth_probe(
         [ep], tmp_path, EvidenceStore(tmp_path / "proofs"), Metrics(),
         __import__("main.budgets", fromlist=["BudgetTracker"])
-        .BudgetTracker(cfg), CoverageTracker(), Http(), [tester], None)
+        .BudgetTracker(cfg), CoverageTracker(), Http(), cfg, orch.scope,
+        ProbeControls.from_orchestrator(orch), [tester], None)
     assert findings == []
 
 

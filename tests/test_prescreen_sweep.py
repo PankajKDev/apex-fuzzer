@@ -12,7 +12,13 @@ from main.reporting.coverage import CoverageTracker
 from main.reporting.metrics import Metrics
 from main.budgets import BudgetTracker, BudgetExceeded
 from main.scope import Scope
+from main.stages.validation import ProbeControls
+from main.stages.validation.prescreen import prescreen_sweep
 from main.validation.evidence import EvidenceStore
+
+
+def _controls(orch):
+    return ProbeControls.from_orchestrator(orch)
 
 
 def _orch(tmp_path, cfg=None):
@@ -67,8 +73,9 @@ def test_sweep_finds_without_leads(tmp_path):
     evidence, metrics, budgets, coverage, http = _ctx(tmp_path, orch, cfg)
     endpoints = [_ep("https://example.test/items?id=1", ["id"]),
                  _ep("https://example.test/search?q=hello", ["q"])]
-    found = orch._prescreen_sweep(endpoints, [], evidence, metrics,
-                                  budgets, coverage, http)
+    found = prescreen_sweep(endpoints, [], evidence, metrics,
+                                  budgets, coverage, http, cfg,
+                                  orch.scope, _controls(orch))
     by_source = {f.source for f in found}
     assert "prescreen-sqli" in by_source
     assert "prescreen-xss" in by_source
@@ -88,11 +95,12 @@ def test_sweep_skips_already_covered(tmp_path):
                        matched_at="https://example.test/items?id=1",
                        parameter="id", method="GET")
     existing.validation_status = "strong_candidate"
-    from main.orchestrator import _classify_finding
-    assert _classify_finding(existing) == "sqli"
-    found = orch._prescreen_sweep(
+    from main.reporting.coverage import classify_finding
+    assert classify_finding(existing) == "sqli"
+    found = prescreen_sweep(
         [_ep("https://example.test/items?id=1", ["id"])], [existing],
-        evidence, metrics, budgets, coverage, http)
+        evidence, metrics, budgets, coverage, http, cfg, orch.scope,
+        _controls(orch))
     assert [f for f in found if f.parameter == "id"
             and f.source == "prescreen-sqli"] == []
 
@@ -103,8 +111,9 @@ def test_sweep_respects_caps_and_gates(tmp_path):
     evidence, metrics, budgets, coverage, http = _ctx(tmp_path, orch, cfg)
     endpoints = [_ep("https://example.test/items?id=1", ["id"]),
                  _ep("https://example.test/other?id=1", ["id"])]
-    found = orch._prescreen_sweep(endpoints, [], evidence, metrics,
-                                  budgets, coverage, http)
+    found = prescreen_sweep(endpoints, [], evidence, metrics,
+                                  budgets, coverage, http, cfg,
+                                  orch.scope, _controls(orch))
     urls = {f.endpoint_url for f in found}
     assert len(urls) <= 1
 
@@ -115,8 +124,9 @@ def test_sweep_respects_caps_and_gates(tmp_path):
     post.method = "POST"
     evidence2, metrics2, budgets2, coverage2, http2 = _ctx(
         tmp_path, orch2, cfg2)
-    found = orch2._prescreen_sweep([post], [], evidence2, metrics2,
-                                   budgets2, coverage2, http2)
+    found = prescreen_sweep([post], [], evidence2, metrics2,
+                            budgets2, coverage2, http2, cfg2,
+                            orch2.scope, _controls(orch2))
     assert found == []
     assert http2.calls == 0
 
@@ -132,9 +142,10 @@ def test_sweep_budget_exhaustion_is_blocked(tmp_path):
         def request(self, *args, **kwargs):
             raise BudgetExceeded("budget exhausted")
 
-    found = orch._prescreen_sweep(
+    found = prescreen_sweep(
         [_ep("https://example.test/items?id=1", ["id"])], [], evidence,
-        metrics, budgets, coverage, Http())
+        metrics, budgets, coverage, Http(), cfg, orch.scope,
+        _controls(orch))
     assert found == []
     assert coverage.summary()["sqli"] == "blocked"
 
@@ -143,9 +154,10 @@ def test_sweep_disabled_by_zero_cap(tmp_path):
     orch, cfg = _orch(tmp_path)
     cfg.validation.prescreen_max_endpoints = 0
     evidence, metrics, budgets, coverage, http = _ctx(tmp_path, orch, cfg)
-    assert orch._prescreen_sweep(
+    assert prescreen_sweep(
         [_ep("https://example.test/items?id=1", ["id"])], [], evidence,
-        metrics, budgets, coverage, http) == []
+        metrics, budgets, coverage, http, cfg, orch.scope,
+        _controls(orch)) == []
     assert http.calls == 0
 
 

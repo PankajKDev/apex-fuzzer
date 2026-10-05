@@ -12,6 +12,7 @@ untested classes explicitly.
 """
 from typing import Any, Dict, List, Optional
 from ..logging_setup import get_logger
+from ..models import Finding
 
 log = get_logger("coverage")
 
@@ -46,6 +47,30 @@ _RESULT_TO_COVERAGE = {
     "negative": TESTED_NEGATIVE,
     "inconclusive": INCONCLUSIVE,
 }
+
+
+def classify_finding(f: Finding) -> str:
+    """Finding → coverage test class, by name/template text."""
+    name = (f.name or "").lower() + " " + (f.template_id or "").lower()
+    if "sqli" in name or "sql" in name:
+        return "sqli"
+    if "xss" in name:
+        return "xss"
+    if "ssrf" in name:
+        return "ssrf"
+    if "ssti" in name or "server-side template" in name or \
+            "server side template" in name:
+        return "ssti"
+    if "xxe" in name or "xml external entity" in name:
+        return "xxe"
+    if ("traversal" in name or "lfi" in name
+            or "file inclusion" in name):
+        return "path_traversal"
+    if "redirect" in name:
+        return "open_redirect"
+    if "idor" in name or "bola" in name:
+        return "idor"
+    return "unknown"
 
 
 class CoverageTracker:

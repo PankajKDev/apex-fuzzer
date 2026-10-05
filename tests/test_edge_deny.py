@@ -231,8 +231,11 @@ def test_orchestrator_records_edge_inconclusive_not_negative(tmp_path):
     from main.validation.evidence import EvidenceStore
     from main.budgets import BudgetTracker
     coverage = CoverageTracker()
-    found = orch._differential_probe(
+    from main.stages.validation import ProbeControls
+    from main.stages.validation.differential import differential_probe
+    found = differential_probe(
         [ep], diff, EvidenceStore(tmp_path / "proofs"), Metrics(),
-        BudgetTracker(cfg), coverage)
+        BudgetTracker(cfg), coverage, orch.cfg, orch.scope,
+        ProbeControls.from_orchestrator(orch))
     assert found == []
     assert coverage.summary().get("authz") == "inconclusive"

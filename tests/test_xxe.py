@@ -7,7 +7,7 @@ import pytest
 from main.budgets import BudgetExceeded
 from main.config import Config
 from main.models import Endpoint, Finding
-from main.orchestrator import _classify_finding
+from main.reporting.coverage import classify_finding
 from main.plugins.adapters import _xxe_candidate_from
 from main.plugins.base import TestTarget
 from main.validation.base import Candidate
@@ -171,8 +171,8 @@ def test_adapter_extracts_observed_xml_request_method_body_and_content_type():
     ("Server-Side Template Injection", "ssti"),
 ])
 def test_finding_names_route_to_class_validators(name, expected):
-    assert _classify_finding(Finding(id="classification", source="fixture",
-                                     name=name)) == expected
+    assert classify_finding(Finding(id="classification", source="fixture",
+                                    name=name)) == expected
 
 
 SVG = ('<svg xmlns="http://www.w3.org/2000/svg" width="10" height="10">'

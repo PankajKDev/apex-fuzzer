@@ -330,9 +330,12 @@ def test_sweep_finding_carries_bypass_evidence(tmp_path):
             provider.fetched.append(urllib.parse.urlsplit(target).path)
             return SimpleNamespace(status_code=200, text="fetched")
 
-    findings = orch._oast_sweep(
+    from main.stages.validation import ProbeControls
+    from main.stages.validation.oast import oast_sweep
+    findings = oast_sweep(
         [_ep()], provider, EvidenceStore(tmp_path / "proofs"), Metrics(),
-        Http(), tmp_path, BudgetTracker(cfg), CoverageTracker())
+        Http(), tmp_path, BudgetTracker(cfg), CoverageTracker(),
+        cfg, orch.scope, ProbeControls.from_orchestrator(orch))
     assert len(findings) == 1
     finding = findings[0]
     assert "ssrf-bypass" in finding.tags

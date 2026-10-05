@@ -19,9 +19,9 @@ from .config import Config
 from .scope import Scope, target_hostname
 from .profiles import Profile, get as get_profile
 from .models import (Endpoint, Parameter, Finding, Hypothesis,
-                      write_jsonl, read_jsonl, Confidence,
-                      ValidationStatus, stable_finding_id,
-                      RESULT_STATUSES, ResultStatus)
+                     write_jsonl, read_jsonl, Confidence,
+                     ValidationStatus, stable_finding_id,
+                     RESULT_STATUSES)
 from .logging_setup import get_logger, attach_file_handler
 from .shell import which, AdaptiveRateLimiter
 from .budgets import BudgetTracker, BudgetExceeded
@@ -29,9 +29,19 @@ from .checkpoints import Checkpoint
 from .http import HTTPClient
 from .stages.recon import (harvest_api_specs, harvest_robots, merge_recon,
                            recon_identity_headers, run_recon)
+from .stages.validation import ProbeControls, reserve_or_block
 from .stages.endpoints import build_endpoints
 from .stages.scanning import (probe_live, run_nuclei_stage,
                               takeover_check)
+from .stages.validation.cache import cache_probe
+from .stages.validation.differential import differential_probe
+from .stages.validation.identity import mfa_transition_probe, oauth_probe
+from .stages.validation.introspection import graphql_introspection_probe
+from .stages.validation.oast import oast_sweep
+from .stages.validation.plugins import (apply_plugin_results,
+                                         finding_endpoint)
+from .stages.validation.prescreen import prescreen_sweep
+from .reporting.coverage import classify_finding
 from .application.application_model import (Application,
                                             build_from_scan)
 from .application.identities import from_auth_contexts
@@ -48,13 +58,12 @@ from .discovery import param_miner
 from .discovery.javascript import chunk_js
 from .discovery.classifier import classify
 from .detection.nuclei import NucleiRunner, run_hypothesis_templates
-from .validation.evidence import EvidenceStore
+from .validation.evidence import EvidenceStore, interaction_line
 from .validation.base import Candidate
 from .validation.sqli import SqliValidator
 from .validation.xss import XssValidator
 from .validation.ssrf import endpoint_from_url
 from .validation.oast import (InteractshProvider, probe_endpoint,
-                               ssrf_candidates, ssrf_candidate_score,
                                matching_interactions)
 from .validation.ssrf_triggers import (
     append_query_parameter, assign_nested, materialize_trigger_urls,
@@ -68,11 +77,9 @@ from .reporting.metrics import Metrics
 from .reporting.html import render_html
 from .safety.preflight import (StopFlag, Pacer, get_interrupt_flag,
                                resolve_modules, dry_run_plan,
-                               plan_differential,
                                plan_authz_matrix, plan_race,
                                plan_business, plan_second_order,
-                               plan_second_order_ssrf, plan_oast,
-                               plan_graphql_introspection)
+                               plan_second_order_ssrf)
 from .safety.impact import max_level
 from .safety.gate import ScopeRefused
 from .safety.authorization import (
@@ -560,23 +567,6 @@ class Orchestrator:
     # =====================================================================
     # PREFLIGHT + DRY-RUN (Milestone 1)
     # =====================================================================
-    @staticmethod
-    def _reserve_or_block(budgets, coverage, test_class: str, plan,
-                          host: str = "") -> bool:
-        """Reserve a sweep's worst-case cost up front. Failure records
-        blocked coverage and skips the sweep — never a negative."""
-        if budgets.reserve(plan.total, host):
-            log.info("%s: reserved %d requests (base=%d mut=%d "
-                     "burst=%d verify=%d)", plan.module, plan.total,
-                     plan.baseline_requests, plan.mutation_requests,
-                     plan.concurrency_requests,
-                     plan.verification_requests)
-            return True
-        log.warning("%s: cannot reserve %d requests — skipping sweep "
-                    "(budget)", plan.module, plan.total)
-        coverage.record(test_class, "blocked",
-                        f"could not reserve {plan.total} requests")
-        return False
     def _halted(self) -> bool:
         """True when sweeps must stop: stop-on-candidate fired, or the
         operator interrupted (SIGINT/SIGTERM). Untested work keeps its
@@ -930,6 +920,7 @@ class Orchestrator:
             linked = resolve_finding_triples(reviews, findings)
             log.info("reviews: %d mark(s), %d FP triple(s) (%d linked)",
                      len(reviews), len(reviews.triples), linked)
+        controls = ProbeControls.from_orchestrator(self)
 
         # Open redirects are checked only during an explicitly enabled
         # validation run, never merely because OAST/differential was selected.
@@ -944,8 +935,9 @@ class Orchestrator:
 
         # GraphQL introspection exposure (schema disclosure inventory).
         if (self.profile.run_validation or self.cfg.validation.enabled):
-            out += self._graphql_introspection_probe(
-                endpoints, evidence, metrics, budgets, coverage, client)
+            out += graphql_introspection_probe(
+                endpoints, evidence, metrics, budgets, coverage, client,
+                self.cfg, self.scope, controls)
 
         # 0) WAF fingerprint from a live probe (drives mutation choice)
         waf = metrics.waf_detected or ""
@@ -1025,22 +1017,24 @@ class Orchestrator:
         # 1) differential auth-context testing (spec §2)
         if (self.profile.differential or self.cfg.validation.differential):
             diff = DifferentialTester(self.cfg, client)
-            out += self._differential_probe(endpoints, diff, evidence,
-                                            metrics, budgets, coverage)
+            out += differential_probe(endpoints, diff, evidence,
+                                      metrics, budgets, coverage,
+                                      self.cfg, self.scope, controls)
 
         # 1b) MFA session transitions (pre- vs post-MFA test sessions)
         if (self.profile.differential or self.cfg.validation.differential
                 or self.profile.authz_matrix
                 or self.cfg.authorization.enabled):
-            out += self._mfa_transition_probe(
+            out += mfa_transition_probe(
                 endpoints, evidence, metrics, budgets, coverage, client,
-                identities)
+                self.cfg, self.scope, controls, identities)
 
         # 1b) web-cache deception (unique keys, read-only) ─────────
         if ((self.profile.run_validation or self.cfg.validation.enabled)
                 and self.cfg.validation.cache):
-            out += self._cache_probe(endpoints, evidence, metrics,
-                                     budgets, coverage, client, identities)
+            out += cache_probe(endpoints, evidence, metrics,
+                                 budgets, coverage, client, self.cfg,
+                                 self.scope, controls, identities)
 
         # 1b) authz matrix: harvest → swap → per-method sweep (#1–2)
         if (self.profile.authz_matrix or self.cfg.authorization.enabled):
@@ -1057,18 +1051,20 @@ class Orchestrator:
                               or self.cfg.validation.enabled)
             if (run_oast_sweep and oast_provider and
                     oast_provider.available()):
-                out += self._oast_sweep(endpoints, oast_provider,
-                                        evidence, metrics, client, out_dir,
-                                        budgets, coverage)
+                out += oast_sweep(endpoints, oast_provider,
+                                    evidence, metrics, client, out_dir,
+                                    budgets, coverage, self.cfg,
+                                    self.scope, controls)
 
             # 2b) OAuth transitions (passive analysis + bounded probes)
             if (self.profile.differential
                     or self.cfg.validation.differential
                     or self.profile.authz_matrix
                     or self.cfg.authorization.enabled):
-                out += self._oauth_probe(
+                out += oauth_probe(
                     endpoints, out_dir, evidence, metrics, budgets,
-                    coverage, client, identities, oast_provider)
+                    coverage, client, self.cfg, self.scope, controls,
+                    identities, oast_provider)
 
             # 2c) lead-independent prescreen sweep: endpoints x params
             # feed the mutation prescreens directly so findings do not
@@ -1076,9 +1072,10 @@ class Orchestrator:
             if ((self.profile.run_validation
                     or self.cfg.validation.enabled)
                     and self.cfg.validation.mutation):
-                findings += self._prescreen_sweep(
+                findings += prescreen_sweep(
                     endpoints, findings, evidence, metrics, budgets,
-                    coverage, client, reviews)
+                    coverage, client, self.cfg, self.scope, controls,
+                    self._active_waf, reviews)
 
             # 3) per-finding plugins (§48: registry + TestResult)
             test_ctx = TestContext(
@@ -1091,7 +1088,7 @@ class Orchestrator:
                                  self.cfg.browser.enabled))
             by_norm = {e.normalized_url: e for e in endpoints}
             for f in findings:
-                test_class = _classify_finding(f)
+                test_class = classify_finding(f)
                 suppressed = self._fp_suppression_reason(
                     f, test_class, reviews)
                 if suppressed:
@@ -1099,7 +1096,7 @@ class Orchestrator:
                     log.info("plugins: skipping %s (%s)", f.id,
                              suppressed)
                     continue
-                ep = self._finding_endpoint(f, by_norm)
+                ep = finding_endpoint(f, by_norm)
                 target = TestTarget(
                     f.matched_at,
                     endpoint_type=ep.endpoint_type if ep else "unknown",
@@ -1117,7 +1114,7 @@ class Orchestrator:
                     applicable.append((plugin, res))
                 applied = bool(applicable)
                 if applicable:
-                    self._apply_plugin_results(
+                    apply_plugin_results(
                         f, applicable, evidence, test_class, coverage)
                 if applied:
                     metrics.validation_candidates += 1
@@ -1283,903 +1280,9 @@ class Orchestrator:
         except Exception as e:
             log.warning("login engine failed: %s", e, exc_info=True)
 
-    @staticmethod
-    def _finding_endpoint(f: Finding, by_norm: Dict[str, Endpoint]
-                          ) -> Optional[Endpoint]:
-        if not f.matched_at:
-            return None
-        try:
-            return by_norm.get(normalize_url(f.matched_at))
-        except Exception:
-            return None
 
-    @staticmethod
-    def _apply_plugin_result(f: Finding, plugin, res, evidence,
-                             test_class: str, coverage: CoverageTracker):
-        """Apply one validator result (legacy/single-plugin helper)."""
-        result_status = res.result_status
-        if result_status == ResultStatus.VERIFIED_EFFECT.value:
-            conf = "confirmed"
-        elif result_status == ResultStatus.CANDIDATE.value:
-            conf = "probable"
-        elif result_status == ResultStatus.NEGATIVE.value:
-            conf = "probable"
-        else:
-            conf = "unknown"
-        if result_status is None:
-            # Older/custom plugins may still return only the legacy status.
-            result_status = {
-                "confirmed": ResultStatus.VERIFIED_EFFECT.value,
-                "candidate": ResultStatus.CANDIDATE.value,
-                "negative": ResultStatus.NEGATIVE.value,
-                "inconclusive": ResultStatus.INCONCLUSIVE.value,
-            }.get(res.status, ResultStatus.INCONCLUSIVE.value)
-        f.set_result_status(result_status)
-        f.confidence = conf
-        notes = "; ".join(res.observations)[:500]
-        if getattr(plugin, "allocates_evidence", True):
-            evidence.allocate(f)
-            if res.evidence:
-                f.raw = res.evidence
-            evidence.record(f,
-                            request_text=f"{f.method} {f.matched_at}",
-                            response_headers=f.response_headers)
-        else:
-            # prescreen path: record notes without pre-allocating
-            f.false_positive_notes = notes
-            f.raw = {"evidence": res.evidence}
-            evidence.record(
-                f, request_text=f"{f.method} {f.matched_at}",
-                response_text=notes)
-        coverage.record_result(test_class, result_status,
-                               notes or f"plugin {plugin.name}")
 
-    @staticmethod
-    def _plugin_result_status(res) -> str:
-        """Normalize legacy and canonical plugin outcomes."""
-        result_status = getattr(res, "result_status", None)
-        if result_status in RESULT_STATUSES:
-            return result_status
-        return {
-            "confirmed": ResultStatus.VERIFIED_EFFECT.value,
-            "candidate": ResultStatus.CANDIDATE.value,
-            "negative": ResultStatus.NEGATIVE.value,
-            "inconclusive": ResultStatus.INCONCLUSIVE.value,
-            "not_tested": ResultStatus.OBSERVATION.value,
-        }.get(getattr(res, "status", ""),
-              ResultStatus.INCONCLUSIVE.value)
 
-    @staticmethod
-    def _aggregate_plugin_status(statuses: List[str]) -> str:
-        """Combine independent evidence without last-plugin-wins behavior.
-
-        Positive and negative evidence conflicts become inconclusive. An
-        inconclusive validator cannot erase a supported candidate; verified
-        evidence wins over candidates when no negative evidence conflicts.
-        """
-        verified = ResultStatus.VERIFIED_EFFECT.value
-        candidate = ResultStatus.CANDIDATE.value
-        negative = ResultStatus.NEGATIVE.value
-        inconclusive = ResultStatus.INCONCLUSIVE.value
-        observation = ResultStatus.OBSERVATION.value
-        observed = [s for s in statuses if s in RESULT_STATUSES]
-        has_positive = verified in observed or candidate in observed
-        if has_positive and negative in observed:
-            return inconclusive
-        if verified in observed:
-            return verified
-        if candidate in observed:
-            return candidate
-        if inconclusive in observed:
-            return inconclusive
-        if negative in observed:
-            return negative
-        return observation
-
-    @staticmethod
-    def _apply_plugin_results(f: Finding, plugin_results, evidence,
-                              test_class: str, coverage: CoverageTracker):
-        """Aggregate validator evidence while retaining each tool's record."""
-        normalized = [(plugin, res,
-                       Orchestrator._plugin_result_status(res))
-                      for plugin, res in plugin_results]
-        statuses = [f.result_status] + [status for _, _, status in normalized]
-        aggregate = Orchestrator._aggregate_plugin_status(statuses)
-
-        records = []
-        note_parts = []
-        for plugin, res, status in normalized:
-            observations = list(getattr(res, "observations", []) or [])
-            notes = "; ".join(str(note) for note in observations)[:500]
-            note_parts.append(f"{plugin.name}: {notes or status}")
-            records.append({
-                "plugin": plugin.name,
-                "result_status": status,
-                "duration_seconds": getattr(res, "duration_seconds", 0.0),
-                "observations": observations,
-                "errors": list(getattr(res, "errors", []) or []),
-                "evidence": dict(getattr(res, "evidence", {}) or {}),
-            })
-
-        f.set_result_status(aggregate)
-        f.confidence = {
-            ResultStatus.VERIFIED_EFFECT.value: "confirmed",
-            ResultStatus.CANDIDATE.value: "probable",
-            ResultStatus.NEGATIVE.value: "probable",
-        }.get(aggregate, "unknown")
-        combined_notes = " | ".join(note_parts)[:2000]
-        if aggregate in (ResultStatus.NEGATIVE.value,
-                         ResultStatus.INCONCLUSIVE.value):
-            f.false_positive_notes = combined_notes
-
-        # Preserve the original Nuclei/source record and attach each
-        # validator's independent evidence under an additive key.
-        if not isinstance(f.raw, dict):
-            f.raw = {"source_raw": f.raw}
-        f.raw["validator_results"] = records
-
-        if any(getattr(plugin, "allocates_evidence", True)
-               for plugin, _, _ in normalized) and not f.evidence_dir:
-            evidence.allocate(f)
-        evidence.record(
-            f, request_text=f"{f.method} {f.matched_at}",
-            response_text=combined_notes,
-            response_headers=f.response_headers)
-        coverage.record_result(
-            test_class, aggregate,
-            combined_notes or "aggregated plugin outcomes")
-
-    def _prescreen_sweep(self, endpoints: List[Endpoint],
-                           findings: List[Finding],
-                           evidence: EvidenceStore, metrics: Metrics,
-                           budgets: BudgetTracker,
-                           coverage: CoverageTracker, client,
-                           reviews=None
-                           ) -> List[Finding]:
-        """Probe endpoint parameters with the mutation prescreens directly.
-
-        Nuclei misses an endpoint and the deep validators never run: this
-        sweep closes that lead dependency for SQLi/XSS prescreens only
-        (no heavy tools, no delays). Hits become findings so the plugin
-        loop below can drive sqlmap/dalfox confirmation. Silence records
-        nothing: a prescreen miss is not a negative. Triples marked
-        false-positive in reviews.jsonl are skipped as untestable.
-        """
-        from .safety.preflight import plan_prescreen
-        from .validation.differential import IDOR_PARAM_NAMES
-        cfg_v = self.cfg.validation
-        max_eps = max(0, int(getattr(cfg_v, "prescreen_max_endpoints",
-                                     30)))
-        max_params = max(0, int(getattr(cfg_v, "prescreen_max_params", 3)))
-        if max_eps == 0 or max_params == 0:
-            return []
-
-        def _params_of(ep):
-            out = []
-            for src, loc in ((ep.query_parameters, "query"),
-                             (ep.body_parameters, "body"),
-                             (ep.header_parameters, "header")):
-                for item in list(src or []):
-                    name = getattr(item, "name", "")
-                    if name and (name, loc) not in out:
-                        out.append((name, loc))
-            idorish = [pair for pair in out
-                       if pair[0].lower() in IDOR_PARAM_NAMES]
-            rest = [pair for pair in out if pair not in idorish]
-            return (idorish + rest)[:max_params]
-
-        candidates = []
-        for ep in endpoints or []:
-            if ep.endpoint_type == "static":
-                continue
-            if not self.scope.active_test_allowed(ep.url):
-                continue
-            pairs = _params_of(ep)
-            if pairs:
-                candidates.append((ep, pairs))
-        candidates.sort(key=lambda row: (
-            0 if has_idor_params(row[0]) else 1, row[0].url))
-        candidates = candidates[:max_eps]
-        if not candidates:
-            log.info("prescreen-sweep: no endpoints with parameters "
-                     "discovered — nothing to probe")
-            return []
-        log.info("prescreen-sweep: %d endpoints", len(candidates))
-        if not self._reserve_or_block(
-                budgets, coverage, "prescreen",
-                plan_prescreen(len(candidates), max_params)):
-            return []
-
-        covered = set()
-        for f in findings or []:
-            try:
-                covered.add((_classify_finding(f),
-                             normalize_url(f.endpoint_url or
-                                           f.matched_at or ""),
-                             f.parameter or ""))
-            except Exception:
-                continue
-        engine = MutationEngine(self.cfg, client, self._active_waf)
-        new_findings: List[Finding] = []
-        for ep, pairs in candidates:
-            if self._halted():
-                log.info("prescreen-sweep: halted by stop control")
-                break
-            self._paced()
-            content_types = list(
-                getattr(ep, "request_content_types", []) or [])
-            content_type = ((content_types[0] if content_types else "")
-                            or getattr(ep, "content_type", ""))
-            for name, location in pairs:
-                for test_class in ("sqli", "xss"):
-                    if (test_class, ep.normalized_url, name) in covered:
-                        continue
-                    if reviews is not None and reviews.is_fp_triple(
-                            test_class, ep.normalized_url, name):
-                        coverage.mark_untestable(
-                            test_class,
-                            f"operator-marked false positive: "
-                            f"{ep.normalized_url}::{name}")
-                        log.info("prescreen-sweep: skipping %s (marked "
-                                 "false positive in reviews.jsonl)",
-                                 f"{ep.normalized_url}::{name}")
-                        continue
-                    candidate = Candidate(
-                        finding=Finding(id="probe", source="prescreen"),
-                        test_class=test_class, endpoint_url=ep.url,
-                        method=ep.method or "GET", parameter=name,
-                        parameter_location=location,
-                        request_content_type=content_type,
-                        body_parameters=list(ep.body_parameters or []))
-                    try:
-                        if test_class == "sqli":
-                            outcome = engine.prescreen_sqli(candidate)
-                        else:
-                            outcome = engine.prescreen_xss(candidate)
-                    except BudgetExceeded:
-                        coverage.record(test_class, "blocked",
-                                        f"budget: {ep.normalized_url}")
-                        break
-                    if outcome is None or outcome.status not in (
-                            ValidationStatus.STRONG_CANDIDATE.value,):
-                        continue
-                    metrics.validation_candidates += 1
-                    self._note_candidate()
-                    coverage.record(test_class, "candidate",
-                                    outcome.notes or "")
-                    covered.add((test_class, ep.normalized_url, name))
-                    f = Finding(
-                        id=stable_finding_id(f"prescreen-{test_class}",
-                                             ep.normalized_url, name),
-                        source=f"prescreen-{test_class}",
-                        name=(f"{'SQLi' if test_class == 'sqli' else 'XSS'} "
-                              f"prescreen hit on '{name}' ({ep.path})"),
-                        severity="medium",
-                        confidence=Confidence.PROBABLE.value,
-                        validation_status=ValidationStatus.
-                        STRONG_CANDIDATE.value,
-                        host=ep.host, matched_at=ep.url,
-                        endpoint_url=ep.url, method=candidate.method,
-                        parameter=name,
-                        description=(outcome.notes or "") + " Lead-"
-                                        "independent prescreen signal; "
-                                        "requires independent validation.",
-                        tags=[test_class, "prescreen", ep.endpoint_type],
-                        raw={"prescreen": dict(outcome.evidence or {})},
-                        false_positive_notes=(
-                            "Prescreen-level signal only (boolean "
-                            "differential or reflection/error marker). "
-                            "Confirm with the follow-up validators before "
-                            "reporting."),
-                    )
-                    evidence.allocate(f)
-                    evidence.record(
-                        f,
-                        request_text=(
-                            f"{candidate.method} {ep.url}\n{location}::"
-                            f"{name}"),
-                        response_text=(outcome.notes or "")[:2000])
-                    new_findings.append(f)
-                    log.info("prescreen-sweep: %s %s on %s", test_class,
-                             name, ep.url)
-        return new_findings
-
-    def _graphql_introspection_probe(self, endpoints: List[Endpoint],
-                                         evidence: EvidenceStore,
-                                         metrics: Metrics,
-                                         budgets: BudgetTracker,
-                                         coverage: CoverageTracker,
-                                         client) -> List[Finding]:
-        """Probe GraphQL endpoints for enabled __schema introspection.
-
-        One minimal document per endpoint (type inventory only). POST
-        endpoints go through the state-change gate like any mutating
-        method — introspection is read-only by contract, but the gate
-        cannot prove that, so POST needs --ack-state-change.
-        """
-        from .validation.graphql_introspection import (
-            _MAX_ENDPOINTS, probe_introspection)
-        targets = [e for e in endpoints or []
-                   if getattr(e, "endpoint_type", "") == "graphql"]
-        targets = targets[:_MAX_ENDPOINTS]
-        if not targets:
-            log.info("graphql-introspection: no GraphQL endpoints "
-                     "discovered — nothing to probe")
-            return []
-        if not self._reserve_or_block(
-                budgets, coverage, "graphql",
-                plan_graphql_introspection(len(targets))):
-            return []
-        findings: List[Finding] = []
-        for ep in targets:
-            if self._halted():
-                log.info("graphql-introspection: halted by stop control")
-                break
-            if not self.scope.active_test_allowed(ep.url):
-                continue
-            if not budgets.consume_test(
-                    "graphql", ep.normalized_url, limit=2):
-                coverage.record("graphql", "blocked",
-                                f"budget: {ep.normalized_url}")
-                continue
-            try:
-                res = probe_introspection(
-                    client, ep.url, ep.method or "GET",
-                    timeout=self.cfg.scan.http_timeout)
-            except BudgetExceeded:
-                coverage.record("graphql", "blocked",
-                                f"budget: {ep.normalized_url}")
-                continue
-            if res.exposed is None:
-                coverage.record("graphql", "inconclusive",
-                                f"{ep.normalized_url}: {res.notes}")
-                continue
-            if not res.exposed:
-                coverage.record("graphql", "tested_negative",
-                                f"{ep.normalized_url}: {res.notes}")
-                continue
-            self._note_candidate()
-            coverage.record("graphql", "candidate", res.notes)
-            coverage.record("info_disclosure", "candidate", res.notes)
-            f = Finding(
-                id=stable_finding_id("graphql-intro",
-                                     ep.normalized_url),
-                source="graphql-introspection",
-                name=(f"GraphQL introspection enabled "
-                      f"({len(res.types)} types disclosed, {ep.path})"),
-                severity="low",
-                confidence=Confidence.PROBABLE.value,
-                validation_status=ValidationStatus.
-                STRONG_CANDIDATE.value,
-                host=ep.host, matched_at=ep.url,
-                endpoint_url=ep.url, method=(ep.method or "GET"),
-                description=res.notes,
-                tags=["graphql", "info_disclosure",
-                      ep.endpoint_type],
-                raw={"types": res.types, "method": res.method,
-                     "status": res.status},
-                false_positive_notes=(
-                    "Schema exposure alone is not a vulnerability: "
-                    "assess whether disclosed types/fields reveal "
-                    "non-public operations or data before reporting. "
-                    "Some frameworks scope introspection per role — "
-                    "compare authenticated vs anonymous answers by hand."),
-            )
-            evidence.allocate(f)
-            evidence.record(
-                f,
-                request_text=(f"{res.method} {ep.url}\n"
-                              f"introspection document (type inventory)"),
-                response_text=res.notes)
-            findings.append(f)
-            log.info("graphql-introspection: %s", res.notes)
-        return findings
-
-    def _differential_probe(self, endpoints: List[Endpoint],
-                            diff: DifferentialTester,
-                            evidence: EvidenceStore, metrics: Metrics,
-                            budgets: BudgetTracker,
-                            coverage: CoverageTracker
-                            ) -> List[Finding]:
-        targets = [e for e in endpoints
-                   if e.endpoint_type in PRIVILEGED_TYPES
-                   or (has_idor_params(e)
-                       and e.endpoint_type != "static")]
-        # per-resource endpoints (idor params) first — BOLA hides there
-        targets.sort(key=lambda e: 0 if has_idor_params(e) else 1)
-        targets = targets[:self.cfg.validation.differential_max_endpoints]
-        if not targets:
-            log.info("differential: no privileged/identifier endpoints "
-                     "discovered — nothing to compare")
-            return []
-        log.info("differential: probing %d endpoints "
-                 "(contexts=%s)", len(targets),
-                 [c["name"] for c in diff.contexts])
-        if not self._reserve_or_block(
-                budgets, coverage, "authz",
-                plan_differential(len(targets), len(diff.contexts))):
-            return []
-        tenant_of = {c.name: (getattr(c, "tenant", "") or "")
-                     for c in self.cfg.auth.contexts}
-        findings: List[Finding] = []
-        for ep in targets:
-            if self._halted():
-                log.info("differential: halted by stop control; "
-                         "remaining targets stay untested")
-                break
-            if not self.scope.active_test_allowed(ep.url):
-                continue
-            if not budgets.consume_test("authz", ep.normalized_url):
-                coverage.record("authz", "blocked",
-                                f"budget: {ep.normalized_url}")
-                continue
-            try:
-                res = diff.probe(ep.url, ep.endpoint_type,
-                                 timeout=self.cfg.scan.http_timeout)
-            except BudgetExceeded:
-                coverage.record("authz", "blocked",
-                                f"budget: {ep.normalized_url}")
-                continue
-            metrics.differential_probes += 1
-            metrics.authorization_tests += 1
-            authed = [c.name for c in res.contexts
-                      if c.name != "anonymous"]
-            if getattr(res, "edge_denied", False):
-                coverage.record("authz", "inconclusive",
-                                f"{ep.normalized_url}: edge/bot-wall "
-                                f"answers; app never reached")
-                continue
-            if any(getattr(c, "error", "") for c in res.contexts):
-                # Rule 1: incomplete comparisons stay inconclusive,
-                # never tested_negative.
-                coverage.record("authz", "inconclusive",
-                                f"{ep.normalized_url}: incomplete "
-                                f"context comparison")
-                continue
-            if res.verdict != "strong_candidate":
-                # tested, no authorization gap observed (§45)
-                coverage.record("authz", "tested_negative",
-                                f"{ep.normalized_url}: {res.notes}")
-                if has_idor_params(ep):
-                    coverage.record("idor", "tested_negative",
-                                    ep.normalized_url)
-                continue
-            metrics.differential_candidates += 1
-            metrics.authorization_confirmed += 1
-            self._note_candidate()
-            is_bola = "BOLA" in res.notes
-            coverage.record("bola" if is_bola else "authz", "candidate",
-                            res.notes)
-            coverage.record("idor", "candidate", res.notes)
-            f = Finding(
-                id=stable_finding_id("diff", ep.normalized_url),
-                source="differential",
-                name=("BOLA/IDOR: identical access for two users "
-                      f"({ep.path})" if is_bola
-                      else f"Broken access control on {ep.path}"),
-                severity="high",
-                confidence=Confidence.PROBABLE.value,
-                validation_status=ValidationStatus.STRONG_CANDIDATE.value,
-                host=ep.host,
-                matched_at=ep.url,
-                endpoint_url=ep.url,
-                method=ep.method,
-                description=res.notes,
-                tags=["bola", "idor", "authz", ep.endpoint_type],
-                raw={"contexts": [vars(c) for c in res.contexts],
-                     "endpoint_type": ep.endpoint_type,
-                     "confirmed": bool(getattr(res, "confirmed", False)),
-                     "confirmation_notes": getattr(
-                         res, "confirmation_notes", "")},
-                false_positive_notes=(
-                    "Responses compared across auth contexts; volatile "
-                    "keys (csrf/token/timestamp/nonce) excluded; length "
-                    "bucketed to 1KB."),
-                identity="+".join(authed),
-                tenant="+".join(sorted({tenant_of.get(a, "")
-                                        for a in authed} - {""})),
-            )
-            evidence.allocate(f)
-            evidence.record(
-                f,
-                request_text=(
-                    "GET " + ep.url + "\n--- per-context results ---\n" +
-                    "\n".join(f"{c.name}: HTTP {c.status} "
-                              f"(len={c.length}, shape={c.key_shape[:60] or 'n/a'}, "
-                              f"hash={c.body_hash}, "
-                              f"ct={getattr(c, 'content_type', '') or 'n/a'}, "
-                              f"{getattr(c, 'elapsed_ms', 0.0):.0f}ms"
-                              f"{', sig=' + getattr(c, 'error_signature', '') if getattr(c, 'error_signature', '') else ''})"
-                              for c in res.contexts)),
-                response_text=res.notes)
-            findings.append(f)
-            log.info("differential: STRONG candidate on %s — %s",
-                     ep.url, res.notes)
-        return findings
-
-    # ── MFA SESSION TRANSITIONS (test sessions only) ────────────────
-    def _mfa_transition_probe(self, endpoints: List[Endpoint],
-                              evidence: EvidenceStore, metrics: Metrics,
-                              budgets: BudgetTracker,
-                              coverage: CoverageTracker, client,
-                              identities) -> List[Finding]:
-        """Compare privileged URLs under pre- vs post-MFA test sessions."""
-        from .auth.mfa_checks import check_transition
-        pending_names = {c.name for c in self.cfg.auth.contexts
-                         if getattr(c, "mfa_pending", False)}
-        pres = [i for i in identities or []
-                if getattr(i, "name", "") in pending_names
-                and dict(getattr(i, "auth_headers", None) or {})]
-        fulls = [i for i in identities or []
-                 if getattr(i, "name", "") not in pending_names
-                 and getattr(i, "name", "") != "anonymous"
-                 and dict(getattr(i, "auth_headers", None) or {})]
-        if not pres or not fulls:
-            log.info("mfa-transition: needs one mfa_pending and one "
-                     "completed test session — skipping")
-            return []
-        targets = [e for e in endpoints
-                   if e.endpoint_type in PRIVILEGED_TYPES
-                   or (has_idor_params(e)
-                       and e.endpoint_type != "static")][:10]
-        if not targets:
-            log.info("mfa-transition: no privileged endpoints "
-                     "discovered — nothing to compare")
-            return []
-        log.info("mfa-transition: %d endpoints (%s vs %s)",
-                 len(targets), pres[0].name, fulls[0].name)
-        if not self._reserve_or_block(
-                budgets, coverage, "mfa",
-                plan_differential(len(targets), 2)):
-            return []
-        findings: List[Finding] = []
-        pre, post = pres[0], fulls[0]
-        pre_headers = dict(getattr(pre, "auth_headers", None) or {})
-        post_headers = dict(getattr(post, "auth_headers", None) or {})
-        for ep in targets:
-            if self._halted():
-                log.info("mfa-transition: halted by stop control")
-                break
-            if not self.scope.active_test_allowed(ep.url):
-                continue
-            try:
-                res = check_transition(
-                    client, ep.url, pre_headers, post_headers,
-                    getattr(pre, "name", "pre"),
-                    getattr(post, "name", "post"),
-                    timeout=self.cfg.scan.http_timeout)
-            except BudgetExceeded:
-                coverage.record("mfa", "blocked",
-                                f"budget: {ep.normalized_url}")
-                continue
-            metrics.authorization_tests += 1
-            if res.verdict == "strong_candidate":
-                metrics.authorization_confirmed += 1
-                self._note_candidate()
-                coverage.record("mfa", "candidate", res.notes)
-                f = Finding(
-                    id=stable_finding_id("mfa", ep.normalized_url,
-                                         pre.name, post.name),
-                    source="mfa-transition",
-                    name=(f"MFA bypass: pre-MFA session '{pre.name}' "
-                          f"reaches privileged resource ({ep.path})"),
-                    severity="high",
-                    confidence=Confidence.PROBABLE.value,
-                    validation_status=ValidationStatus.
-                    STRONG_CANDIDATE.value,
-                    host=ep.host, matched_at=ep.url,
-                    endpoint_url=ep.url, method="GET",
-                    description=res.notes,
-                    tags=["mfa", "authz", "session", ep.endpoint_type],
-                    raw={"transition": res.to_dict()},
-                    false_positive_notes=(
-                        "Both sessions are operator-supplied test sessions; "
-                        "the pre-MFA response is shape-compared against the "
-                        "post-MFA response, so shared login pages cannot "
-                        "confirm. Confirm interactively before reporting."),
-                    identity=pre.name,
-                    tenant=getattr(pre, "tenant", "") or "",
-                )
-                evidence.allocate(f)
-                evidence.record(
-                    f,
-                    request_text=(f"GET {ep.url}\n(pre-MFA: {pre.name}; "
-                                  f"post-MFA: {post.name})"),
-                    response_text=res.notes)
-                findings.append(f)
-                log.info("mfa-transition: %s", res.notes)
-            elif res.verdict == "tested_negative":
-                coverage.record("mfa", "tested_negative",
-                                f"{ep.normalized_url}: {res.notes}")
-            else:
-                coverage.record("mfa", "inconclusive",
-                                f"{ep.normalized_url}: {res.notes}")
-        return findings
-
-    # ── OAUTH TRANSITIONS (test identities + observed flows) ────────
-    def _oauth_probe(self, endpoints: List[Endpoint], out_dir: Path,
-                     evidence: EvidenceStore, metrics: Metrics,
-                     budgets: BudgetTracker, coverage: CoverageTracker,
-                     client, identities,
-                     oast_provider=None) -> List[Finding]:
-        """Passive authorize-URL analysis plus bounded active probes."""
-        from urllib.parse import urlsplit
-        from .auth.oauth_checks import (find_authorize_urls,
-                                        check_pkce_strip,
-                                        check_redirect_oast)
-        findings: List[Finding] = []
-        seen_urls: List[str] = []
-        traffic_file = out_dir / "browser_traffic.json"
-        if traffic_file.exists():
-            try:
-                import json as _json
-                data = _json.loads(traffic_file.read_text(
-                    errors="ignore") or "{}")
-                for req in data.get("requests", []) or []:
-                    url = req.get("url", "") if isinstance(req, dict) \
-                        else ""
-                    if url:
-                        seen_urls.append(url)
-            except Exception as exc:
-                log.debug("oauth traffic read failed: %s", exc)
-        for ep in endpoints or []:
-            if getattr(ep, "method", "GET").upper() == "GET" and ep.url:
-                seen_urls.append(ep.url)
-        authz_urls = find_authorize_urls(seen_urls, source="traffic")[:5]
-        if not authz_urls:
-            log.info("oauth: no authorize URLs observed in traffic or "
-                     "endpoints — nothing to check")
-            return []
-        allow_state = bool(getattr(getattr(self.cfg, "safety", None),
-                                   "allow_state_change", False))
-        testers = [i for i in identities or []
-                   if getattr(i, "name", "") != "anonymous"
-                   and dict(getattr(i, "auth_headers", None) or {})]
-        active_urls = [a for a in authz_urls
-                       if self.scope.active_test_allowed(a.url)]
-        if testers and active_urls and not self._reserve_or_block(
-                budgets, coverage, "oauth",
-                plan_differential(len(active_urls), 2)):
-            return findings
-        for authz in authz_urls:
-            try:
-                host = urlsplit(authz.url).hostname or ""
-            except (TypeError, ValueError):
-                continue
-            if not authz.has_state:
-                coverage.record("oauth", "candidate",
-                                f"{authz.url[:120]}: missing state")
-                findings.append(Finding(
-                    id=stable_finding_id("oauth", "nostate", authz.url),
-                    source="oauth-passive",
-                    name="OAuth login without state parameter",
-                    severity="medium",
-                    confidence=Confidence.PROBABLE.value,
-                    validation_status=ValidationStatus.
-                    STRONG_CANDIDATE.value,
-                    host=host, matched_at=authz.url,
-                    endpoint_url=authz.url, method="GET",
-                    description=("Authorization endpoint omits `state`: "
-                                 "the login flow is open to CSRF. Observed "
-                                 "passively; confirm the state parameter is "
-                                 "absent across fresh flows."),
-                    tags=["oauth", "auth", "csrf"],
-                    raw={"authorize": authz.to_dict()},
-                    false_positive_notes=(
-                        "Passive observation only; some providers bind "
-                        "CSRF protection to nonce/PKCE instead of state."),
-                ))
-            if authz.implicit_flow:
-                coverage.record("oauth", "candidate",
-                                f"{authz.url[:120]}: implicit flow")
-                findings.append(Finding(
-                    id=stable_finding_id("oauth", "implicit", authz.url),
-                    source="oauth-passive",
-                    name="OAuth implicit flow exposes tokens in URL",
-                    severity="medium",
-                    confidence=Confidence.PROBABLE.value,
-                    validation_status=ValidationStatus.
-                    STRONG_CANDIDATE.value,
-                    host=host, matched_at=authz.url,
-                    endpoint_url=authz.url, method="GET",
-                    description=("`response_type` includes token: access "
-                                 "tokens travel in URL fragments where logs "
-                                 "and Referer headers can leak them."),
-                    tags=["oauth", "auth", "token-leak"],
-                    raw={"authorize": authz.to_dict()},
-                    false_positive_notes=(
-                        "Passive observation only; confirm tokens are "
-                        "actually issued to the fragment."),
-                ))
-            if not testers or not self.scope.active_test_allowed(
-                    authz.url):
-                continue
-            tester = testers[0]
-            tester_headers = dict(getattr(tester, "auth_headers", None)
-                                  or {})
-            tester_name = getattr(tester, "name", "tester")
-            if authz.has_pkce:
-                self._paced()
-                try:
-                    res = check_pkce_strip(
-                        client, authz.url, tester_headers, tester_name,
-                        timeout=self.cfg.scan.http_timeout)
-                except BudgetExceeded:
-                    coverage.record("oauth", "blocked",
-                                    f"budget: {authz.url[:120]}")
-                    continue
-                metrics.authorization_tests += 1
-                if res.verdict == "strong_candidate":
-                    metrics.authorization_confirmed += 1
-                    self._note_candidate()
-                    coverage.record("oauth", "candidate", res.notes)
-                    findings.append(Finding(
-                        id=stable_finding_id("oauth", "nopkce", authz.url),
-                        source="oauth-pkce",
-                        name="OAuth PKCE not enforced",
-                        severity="medium",
-                        confidence=Confidence.PROBABLE.value,
-                        validation_status=ValidationStatus.
-                        STRONG_CANDIDATE.value,
-                        host=host, matched_at=authz.url,
-                        endpoint_url=authz.url, method="GET",
-                        description=res.notes + " No code was redeemed "
-                                        "and no redirect was followed.",
-                        tags=["oauth", "auth", "pkce"],
-                        raw={"probe": res.to_dict()},
-                        false_positive_notes=(
-                            "The authorize answer was observed, never "
-                            "redeemed. Confirm the code validates without "
-                            "a verifier before reporting."),
-                        identity=tester_name,
-                    ))
-                else:
-                    coverage.record("oauth", "inconclusive",
-                                    f"{authz.url[:120]}: {res.notes}")
-            if oast_provider is not None and oast_provider.available() \
-                    and allow_state:
-                self._paced()
-                try:
-                    callback = oast_provider.create_token()
-                    res = check_redirect_oast(
-                        client, authz.url, tester_headers, tester_name,
-                        callback, timeout=self.cfg.scan.http_timeout)
-                except BudgetExceeded:
-                    coverage.record("oauth", "blocked",
-                                    f"budget: {authz.url[:120]}")
-                    continue
-                metrics.authorization_tests += 1
-                if res.verdict == "strong_candidate":
-                    metrics.authorization_confirmed += 1
-                    self._note_candidate()
-                    coverage.record("oauth", "candidate", res.notes)
-                    findings.append(Finding(
-                        id=stable_finding_id("oauth", "redirect",
-                                             authz.url),
-                        source="oauth-redirect",
-                        name=("OAuth redirect_uri not validated "
-                              "(code-disclosure chain)"),
-                        severity="medium",
-                        confidence=Confidence.PROBABLE.value,
-                        validation_status=ValidationStatus.
-                        STRONG_CANDIDATE.value,
-                        host=host, matched_at=authz.url,
-                        endpoint_url=authz.url, method="GET",
-                        description=res.notes + " The redirect was "
-                                        "observed, never followed; no code "
-                                        "was redeemed.",
-                        tags=["oauth", "auth", "open-redirect"],
-                        raw={"probe": res.to_dict()},
-                        false_positive_notes=(
-                            "Location observed only. Confirm an attacker "
-                            "receiver actually gets a usable code."),
-                        identity=tester_name,
-                    ))
-                else:
-                    coverage.record("oauth", "inconclusive",
-                                    f"{authz.url[:120]}: {res.notes}")
-        for f in findings:
-            evidence.allocate(f)
-            evidence.record(
-                f, request_text=f"GET {f.endpoint_url}",
-                response_text=(f.description or "")[:2000])
-        return findings
-
-    # ── WEB-CACHE DECEPTION (unique keys, read-only) ───────────────
-    def _cache_probe(self, endpoints: List[Endpoint],
-                     evidence: EvidenceStore, metrics: Metrics,
-                     budgets: BudgetTracker,
-                     coverage: CoverageTracker, client,
-                     identities) -> List[Finding]:
-        """Detect personalized bodies served from cache to anonymous."""
-        from .safety.preflight import plan_cache
-        from .validation.cache import probe_deception
-        cfg_v = self.cfg.validation
-        victims = [i for i in identities or []
-                   if getattr(i, "name", "") != "anonymous"
-                   and dict(getattr(i, "auth_headers", None) or {})]
-        if not victims:
-            log.info("cache: no authenticated test session configured — "
-                     "nothing to compare")
-            return []
-        targets = [e for e in endpoints
-                   if (getattr(e, "method", "GET") or "GET").upper()
-                   == "GET"
-                   and (e.endpoint_type in PRIVILEGED_TYPES
-                        or (has_idor_params(e)
-                            and e.endpoint_type != "static"))]
-        targets = targets[:max(0, cfg_v.cache_max_endpoints)]
-        if not targets:
-            log.info("cache: no cacheable privileged endpoints "
-                     "discovered — nothing to probe")
-            return []
-        log.info("cache: probing %d endpoints", len(targets))
-        if not self._reserve_or_block(
-                budgets, coverage, "cache", plan_cache(len(targets))):
-            return []
-        findings: List[Finding] = []
-        victim = victims[0]
-        victim_headers = dict(getattr(victim, "auth_headers", None) or {})
-        victim_name = getattr(victim, "name", "tester")
-        for ep in targets:
-            if self._halted():
-                log.info("cache: halted by stop control")
-                break
-            if not self.scope.active_test_allowed(ep.url):
-                continue
-            self._paced()
-            try:
-                res = probe_deception(
-                    client, ep.url, victim_headers, victim_name,
-                    timeout=self.cfg.scan.http_timeout)
-            except BudgetExceeded:
-                coverage.record("cache", "blocked",
-                                f"budget: {ep.normalized_url}")
-                continue
-            if res.verdict == "confirmed":
-                metrics.validated_confirmed += 1
-                self._note_candidate()
-                coverage.record("cache", "confirmed", res.notes)
-                f = Finding(
-                    id=stable_finding_id("cache", ep.normalized_url,
-                                         victim_name),
-                    source="cache-deception",
-                    name=(f"Web-cache deception: anonymous reads "
-                          f"'{victim_name}''s cached response ({ep.path})"),
-                    severity="high",
-                    confidence=Confidence.CONFIRMED.value,
-                    validation_status=ValidationStatus.CONFIRMED.value,
-                    host=ep.host, matched_at=ep.url,
-                    endpoint_url=ep.url, method="GET",
-                    description=res.notes + " Every probe used a unique "
-                                    "cache key; no shared entry was written.",
-                    tags=["cache", "cache-deception", "authz",
-                          ep.endpoint_type, "verified-effect"],
-                    raw={"cache": res.to_dict()},
-                    false_positive_notes=(
-                        "Anonymous baseline, victim fetch, and anonymous "
-                        "re-read all completed; the re-read carried a "
-                        "cache HIT for the victim body. Confirm the cached "
-                        "content is actually sensitive before reporting."),
-                    identity=victim_name,
-                )
-                evidence.allocate(f)
-                evidence.record(
-                    f,
-                    request_text=(f"GET {res.cache_key_url}\n(as "
-                                  f"{victim_name}, then anonymous)"),
-                    response_text=res.notes)
-                findings.append(f)
-                log.info("cache: %s", res.notes)
-            elif res.verdict == "tested_negative":
-                coverage.record("cache", "tested_negative",
-                                f"{ep.normalized_url}: {res.notes}")
-            else:
-                coverage.record("cache", "inconclusive",
-                                f"{ep.normalized_url}: {res.notes}")
-        return findings
-
-    # ── AUTHZ MATRIX: harvest → swap → per-method sweep (#1–2) ──────
     def _authz_matrix_probe(self, endpoints: List[Endpoint],
                             evidence: EvidenceStore, metrics: Metrics,
                             budgets: BudgetTracker,
@@ -2218,7 +1321,7 @@ class Orchestrator:
                              max(0, len(identities) - 1))
         graphql_replays = (len(targets) * cfg_a.max_ids_per_endpoint *
                            max(0, len(identities) - 1))
-        if not self._reserve_or_block(
+        if not reserve_or_block(
                 budgets, coverage, "authz",
                 plan_authz_matrix(len(targets), len(identities),
                                   len(cfg_a.methods),
@@ -3078,7 +2181,7 @@ class Orchestrator:
         log.info("second-order: %d forms × %d renders as %s",
                  len(forms), len(renders),
                  [i.name for i in injectors[:1]])
-        if not self._reserve_or_block(
+        if not reserve_or_block(
                 budgets, coverage, "second_order",
                 plan_second_order(len(forms), len(renders))):
             return []
@@ -3220,7 +2323,7 @@ class Orchestrator:
             trigger_scores.items(), key=lambda row: (-row[1][0], row[0]))
             [:trigger_cap]]
         plan = plan_second_order_ssrf(len(sinks), len(triggers))
-        if not self._reserve_or_block(
+        if not reserve_or_block(
                 budgets, coverage, "second_order_ssrf", plan):
             return []
 
@@ -3431,7 +2534,7 @@ class Orchestrator:
                         + "\n".join(f"GET {url}" for url in
                                    item["trigger_urls"])),
                     response_text="\n".join(
-                        _interaction_line(it) for it in matched[:10]))
+                        interaction_line(it) for it in matched[:10]))
                 findings.append(f)
             else:
                 coverage.record(
@@ -3470,7 +2573,7 @@ class Orchestrator:
         tester = BusinessLogicTester(self.cfg, client)
         log.info("business-logic: %d endpoints as %s",
                  len(scored), aname)
-        if not self._reserve_or_block(
+        if not reserve_or_block(
                 budgets, coverage, "business_logic",
                 plan_business(len(scored), cfg_b.max_params)):
             return []
@@ -3805,7 +2908,7 @@ class Orchestrator:
             return []
         log.info("race: %d endpoints ×%d/%d as %s", len(targets),
                  cfg_r.concurrency, cfg_r.rounds, aname)
-        if not self._reserve_or_block(
+        if not reserve_or_block(
                 budgets, coverage, "race",
                 plan_race(len(targets), cfg_r.concurrency,
                           cfg_r.rounds)):
@@ -4008,136 +3111,6 @@ class Orchestrator:
                  "confirmed out-of-band")
         return None
 
-    def _oast_sweep(self, endpoints: List[Endpoint],
-                    provider: InteractshProvider,
-                    evidence: EvidenceStore, metrics: Metrics,
-                    client, out_dir: Path,
-                    budgets: BudgetTracker,
-                    coverage: CoverageTracker) -> List[Finding]:
-        ranked_targets = []
-        for endpoint in endpoints:
-            if (endpoint.endpoint_type == "static" or
-                    not self.scope.active_test_allowed(endpoint.url)):
-                continue
-            parameters = (list(endpoint.query_parameters) +
-                          list(endpoint.body_parameters) +
-                          list(endpoint.header_parameters))
-            candidates = ssrf_candidates(parameters, endpoint)
-            if not candidates:
-                continue
-            field_score = max(ssrf_candidate_score(p, endpoint)[0]
-                              for p in candidates)
-            route_bonus = int(endpoint.endpoint_type in
-                              _OAST_PRIORITY_TYPES)
-            ranked_targets.append((field_score + route_bonus, endpoint))
-        ranked_targets.sort(key=lambda row: (-row[0], row[1].url))
-        targets = [endpoint for _, endpoint in ranked_targets][:
-                   self.cfg.oast.max_endpoints]
-        if not targets:
-            log.info("oast: no SSRF-suspect endpoints discovered — "
-                     "nothing to sweep")
-            return []
-        log.info("oast: sweeping %d SSRF-suspect endpoints",
-                 len(targets))
-        if not self._reserve_or_block(
-                budgets, coverage, "ssrf",
-                plan_oast(len(targets),
-                          self.cfg.oast.max_params_per_endpoint)):
-            return []
-        findings: List[Finding] = []
-        for ep in targets:
-            if self._halted():
-                log.info("oast: halted by stop control; "
-                         "remaining targets stay untested")
-                break
-            if not budgets.consume_test(
-                    "ssrf", ep.normalized_url,
-                    limit=self.cfg.oast.max_endpoints):
-                coverage.record("ssrf", "blocked",
-                                f"budget: {ep.normalized_url}")
-                continue
-            try:
-                res = probe_endpoint(
-                    client, ep, provider,
-                    poll_timeout=self.cfg.oast.poll_timeout,
-                    poll_interval=self.cfg.oast.poll_interval,
-                    max_params=self.cfg.oast.max_params_per_endpoint)
-            except BudgetExceeded:
-                coverage.record("ssrf", "blocked",
-                                f"budget: {ep.normalized_url}")
-                continue
-            metrics.oast_endpoints_probed += 1
-            if res is None or not res.confirmed:
-                detail = (res.notes if res else "no probe was sent")
-                coverage.record(
-                    "ssrf", "inconclusive",
-                    f"{ep.normalized_url}: no correlated callback; {detail}")
-                continue
-            metrics.oast_confirmed += 1
-            self._note_candidate()
-            coverage.record("ssrf", "confirmed",
-                            f"OAST callback on '{res.parameter}'")
-            bypass_suffix = (f" through parser-bypass variant "
-                             f"({res.bypass_kind})" if res.bypass_kind
-                             else "")
-            reflects_note = (" The target response reflects the callback "
-                             "token (possible full-read: confirm manually; "
-                             "callback-grade proof, not data access)."
-                             if res.response_reflects_token else "")
-            f = Finding(
-                id=stable_finding_id("oast", ep.normalized_url),
-                source="oast-sweep",
-                name=(f"Blind SSRF confirmed via OAST on "
-                      f"'{res.parameter}' ({ep.path})"),
-                severity="medium",
-                confidence=Confidence.CONFIRMED.value,
-                validation_status=ValidationStatus.CONFIRMED.value,
-                host=ep.host,
-                matched_at=ep.url,
-                endpoint_url=ep.url,
-                method=ep.method,
-                parameter=res.parameter,
-                description=(
-                    "The server fetched our unique out-of-band Interactsh "
-                    f"callback on parameter '{res.parameter}' "
-                    f"using {res.payload}.{bypass_suffix}{reflects_note}"),
-                tags=["ssrf", "oast", ep.endpoint_type]
-                + (["ssrf-bypass"] if res.bypass_kind else [])
-                + (["ssrf-reflects-token"]
-                   if res.response_reflects_token else []),
-                raw={"interactions": res.interactions[:10],
-                     "callback_host": res.callback_host,
-                     "request_method": res.request_method,
-                     "request_url": res.request_url,
-                     "parameter_location": res.parameter_location,
-                     "response_status": res.response_status,
-                     "response_length": res.response_length,
-                     "response_time_ms": res.response_time_ms,
-                     "bypass_kind": res.bypass_kind,
-                     "response_reflects_token":
-                         res.response_reflects_token},
-                false_positive_notes=(
-                    "Confirmed via unique out-of-band Interactsh "
-                    "callback (DNS/HTTP/SMTP), not response shape. "
-                    "Unique callback host per request eliminates cross-probe "
-                    "correlation."
-                    + (" A reflected token is a full-read signal, not "
-                       "proof of internal data access."
-                       if res.response_reflects_token else "")),
-                identity="anonymous",
-            )
-            evidence.allocate(f)
-            evidence.record(
-                f,
-                request_text=(f"{res.request_method} {res.request_url}\n"
-                              f"{res.parameter_location}::{res.parameter}="
-                              f"{res.payload or ''}"),
-                response_text="\n".join(
-                    _interaction_line(i) for i in res.interactions[:10]))
-            findings.append(f)
-            log.info("oast: CONFIRMED SSRF on %s param=%s",
-                     ep.url, res.parameter)
-        return findings
 
     # ── AI LOOP CLOSURE (spec §8) ──────────────────────────────────────
     def _plan_js_chunks(self, planner: AIPlanner, out_dir: Path
@@ -4459,35 +3432,4 @@ class Orchestrator:
                 if l.strip()]
 
 
-def _interaction_line(i: Dict) -> str:
-    proto = i.get("proto") or i.get("type", "?")
-    return f"[{proto}] " + " ".join(str(v)[:120] for v in i.values()
-                                    if isinstance(v, str))[:240]
-
-
-def _classify_finding(f: Finding) -> str:
-    name = (f.name or "").lower() + " " + (f.template_id or "").lower()
-    if "sqli" in name or "sql" in name:
-        return "sqli"
-    if "xss" in name:
-        return "xss"
-    if "ssrf" in name:
-        return "ssrf"
-    if "ssti" in name or "server-side template" in name or \
-            "server side template" in name:
-        return "ssti"
-    if "xxe" in name or "xml external entity" in name:
-        return "xxe"
-    if ("traversal" in name or "lfi" in name
-            or "file inclusion" in name):
-        return "path_traversal"
-    if "redirect" in name:
-        return "open_redirect"
-    if "idor" in name or "bola" in name:
-        return "idor"
-    return "unknown"
-
-
-# Backward-compatible alias: tests and external code import
-# _HTTPClient from main.orchestrator.
 _HTTPClient = HTTPClient

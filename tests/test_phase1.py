@@ -506,6 +506,7 @@ def test_apply_plugin_result_mappings(tmp_path):
     orch, out = _orch()
     from main.validation.evidence import EvidenceStore
     from main.models import TestResult
+    from main.stages.validation.plugins import apply_plugin_result
     ev = EvidenceStore(out / "proofs")
     cov = CoverageTracker()
 
@@ -519,7 +520,7 @@ def test_apply_plugin_result_mappings(tmp_path):
 
     f = Finding(id="1", source="nuclei",
                 matched_at="https://a.com/?id=1")
-    orch._apply_plugin_result(
+    apply_plugin_result(
         f, Heavy(),
         TestResult(status="confirmed", evidence={"k": "v"},
                    observations=["o"]),
@@ -530,7 +531,7 @@ def test_apply_plugin_result_mappings(tmp_path):
 
     f2 = Finding(id="2", source="nuclei",
                  matched_at="https://a.com/?q=1")
-    orch._apply_plugin_result(
+    apply_plugin_result(
         f2, Pre(),
         TestResult(status="candidate", evidence={"p": 1},
                    observations=["note"]),
@@ -540,7 +541,7 @@ def test_apply_plugin_result_mappings(tmp_path):
     assert f2.raw == {"evidence": {"p": 1}}
 
     f3 = Finding(id="3", source="nuclei", matched_at="https://a.com/")
-    orch._apply_plugin_result(
+    apply_plugin_result(
         f3, Heavy(), TestResult(status="negative"), ev, "ssrf", cov)
     assert f3.validation_status == "false_positive"
     assert cov.summary()["ssrf"] == "tested_negative"
@@ -548,6 +549,7 @@ def test_apply_plugin_result_mappings(tmp_path):
 
 def test_apply_plugin_results_aggregates_and_retains_each_tool(tmp_path):
     from main.validation.evidence import EvidenceStore
+    from main.stages.validation.plugins import apply_plugin_results
     orch, out = _orch()
     evidence = EvidenceStore(out / "proofs")
     coverage = CoverageTracker()
@@ -563,7 +565,7 @@ def test_apply_plugin_results_aggregates_and_retains_each_tool(tmp_path):
     candidate = Finding(id="agg-1", source="nuclei",
                         matched_at="https://a.com/?id=1",
                         raw={"template": "kept"})
-    orch._apply_plugin_results(
+    apply_plugin_results(
         candidate,
         [(Pre(), TestResult(status="candidate", evidence={"marker": "sql"},
                             observations=["candidate signal"])),
@@ -582,7 +584,7 @@ def test_apply_plugin_results_aggregates_and_retains_each_tool(tmp_path):
     conflict = Finding(id="agg-2", source="nuclei",
                        matched_at="https://a.com/?id=2")
     conflict_coverage = CoverageTracker()
-    orch._apply_plugin_results(
+    apply_plugin_results(
         conflict,
         [(Pre(), TestResult(status="candidate")),
          (Heavy(), TestResult(status="negative"))],
@@ -592,15 +594,16 @@ def test_apply_plugin_results_aggregates_and_retains_each_tool(tmp_path):
 
 
 def test_finding_endpoint_lookup():
+    from main.stages.validation.plugins import finding_endpoint
     orch, _ = _orch()
     eps = [_ep("https://a.com/api/u?id=1", ["id"])]
     by_norm = {e.normalized_url: e for e in eps}
     f = Finding(id="1", source="n",
                 matched_at="https://a.com/api/u?id=1&x=2")
     # different query order/extra param → no normalized match
-    assert orch._finding_endpoint(f, by_norm) is None
+    assert finding_endpoint(f, by_norm) is None
     f.matched_at = "https://a.com/api/u?id=1"
-    assert orch._finding_endpoint(f, by_norm) is not None
+    assert finding_endpoint(f, by_norm) is not None
 
 
 def test_differential_probe_records_negative_and_blocked():
@@ -630,8 +633,11 @@ def test_differential_probe_records_negative_and_blocked():
     budgets = BudgetTracker(cfg)
     cov = CoverageTracker()
     ev = EvidenceStore(out / "proofs")
-    found = orch._differential_probe(eps, DifferentialTester(cfg, Calm()),
-                                     ev, m, budgets, cov)
+    from main.stages.validation import ProbeControls
+    from main.stages.validation.differential import differential_probe
+    found = differential_probe(eps, DifferentialTester(cfg, Calm()),
+                               ev, m, budgets, cov, orch.cfg, orch.scope,
+                               ProbeControls.from_orchestrator(orch))
     assert found == []
     assert cov.summary()["authz"] == "tested_negative"
     assert m.authorization_tests == 1 and m.authorization_confirmed == 0
@@ -641,9 +647,10 @@ def test_differential_probe_records_negative_and_blocked():
     cfg2.budgets.authz_tests_per_endpoint = 0
     orch2 = Orchestrator(cfg2, out, profile=get_profile("standard"))
     cov2 = CoverageTracker()
-    found2 = orch2._differential_probe(
+    found2 = differential_probe(
         eps, DifferentialTester(cfg2, Calm()), ev, Metrics(),
-        BudgetTracker(cfg2), cov2)
+        BudgetTracker(cfg2), cov2, orch2.cfg, orch2.scope,
+        ProbeControls.from_orchestrator(orch2))
     assert found2 == [] and cov2.summary()["authz"] == "blocked"
 
 
