@@ -36,6 +36,7 @@ class Metrics:
     graph_edges: int = 0
     workflows_discovered: int = 0
     workflows_discovered: int = 0
+    attack_chains_built: int = 0
     takeover_confirmed: int = 0
     hypotheses_validated: int = 0
     waf_detected: str = ""

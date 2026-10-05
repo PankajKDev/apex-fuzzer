@@ -117,10 +117,16 @@ class SessionManager:
 
     def save(self, session: BrowserSession, path: Optional[Path] = None
              ) -> Path:
+        import os
+        from ..scope import slug_filename
         dest = Path(path) if path else \
-            (self.state_dir / f"{session.identity}.json")
+            (self.state_dir / f"{slug_filename(session.identity)}.json")
         dest.parent.mkdir(parents=True, exist_ok=True)
         dest.write_text(json.dumps(session.to_dict(), indent=2))
+        try:
+            os.chmod(dest, 0o600)
+        except OSError:
+            pass
         return dest
 
     def load(self, path: str | Path) -> BrowserSession:

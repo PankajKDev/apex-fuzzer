@@ -16,7 +16,7 @@ import time
 from pathlib import Path
 from typing import List, Optional
 from .config import Config
-from .scope import Scope, target_hostname
+from .scope import Scope, slug_host, target_hostname
 from .profiles import Profile, get as get_profile
 from .models import (Finding, Hypothesis, write_jsonl, read_jsonl)
 from .logging_setup import get_logger, attach_file_handler
@@ -24,6 +24,7 @@ from .shell import AdaptiveRateLimiter
 from .budgets import BudgetTracker
 from .checkpoints import Checkpoint
 from .http import HTTPClient
+from .chains.builder import build_attack_chains
 from .stages.recon import (harvest_api_specs, harvest_robots, merge_recon,
                            run_recon)
 from .stages.mapping import build_app_state, map_attack_surface
@@ -87,8 +88,8 @@ class Orchestrator:
 
     # =====================================================================
     def _run_one(self, target: str, resume: bool):
-        host = (target.replace("http://", "")
-                .replace("https://", "").split("/")[0])
+        host = slug_host((target.replace("http://", "")
+                          .replace("https://", "").split("/")[0]))
         out_dir = self.base_output / host
         out_dir.mkdir(parents=True, exist_ok=True)
         attach_file_handler(log, out_dir / "scan.log")
@@ -332,6 +333,11 @@ class Orchestrator:
         # Pure ranking over collected artifacts: zero network. Leads
         # mode exists for this output; every other profile gets it as
         # a free work list alongside findings.
+        # ── 9c. ATTACK CHAINS (agent Phase 19, offline) ─────────────
+        # Deterministic finding→capability→impact hypotheses (ATO
+        # first). Zero network, always runs; chains hypothesize,
+        # never confirm, and never alter finding counts.
+        build_attack_chains(out_dir, findings, metrics)
         # ── 10. REPORT ──────────────────────────────────────────────────
         render_report(out_dir, target, host, started, findings,
                       hypotheses, metrics, coverage, budgets, ck,
@@ -408,8 +414,8 @@ class Orchestrator:
 
     def dry_run(self, target: str) -> dict:
         """Zero-network plan: modules, authorization, costs, exclusions."""
-        host = (target.replace("http://", "")
-                .replace("https://", "").split("/")[0])
+        host = slug_host((target.replace("http://", "")
+                          .replace("https://", "").split("/")[0]))
         out_dir = self.base_output / host
         plan = dry_run_plan(target, self.cfg, self.profile, out_dir)
         try:
@@ -446,7 +452,7 @@ class Orchestrator:
 
 
 
-    def _read_lines(p: Path) -> List[str]:
+    def _read_lines(self, p: Path) -> List[str]:
         if not p.exists():
             return []
         return [l.strip() for l in p.read_text(errors="ignore").splitlines()

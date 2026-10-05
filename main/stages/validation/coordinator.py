@@ -30,12 +30,13 @@ from .business import business_logic_probe
 from .cache import cache_probe
 from .differential import differential_probe
 from .identity import (jwt_confusion_probe, mfa_transition_probe,
-                        oauth_probe)
+                        oauth_probe, otp_bypass_probe, reset_probe)
 from .introspection import graphql_introspection_probe
-from .misconfig import header_probe, misconfig_probe
+from .misconfig import (header_probe, hpp_probe,
+                         info_disclosure_probe, misconfig_probe)
 from .oast import maybe_register_oast, oast_sweep
 from .plugins import apply_plugin_results, finding_endpoint
-from .prescreen import prescreen_sweep
+from .prescreen import deser_probe, prescreen_sweep
 from .race import race_probe
 from .second_order import (blind_xss_probe, second_order_probe,
                              second_order_ssrf_probe)
@@ -89,6 +90,18 @@ def run_validation(findings: List[Finding],
             endpoints, evidence, metrics, budgets, coverage, client,
             cfg, scope, controls)
         out += header_probe(
+            endpoints, evidence, metrics, budgets, coverage, client,
+            cfg, scope, controls)
+        out += info_disclosure_probe(
+            endpoints, evidence, metrics, budgets, coverage, client,
+            cfg, scope, controls)
+        out += hpp_probe(
+            endpoints, evidence, metrics, budgets, coverage, client,
+            cfg, scope, controls)
+        out += reset_probe(
+            endpoints, evidence, metrics, budgets, coverage, client,
+            cfg, scope, controls)
+        out += otp_bypass_probe(
             endpoints, evidence, metrics, budgets, coverage, client,
             cfg, scope, controls)
 
@@ -238,6 +251,9 @@ def run_validation(findings: List[Finding],
                 endpoints, findings, evidence, metrics, budgets,
                 coverage, client, cfg, scope, controls,
                 active_waf, reviews)
+            findings += deser_probe(
+                endpoints, evidence, metrics, budgets,
+                coverage, client, cfg, scope, controls)
 
         # 3) per-finding plugins (§48: registry + TestResult)
         test_ctx = TestContext(

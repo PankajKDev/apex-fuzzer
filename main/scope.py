@@ -17,6 +17,30 @@ def target_hostname(target: str) -> str:
         return ""
 
 
+def slug_host(host: str) -> str:
+    """Make operator/recon-derived host text safe as one path part.
+
+    Dots, colons (host:port), dashes, and underscores survive so
+    output dirs stay readable; everything else becomes ``_``.
+    Exact ``.``/``..`` (directory escape) and empties fall back to
+    ``target``. Always apply before joining an output root.
+    """
+    import re
+    text = re.sub(r"[^A-Za-z0-9.\-_:]", "_", (host or "").strip())
+    if text in ("", ".", ".."):
+        return "target"
+    return text[:255]
+
+
+def slug_filename(name: str) -> str:
+    """Make config-derived names safe as one filename part."""
+    import re
+    text = re.sub(r"[^A-Za-z0-9.\-_]", "_", (name or "").strip())
+    if text in ("", ".", ".."):
+        return "unnamed"
+    return text[:64]
+
+
 class Scope:
     def __init__(self, cfg: ScopeConfig):
         self.cfg = cfg

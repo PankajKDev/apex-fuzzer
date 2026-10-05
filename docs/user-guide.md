@@ -275,6 +275,12 @@ Validation runs only in validation-enabled scans, in this order:
    forms without token fields (CSRF exposure). Parameterized
    endpoints also get Host-override (redirect impact only) and
    CRLF marker checks; bare reflection never upgrades.
+   Version banners (`Server` with versions, `X-Powered-By`,
+   debug headers) and 404-handler stack traces / SQL errors are
+   informational info-disclosure candidates; response bodies are
+   never persisted. Duplicated query parameters get an HPP check
+   (baseline vs duplicate vs repeat-value control; echo-only
+   differences are not candidates).
    Informational candidates only; protected pages record genuine
    negatives.
 3. **Differential testing** — same endpoint under each identity;
@@ -297,13 +303,34 @@ Validation runs only in validation-enabled scans, in this order:
 4. **MFA transitions** — needs one `mfa_pending` context: a pre-MFA
    session seeing the same protected object as a post-MFA session is
    a session-issuance flaw; a denied pre-session is healthy.
+   **Password-reset flows** need one `auth.login.identities`
+   username (test account; nothing is sent without it): the same
+   reset request with a known vs unknown identifier is an
+   enumeration oracle when responses differ beyond input echo;
+   a reset link or redirect honouring an attacker `Host` is a
+   poisoning candidate (nothing is redeemed or followed).
+   **OTP bypass** needs `--ack-state-change` (attempts count
+   against lockout counters): one wrong-code baseline, then
+   empty-code and omitted-code probes; acceptance against a
+   clear rejection is a candidate, anything mixed stays
+   inconclusive.
 5. **Authz matrix** — harvest object IDs per identity, swap them
    cross-identity (GET reads), sweep HTTP methods per identity
    (BFLA), replay GraphQL query operations with victim variables.
    Optional **write replay** (`authorization.write_replay` plus
    `--ack-state-change`, test accounts only): the attacker's own
    observed mutating request with the victim ID, confirmed only by
-   owner readback showing persisted values.
+   owner readback showing persisted values. The same opt-in proves
+   **BFLA cells** on POST/PUT/PATCH (max 2 per endpoint): the
+   lower-privilege identity's observed shape is replayed verbatim
+   and only newly-persisted values, read back as a more-privileged
+   identity, confirm (`verified-effect`); denied or unproven replays
+   leave the sweep candidate standing. The same opt-in also tests
+   **mass assignment**: `role` / `is_admin` are added to the
+   tester's own observed shape (inert `apex-mass-probe` value) and
+   the tester's own object is read back — persistence proves the
+   binder accepted the field and stays candidate (impact needs a
+   human); completed 4xx denials are genuine negatives.
 6. **OAST sweep** — URL-like params get per-request Interactsh
    callbacks (HTTP + HTTPS). A correlated callback confirms a
    server-side fetch. When direct callbacks miss, bounded
@@ -318,6 +345,10 @@ Validation runs only in validation-enabled scans, in this order:
    paired-arithmetic SSTI, nonce-correlated XXE on retained XML,
    marker-file traversal. Each tool's result is kept; conflicting
    positive/negative signals resolve to inconclusive.
+   A **deserialization error oracle** (needs `--ack-state-change`)
+   sends scalar-control plus array/object type-confusion JSON to
+   JSON body params: deserializer exception text with a clean
+   control is a candidate (gadget reachability stays unproven).
 8. **Lead-independent prescreen sweep** — endpoint parameters go
    through the SQLi/XSS/CMDi prescreens even with no Nuclei lead; hits
    re-enter the plugin loop for tool confirmation (CMDi stays
@@ -369,7 +400,11 @@ run with its scope denials and endpoint inventory; `changes.json`
 diffs the inventory against the previous finished run (new/changed/
 gone — retest those first). `soft404.json` holds the not-found
 baseline: on template-serving hosts, treat unmatched inventory as
-suspect until a human confirms. Ask for any finding's full
+suspect until a human confirms. `attack_chains.jsonl` holds
+deterministic finding→capability→impact hypotheses (account
+takeover first), rendered as Attack Chains in the report: every
+chain is hypothesized, never confirmed, with the missing links to
+verify by hand. Ask for any finding's full
 story with `apex-fuzzer --explain FINDING-ID` (searches `--output`,
 zero network): status, signals, FP checks, review marks, and the
 human checklist.

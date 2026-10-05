@@ -3,6 +3,7 @@ import os
 import re
 import tempfile
 from .base import Validator, Candidate, ValidationOutcome
+from ..budgets import BudgetExceeded
 from ..shell import run, which, redact
 from ..models import ValidationStatus, Confidence
 
@@ -129,8 +130,15 @@ class SqliValidator(Validator):
                 evidence={},
                 notes="sqlmap skipped: no candidate parameter was identified")
 
-        out_dir = getattr(candidate.finding, "evidence_dir", None) or \
-            "/tmp/sqlmap"
+        out_dir = getattr(candidate.finding, "evidence_dir", None)
+        tmp_output = None
+        if out_dir is None:
+            import tempfile
+            # Private per-run directory (0700): never the shared
+            # /tmp/sqlmap path (symlink race between local users).
+            tmp_output = tempfile.TemporaryDirectory(
+                prefix="apex-sqlmap-")
+            out_dir = tmp_output.name
         # Boolean + error + UNION by default; time-based joins only under
         # explicit opt-in (delay payloads hold DB connections open).
         # Stacked queries stay excluded (possible writes).
@@ -162,8 +170,15 @@ class SqliValidator(Validator):
             return _inconclusive(
                 "sqlmap skipped: shared request budget exhausted before "
                 "external validation")
-        r = run(args, timeout=180)
+        try:
+            r = run(args, timeout=180)
+        except BudgetExceeded:
+            if tmp_output is not None:
+                tmp_output.cleanup()
+            raise
         log_text = redact((r.stdout or "") + (r.stderr or ""))
+        if tmp_output is not None:
+            tmp_output.cleanup()
         if _sqlmap_success(log_text):
             return ValidationOutcome(
                 status=ValidationStatus.CONFIRMED.value,

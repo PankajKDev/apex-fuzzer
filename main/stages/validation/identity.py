@@ -9,7 +9,8 @@ from ...models import (Confidence, Endpoint, Finding, ValidationStatus,
 from ...reporting.coverage import CoverageTracker
 from ...validation.evidence import EvidenceStore
 from ...reporting.metrics import Metrics
-from ...safety.preflight import plan_differential, plan_jwt
+from ...safety.preflight import (plan_differential, plan_jwt,
+                                  plan_otp, plan_reset)
 from ...validation.differential import PRIVILEGED_TYPES, has_idor_params
 from . import ProbeControls, reserve_or_block
 
@@ -397,4 +398,235 @@ def jwt_confusion_probe(endpoints: List[Endpoint],
             else:
                 coverage.record("jwt", "inconclusive",
                                 f"{ep.normalized_url}: {res.notes}")
+    return findings
+
+
+_MAX_RESET_ENDPOINTS = 10
+
+
+def reset_probe(endpoints: List[Endpoint],
+                evidence: EvidenceStore, metrics: Metrics,
+                budgets: BudgetTracker,
+                coverage: CoverageTracker, client, cfg, scope,
+                controls: ProbeControls) -> List[Finding]:
+    """Password-reset enumeration + reset-link poisoning checks.
+
+    Test identifiers come from ``auth.login.identities`` usernames
+    only — without an operator-supplied account the flow stays
+    untestable and nothing is sent.
+    """
+    from ...validation.reset_flow import (
+        check_reset_enumeration, check_reset_host_poison,
+        identifier_param_for, reset_targets)
+    identifiers = [str(getattr(i, "username", "") or "").strip()
+                   for i in
+                   getattr(getattr(cfg.auth, "login", None),
+                           "identities", None) or []]
+    identifiers = [i for i in identifiers if i]
+    if not identifiers:
+        log.info("reset: no auth.login.identities usernames "
+                 "configured — skipping (test account required)")
+        coverage.record("auth", "untestable",
+                        "no login usernames configured")
+        return []
+    targets = [e for e in reset_targets(endpoints or [])
+               if scope.active_test_allowed(e.url)][: _MAX_RESET_ENDPOINTS]
+    if not targets:
+        log.info("reset: no in-scope reset-path endpoints — "
+                 "nothing to check")
+        return []
+    if not reserve_or_block(
+            budgets, coverage, "auth",
+            plan_reset(len(targets))):
+        return []
+    findings: List[Finding] = []
+    valid = identifiers[0]
+    for ep in targets:
+        if controls.halted():
+            log.info("reset: halted by stop control")
+            break
+        param = identifier_param_for(ep)
+        if param is None:
+            coverage.record("auth", "untestable",
+                            f"{ep.normalized_url}: no identifier field")
+            continue
+        if not budgets.consume_test("auth", ep.normalized_url,
+                                    limit=3):
+            coverage.record("auth", "blocked",
+                            f"budget: {ep.normalized_url}")
+            continue
+        try:
+            enum = check_reset_enumeration(
+                client, ep.url, param, valid,
+                timeout=cfg.scan.http_timeout)
+            poison = check_reset_host_poison(
+                client, ep.url, param, valid,
+                timeout=cfg.scan.http_timeout)
+        except BudgetExceeded:
+            coverage.record("auth", "blocked",
+                            f"budget: {ep.normalized_url}")
+            continue
+        for res, source, title, fp in (
+                (enum, "reset-enum",
+                 "Password-reset user enumeration",
+                 "Differential responses can also come from "
+                 "anti-automation or rate-limit pages reflecting "
+                 "input length. Confirm the oracle repeats with "
+                 "fresh unknown identifiers before reporting."),
+                (poison, "reset-poison",
+                 "Password-reset link poisoning",
+                 "A reflected host proves server-side trust, not "
+                 "delivery. Confirm the poisoned link is actually "
+                 "mailed (test inbox) before reporting.")):
+            if res.verdict == "candidate":
+                controls.noted()
+                coverage.record("auth", "candidate",
+                                f"{ep.normalized_url}::{param}: "
+                                f"{res.notes}")
+                f = Finding(
+                    id=stable_finding_id("reset", source,
+                                         ep.normalized_url, param),
+                    source=source,
+                    name=f"{title} ({ep.path})",
+                    severity="medium",
+                    confidence=Confidence.PROBABLE.value,
+                    validation_status=ValidationStatus.
+                    STRONG_CANDIDATE.value,
+                    host=ep.host, matched_at=ep.url,
+                    endpoint_url=ep.url, method="POST",
+                    parameter=param,
+                    description=res.notes,
+                    tags=["auth", "password-reset",
+                          ep.endpoint_type],
+                    raw={source: res.to_dict()},
+                    false_positive_notes=(
+                        f"{res.notes}. {fp}"),
+                    identity="tester",
+                )
+                evidence.allocate(f)
+                evidence.record(
+                    f,
+                    request_text=(f"POST {ep.url}\n"
+                                  f"(identifier field: {param}; "
+                                  f"value withheld)"),
+                    response_text=res.notes)
+                findings.append(f)
+                log.info("reset: %s on %s", source, ep.url)
+            elif res.verdict == "negative":
+                coverage.record("auth", "tested_negative",
+                                f"{ep.normalized_url}::{param}: "
+                                f"{res.notes}")
+            else:
+                coverage.record("auth", "inconclusive",
+                                f"{ep.normalized_url}::{param}: "
+                                f"{res.notes}")
+    return findings
+
+
+_MAX_OTP_ENDPOINTS = 10
+
+
+def otp_bypass_probe(endpoints: List[Endpoint],
+                     evidence: EvidenceStore, metrics: Metrics,
+                     budgets: BudgetTracker,
+                     coverage: CoverageTracker, client, cfg, scope,
+                     controls: ProbeControls) -> List[Finding]:
+    """Empty/omitted OTP code against a wrong-code baseline.
+
+    Attempts count against lockout counters, so this probe runs only
+    behind ``safety.allow_state_change`` (``--ack-state-change``)
+    with test accounts. At most 3 single attempts per endpoint —
+    never a brute-force sweep.
+    """
+    from ...validation.otp_bypass import (
+        check_otp_bypass, code_param_for, otp_targets)
+    if not getattr(getattr(cfg, "safety", None),
+                   "allow_state_change", False):
+        log.info("otp: needs --ack-state-change (attempts count "
+                 "against lockout counters) — skipping")
+        return []
+    targets = [e for e in otp_targets(endpoints or [])
+               if scope.active_test_allowed(e.url)][: _MAX_OTP_ENDPOINTS]
+    if not targets:
+        log.info("otp: no in-scope OTP-path endpoints — "
+                 "nothing to check")
+        return []
+    if not reserve_or_block(
+            budgets, coverage, "auth",
+            plan_otp(len(targets))):
+        return []
+    findings: List[Finding] = []
+    for ep in targets:
+        if controls.halted():
+            log.info("otp: halted by stop control")
+            break
+        param = code_param_for(ep)
+        if param is None:
+            coverage.record("auth", "untestable",
+                            f"{ep.normalized_url}: no code field")
+            continue
+        if not budgets.consume_test("auth", ep.normalized_url,
+                                    limit=3):
+            coverage.record("auth", "blocked",
+                            f"budget: {ep.normalized_url}")
+            continue
+        try:
+            results = check_otp_bypass(
+                client, ep.url, param,
+                timeout=cfg.scan.http_timeout)
+        except BudgetExceeded:
+            coverage.record("auth", "blocked",
+                            f"budget: {ep.normalized_url}")
+            continue
+        for res in results:
+            if res.verdict == "candidate":
+                controls.noted()
+                coverage.record("auth", "candidate",
+                                f"{ep.normalized_url}::{param}: "
+                                f"{res.notes}")
+                f = Finding(
+                    id=stable_finding_id("otp", res.check,
+                                         ep.normalized_url, param),
+                    source="otp-bypass",
+                    name=(f"OTP verification bypass ({res.check}) "
+                          f"({ep.path})"),
+                    severity="medium",
+                    confidence=Confidence.PROBABLE.value,
+                    validation_status=ValidationStatus.
+                    STRONG_CANDIDATE.value,
+                    host=ep.host, matched_at=ep.url,
+                    endpoint_url=ep.url, method="POST",
+                    parameter=param,
+                    description=res.notes,
+                    tags=["auth", "otp", "mfa-bypass",
+                          ep.endpoint_type],
+                    raw={"otp": res.to_dict()},
+                    false_positive_notes=(
+                        f"{res.notes}. Acceptance is judged by "
+                        f"success language in the response — rule out "
+                        f"generic 200 pages and shared templates, "
+                        f"confirm with a second test account, and "
+                        f"re-test under a real pre-OTP session "
+                        f"(this probe runs anonymous). Attempts "
+                        f"count against lockout counters: use test "
+                        f"accounts only."),
+                    identity="tester",
+                )
+                evidence.allocate(f)
+                evidence.record(
+                    f,
+                    request_text=(f"POST {ep.url}\n"
+                                  f"(code field: {param}; "
+                                  f"value withheld)"),
+                    response_text=res.notes)
+                findings.append(f)
+                log.info("otp: %s on %s", res.check, ep.url)
+            elif res.verdict == "negative":
+                coverage.record("auth", "tested_negative",
+                                f"{ep.normalized_url}::{param}: "
+                                f"{res.notes}")
+            else:
+                coverage.record("auth", "inconclusive",
+                                f"{ep.normalized_url}::{param}: "
+                                f"{res.notes}")
     return findings

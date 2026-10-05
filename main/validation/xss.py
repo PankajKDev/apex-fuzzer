@@ -118,6 +118,19 @@ class XssValidator(Validator):
                 status=ValidationStatus.INCONCLUSIVE.value,
                 confidence=Confidence.UNKNOWN.value,
                 notes="Dalfox skipped: selected parameter is absent from URL")
+        # Dalfox takes the target as a bare positional: require a
+        # plain http(s) URL with a hostname, so a flag-shaped value
+        # can never be flag-parsed. Anything else fails closed.
+        try:
+            parts = urlsplit(candidate.endpoint_url or "")
+        except ValueError:
+            parts = None
+        if parts is None or parts.scheme.lower() not in (
+                "http", "https") or not parts.hostname:
+            return ValidationOutcome(
+                status=ValidationStatus.INCONCLUSIVE.value,
+                confidence=Confidence.UNKNOWN.value,
+                notes="Dalfox skipped: target is not a plain http(s) URL")
 
         marker = "apexxss_" + secrets.token_hex(8)
         evidence_dir = getattr(candidate.finding, "evidence_dir", None)

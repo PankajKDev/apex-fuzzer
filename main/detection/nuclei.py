@@ -215,13 +215,29 @@ def generate_template_for_hypothesis(h, endpoint_url: str,
     if not endpoint_url:
         return None
     from urllib.parse import urlparse
-    host = urlparse(endpoint_url).hostname or ""
+    try:
+        parts = urlparse(endpoint_url)
+    except ValueError:
+        return None
+    # The URL is interpolated into a raw nuclei request: reject
+    # anything that is not a plain http(s) URL (CRLF/request-splitting
+    # shapes fail closed here, never reach a template).
+    if parts.scheme.lower() not in ("http", "https") or \
+            not parts.hostname or parts.username is not None or \
+            parts.password is not None:
+        return None
+    if any(c in endpoint_url for c in ("\n", "\r", "\t", " ")):
+        return None
+    host = parts.hostname or ""
     slug = hypothesis_slug(h)
     digest = hashlib.md5(
         (slug + '|' + endpoint_url).encode()).hexdigest()[:8]
     tid = f"ai-gen-{digest}"
     words = [w for w in str(getattr(h, "hypothesis", "")).split()[:5]
              if len(w) > 2][:3]
+    words = ["".join(c for c in w if c.isprintable())[:32]
+             for w in words]
+    words = [w for w in words if len(w) > 2]
     return {
         "id": tid,
         "info": {
@@ -257,6 +273,13 @@ def run_hypothesis_templates(runner: "NucleiRunner",
     """
     tdir = runner.output_dir / "ai-templates"
     tdir.mkdir(parents=True, exist_ok=True)
+    # Our scratch dir: drop stale templates so a previous (possibly
+    # hand-edited) run cannot smuggle requests into this one.
+    for stale in tdir.glob("ai-gen-*.json"):
+        try:
+            stale.unlink()
+        except OSError:
+            pass
     written: List[str] = []
     seen: set = set()
     for h in hypotheses:

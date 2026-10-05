@@ -443,11 +443,12 @@ def fail_on_triggered(output_base, targets,
     empty means the gate passes. Never raises on missing files.
     """
     import json as _json
+    from .scope import slug_host
     hits: list[str] = []
     rank = _SEVERITY_RANK.get((threshold or "").lower(), 4)
     for target in targets or []:
-        host = (str(target or "").replace("http://", "")
-                .replace("https://", "").split("/")[0])
+        host = slug_host((str(target or "").replace("http://", "")
+                          .replace("https://", "").split("/")[0]))
         path = Path(output_base or "output") / host / "findings.jsonl"
         try:
             lines = path.read_text(errors="ignore").splitlines()

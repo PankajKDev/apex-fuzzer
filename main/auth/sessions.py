@@ -178,11 +178,16 @@ class SessionStore:
         return True
 
     def save(self, path: Path):
+        import os
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(
             {"sessions": [s.to_dict() for s in self.sessions.values()]},
             indent=2))
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
 
     @classmethod
     def load(cls, path: Path,

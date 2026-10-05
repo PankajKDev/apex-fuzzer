@@ -31,10 +31,12 @@ KNOWN_CLASSES = [
     "oauth", "graphql", "websocket", "upload", "prototype_pollution",
     "request_smuggling", "cache", "host_header", "mass_assignment",
     "parameter_pollution", "method_override", "second_order",
-    "business_logic", "race", "idor", "authz", "mfa", "ssti", "xxe", "cmdi",
+    "business_logic", "race", "idor", "authz", "auth", "mfa", "ssti",
+    "xxe", "cmdi",
     "second_order_ssrf",
     "path_traversal", "open_redirect", "info_disclosure", "takeover",
     "tenant_isolation", "clickjacking", "header_injection",
+    "deserialization",
 ]
 
 _PRECEDENCE = [CONFIRMED, CANDIDATE, INCONCLUSIVE, BLOCKED,

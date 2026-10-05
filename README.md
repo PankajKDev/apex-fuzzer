@@ -693,8 +693,9 @@ Right after mapping, the orchestrator builds the incremental `Application`
 identifier parameters) and its graph skeleton (hosts, endpoints, params,
 techs, identities→roles→tenants, resources `EXPOSED_BY` endpoints). Both
 persist to disk and to checkpoint blobs, so `--resume` reloads instead of
-rebuilding. Empty `attack_chains.jsonl` is created as a stable placeholder
-for the Phase 9 chain engine.
+rebuilding. `attack_chains.jsonl` carries hypothesized
+finding→capability→impact chains (account takeover first), also
+rendered in `report.html`; chains hypothesize, never confirm.
 
 ### 5. Live probe → `live.txt`
 
@@ -803,8 +804,12 @@ Swap findings carry their invariant evaluation (`no_cross_user_read`)
 as corroboration in evidence — the swap verdict stays primary, so
 nothing is double-reported. Both baselines ship redacted
 (owner/ tester snippets in `raw.swap`). Method-level BFLA cells keep
-shape comparison (observations carry no bodies by design) with the
-shared-template warning in every FP note.
+shape comparison as the base verdict (observations carry no bodies by
+design) with the shared-template warning in every FP note; the
+`authorization.write_replay` opt-in additionally replays the
+lower-privilege identity's observed POST/PUT/PATCH shape and upgrades
+the finding to `verified-effect` only when a privileged readback shows
+newly-persisted values (proof notes land in `raw.bfla_proof`).
 
 ### Phase 7 views (same stage, no new requests)
 
@@ -993,7 +998,15 @@ they are not vulnerability outcomes and cannot map to `negative`.
 | idor-swap (same + cross-endpoint) | victim object served to another identity, same shape | — (swap proves access; impact confirmed by human) |
 | bola-write (opt-in replay) | replay accepted with victim ID echoed (200) | clean readback shows attacker's values newly persisted on victim object |
 | graphql-bola | victim variable served to another identity on the same operation, same shape | — (replay proves access; impact confirmed by human) |
-| authz-matrix BFLA | method treats roles/tenants identically (200s match) | — |
+| authz-matrix BFLA | method treats roles/tenants identically (200s match) | opt-in replay of the lower-priv identity's observed POST/PUT/PATCH shape confirms on newly-persisted readback values |
+| reset-enum | same reset request with known vs unknown identifier | responses differ beyond input echo (candidate); identical completed responses are genuine negatives |
+| reset-poison | reset request with attacker Host header | reset link or redirect honours the evil host (candidate); bare reflection never upgrades |
+| otp-bypass | wrong-code baseline, then empty/omitted code | clear acceptance against a clear rejection (candidate); mixed signals, rate limits, and errors stay inconclusive |
+| info-headers | response version banner / framework headers | versioned `Server`, `X-Powered-By`, debug headers (informational candidate) |
+| info-error | nonexistent child path (404 handler) | stack trace / debug page / SQL error text (informational candidate; bodies never persisted) |
+| hpp | baseline vs duplicated param vs repeat control | inconsistent handling beyond input echo (candidate); identical or echo-only handling is a genuine negative |
+| mass-assignment | own observed shape + `role`/`is_admin` (inert value) | probe value persists on own object (candidate, impact needs human); completed 4xx denial is a genuine negative |
+| deser-oracle | scalar control + array/object JSON type confusion | deserializer exception with clean control (candidate only; gadget reachability unproven) |
 | business-logic | abuse value accepted (echoed, 200) **and** invariant violated | clean re-read shows the mutated value persisted (`verified-effect`) |
 | stored-XSS | inert canary persists and renders unescaped in active sink | — (confirm script execution manually) |
 | race | synchronized burst all-200 with divergent object IDs | sequential idempotency re-check accepts twice with different objects |
@@ -1206,7 +1219,7 @@ Per target, `output/<host>/`:
 | `resources.json` | lifecycle-aware resource records (Phase 5) |
 | `state/snapshots.jsonl` | point-in-time behavior snapshots (Phase 3) |
 | `state/transitions.jsonl` | observed cross-run cell changes (Phase 3) |
-| `attack_chains.jsonl` | attack chains (schema only until Phase 9) |
+| `attack_chains.jsonl` | hypothesized finding→capability→impact chains (Phase 19, ATO first) |
 | `state/` | checkpoint blobs (application, graph, coverage, budgets) |
 | `proofs/finding-NNN/` | `request.txt`, `response.txt`, `metadata.json` |
 | `metrics.json` | coverage + validation counters |

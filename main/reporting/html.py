@@ -23,7 +23,8 @@ def render_html(output: Path, target: str, findings: List[Finding],
                 safety_info: Optional[Dict] = None,
                 leads: Optional[List[Dict]] = None,
                 burp: Optional[Dict] = None,
-                changes: Optional[Dict] = None) -> None:
+                changes: Optional[Dict] = None,
+                chains: Optional[List[Dict]] = None) -> None:
     min_rank = MIN_RANK.get(min_severity, 0)
     findings = [f for f in findings
                 if MIN_RANK.get(f.severity, 4) >= min_rank]
@@ -53,6 +54,7 @@ def render_html(output: Path, target: str, findings: List[Finding],
         _leads_block(leads),
         _burp_block(burp),
         _hypotheses_block(hypotheses),
+        _chains_block(chains),
         "</body></html>"]
     output.write_text("".join(parts))
 
@@ -108,6 +110,7 @@ def _metrics_block(m: Dict) -> str:
             ("Graph", f"{m.get('graph_nodes', 0)}/"
                       f"{m.get('graph_edges', 0)}"),
             ("Flows", m.get("workflows_discovered")),
+            ("Chains", m.get("attack_chains_built")),
             ("Hypotheses", m.get("hypotheses_generated")),
             ("Hyp. validated", m.get("hypotheses_validated")),
             ("Takeovers", m.get("takeover_confirmed")),
@@ -391,3 +394,27 @@ def _hypotheses_block(hypotheses: List[Dict]) -> str:
                      "<th>Status</th></tr>"
                      + "".join(row(h) for h in pending) + "</table>")
     return "".join(parts)
+
+
+def _chains_block(chains: Optional[List[Dict]]) -> str:
+    if not chains:
+        return ""
+    rows = []
+    for c in chains:
+        steps = "<br>".join(
+            f"<small>{_h.escape(s.get('kind', ''))}: "
+            f"{_h.escape(s.get('text', ''))}</small>"
+            for s in (c.get("steps", []) or []))
+        rows.append(
+            f"<tr><td>{_h.escape(c.get('name', ''))}</td>"
+            f"<td>{_h.escape(c.get('impact', ''))}</td>"
+            f"<td>{_h.escape(c.get('confidence', ''))}</td>"
+            f"<td>{steps}</td></tr>")
+    return ("<h2>Attack Chains (%d)</h2>"
+            "<p><em>Deterministic finding-to-capability-to-impact "
+            "hypotheses (account takeover first). Every chain is "
+            "<b>hypothesized</b> - never confirmed, never a finding. "
+            "Each lists the missing links to verify by hand.</em></p>"
+            "<table><tr><th>Chain</th><th>Impact</th><th>Confidence</th>"
+            "<th>Steps</th></tr>" % len(chains) + "".join(rows) +
+            "</table>")

@@ -62,9 +62,14 @@ class MfaCheckpoint:
                    created_ts=d.get("created_ts", 0.0))
 
     def save(self, path: Path) -> Path:
+        import os
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         path.write_text(json.dumps(self.to_dict(), indent=2))
+        try:
+            os.chmod(path, 0o600)
+        except OSError:
+            pass
         return path
 
 

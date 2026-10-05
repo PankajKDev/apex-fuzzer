@@ -89,6 +89,53 @@ def redact(text: str) -> str:
     return text
 
 
+# Flags whose following argv element carries a secret. Matched on the
+# flag name only (case-insensitive, dashes stripped); the value is
+# never logged, never joined into log lines, and never sent to logs.
+_SENSITIVE_FLAGS = frozenset({
+    "h", "header", "headers", "githubtoken", "herokuusername",
+    "heroku-api-key", "heroku-api-key-", "token", "cookie",
+    "authorization", "password", "passwd", "secret", "apikey",
+    "api-key",
+})
+
+
+def redact_argv(args) -> str:
+    """Join argv for logs with secret-bearing elements masked."""
+    out = []
+    mask_next = False
+    for raw in list(args or []):
+        text = str(raw)
+        if mask_next:
+            out.append("***")
+            mask_next = False
+            continue
+        flag = text.lower().lstrip("-").replace("_", "-")
+        if flag in _SENSITIVE_FLAGS or flag.endswith(
+                ("token", "secret", "password", "cookie")):
+            mask_next = True
+            out.append(text)
+            continue
+        masked = redact(text)
+        out.append(masked if masked != text else text)
+    return " ".join(out)
+
+
+# Environment variables never inherited by child processes. External
+# binaries need nothing secret from our environment (API keys travel
+# as explicit argv/config, never env), so scrubbing cannot break
+# them — it only contains a compromised tool's blast radius.
+_SECRET_ENV_HINTS = ("key", "token", "secret", "password", "passwd")
+
+
+def _scrubbed_env(env) -> dict:
+    import os
+    base = dict(env) if env is not None else dict(os.environ)
+    return {k: v for k, v in base.items()
+            if not any(hint in k.lower()
+                       for hint in _SECRET_ENV_HINTS)}
+
+
 @dataclass
 class CommandResult:
     ok: bool
@@ -104,19 +151,21 @@ def run(args: Sequence[str], *, timeout: int = 300,
         check: bool = False) -> CommandResult:
     if isinstance(args, str):
         raise TypeError("shell.run requires a list of args, not a string")
-    log.debug("exec: %s", " ".join(args))
+    log.debug("exec: %s", redact_argv(args))
     try:
         p = subprocess.run(list(args), capture_output=True, text=True,
-                           timeout=timeout, cwd=cwd, env=env, input=input_data)
+                           timeout=timeout, cwd=cwd,
+                           env=_scrubbed_env(env),
+                           input=input_data)
         if check and p.returncode != 0:
             log.warning("command failed rc=%d: %s",
-                        p.returncode, " ".join(args))
+                        p.returncode, redact_argv(args))
         return CommandResult(ok=p.returncode == 0, returncode=p.returncode,
                              stdout=p.stdout or "",
                              stderr=redact(p.stderr or ""))
     except subprocess.TimeoutExpired:
         log.warning("command timed out after %ds: %s",
-                    timeout, " ".join(args))
+                    timeout, redact_argv(args))
         return CommandResult(ok=False, returncode=-1, timed_out=True)
     except FileNotFoundError as e:
         log.error("tool not found: %s", e)

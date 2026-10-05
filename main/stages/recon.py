@@ -217,7 +217,33 @@ def harvest_api_specs(client, base_url: str, endpoints: List[Endpoint],
                 continue
             from ..discovery.url_normalizer import normalize_url
             n = normalize_url(full)
-            if any(e.normalized_url == n for e in endpoints):
+            existing = next((e for e in endpoints
+                             if e.normalized_url == n), None)
+            if existing is not None:
+                # URL already discovered (forms, crawl): enrich it
+                # with spec metadata instead of dropping the spec.
+                for ct in ep.get("request_content_types", []) or []:
+                    if ct not in \
+                            (existing.request_content_types or []):
+                        existing.request_content_types.append(ct)
+                for p in ep.get("parameters", []) or []:
+                    parameter = Parameter(
+                        name=p["name"], location=p.get("in", "query"),
+                        source=["api_spec"],
+                        confidence=Confidence.CONFIRMED.value)
+                    location = p.get("in", "query")
+                    bucket = (existing.body_parameters
+                              if location == "body"
+                              else existing.header_parameters
+                              if location == "header"
+                              else existing.query_parameters
+                              if location not in ("path", "cookie")
+                              else None)
+                    if bucket is None:
+                        continue
+                    if all(getattr(q, "name", "") != parameter.name
+                           for q in bucket):
+                        bucket.append(parameter)
                 continue
             e = Endpoint(
                 url=full, normalized_url=n,

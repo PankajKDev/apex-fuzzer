@@ -8,7 +8,8 @@ from ...models import (Confidence, Endpoint, Finding, ValidationStatus,
 from ...reporting.coverage import CoverageTracker
 from ...validation.evidence import EvidenceStore
 from ...reporting.metrics import Metrics
-from ...safety.preflight import plan_misconfig
+from ...safety.preflight import (plan_hpp, plan_info,
+                                  plan_misconfig)
 from ...validation.misconfig import (check_clickjacking,
                                      check_csrf_forms)
 from . import ProbeControls, reserve_or_block
@@ -106,7 +107,8 @@ def misconfig_probe(endpoints: List[Endpoint],
 
 
 def _finding(ep, source: str, name: str, severity: str, notes: str,
-             fp_notes: str, evidence, raw: dict) -> Finding:
+             fp_notes: str, evidence, raw: dict,
+             extra_tags=()) -> Finding:
     f = Finding(
         id=stable_finding_id("misconfig", source, ep.normalized_url),
         source=f"misconfig-{source}",
@@ -118,7 +120,7 @@ def _finding(ep, source: str, name: str, severity: str, notes: str,
         endpoint_url=ep.url, method="GET",
         description=notes,
         tags=[source, "misconfiguration", ep.endpoint_type,
-              "informational"],
+              "informational"] + list(extra_tags),
         raw=raw,
         false_positive_notes=fp_notes,
     )
@@ -222,4 +224,191 @@ def header_probe(endpoints: List[Endpoint],
                 coverage.record("header_injection", "inconclusive",
                                 f"{ep.normalized_url}::{param}: "
                                 f"{crlf.notes}")
+    return findings
+
+
+_MAX_INFO_ENDPOINTS = 10
+
+
+def info_disclosure_probe(endpoints: List[Endpoint],
+                          evidence: EvidenceStore, metrics: Metrics,
+                          budgets: BudgetTracker,
+                          coverage: CoverageTracker, client, cfg, scope,
+                          controls: ProbeControls) -> List[Finding]:
+    """Version banners plus 404-handler error disclosure.
+
+    Read-only GETs only (endpoint fetch + one nonexistent child
+    path). Informational candidates; bodies are never persisted.
+    """
+    from ...validation.info_disclosure import (
+        check_disclosing_headers, check_verbose_error,
+        not_found_child)
+    targets = [e for e in endpoints or []
+               if (getattr(e, "method", "GET") or "GET").upper() == "GET"
+               and getattr(e, "endpoint_type", "") in
+               ("page", "api", "unknown")
+               and scope.active_test_allowed(e.url)][: _MAX_INFO_ENDPOINTS]
+    if not targets:
+        log.info("info-disclosure: no in-scope GET endpoints — "
+                 "nothing to check")
+        return []
+    if not reserve_or_block(
+            budgets, coverage, "info_disclosure",
+            plan_info(len(targets))):
+        return []
+    findings: List[Finding] = []
+    for ep in targets:
+        if controls.halted():
+            log.info("info-disclosure: halted by stop control")
+            break
+        if not budgets.consume_test("info_disclosure",
+                                    ep.normalized_url, limit=2):
+            coverage.record("info_disclosure", "blocked",
+                            f"budget: {ep.normalized_url}")
+            continue
+        try:
+            r = client.get(ep.url, timeout=cfg.scan.http_timeout)
+        except BudgetExceeded:
+            coverage.record("info_disclosure", "blocked",
+                            f"budget: {ep.normalized_url}")
+            continue
+        except Exception as e:
+            log.debug("info-disclosure fetch failed %s: %s", ep.url, e)
+            coverage.record("info_disclosure", "inconclusive",
+                            f"{ep.normalized_url}: fetch failed")
+            continue
+        headers = dict(getattr(r, "headers", None) or {})
+        hdrs = check_disclosing_headers(headers)
+        if hdrs["verdict"] == "candidate":
+            controls.noted()
+            coverage.record("info_disclosure", "candidate",
+                            f"{ep.normalized_url}: {hdrs['notes']}")
+            findings.append(_finding(
+                ep, "info-headers",
+                "Information disclosure: version banner",
+                "info", hdrs["notes"],
+                f"{hdrs['notes']}. Informational: banners aid "
+                f"fingerprinting but prove no exploitability. "
+                f"Confirm the version is actually outdated and "
+                f"reachable before reporting.",
+                evidence, {"check": "disclosing-headers",
+                           "evidence": hdrs["disclosures"]},
+                ["info_disclosure"]))
+        else:
+            coverage.record("info_disclosure", "tested_negative",
+                            f"{ep.normalized_url}: {hdrs['notes']}")
+        child = not_found_child(ep.url)
+        if child is None or not scope.active_test_allowed(child):
+            coverage.record("info_disclosure", "inconclusive",
+                            f"{ep.normalized_url}: 404 probe unusable")
+            continue
+        try:
+            r404 = client.get(child, timeout=cfg.scan.http_timeout)
+        except BudgetExceeded:
+            coverage.record("info_disclosure", "blocked",
+                            f"budget: {ep.normalized_url}")
+            continue
+        except Exception as e:
+            log.debug("info-disclosure 404 probe failed %s: %s",
+                      child, e)
+            coverage.record("info_disclosure", "inconclusive",
+                            f"{ep.normalized_url}: 404 probe failed")
+            continue
+        err = check_verbose_error(
+            getattr(r404, "text", "") or "")
+        if err["verdict"] == "candidate":
+            controls.noted()
+            coverage.record("info_disclosure", "candidate",
+                            f"{ep.normalized_url}: {err['notes']}")
+            findings.append(_finding(
+                ep, "info-error",
+                "Information disclosure: verbose error page",
+                "info", err["notes"],
+                f"{err['notes']}. Informational: error text aids "
+                f"fingerprinting but proves no exploitability. "
+                f"Confirm the trace reaches attacker-influenced "
+                f"input before reporting.",
+                evidence, {"check": "verbose-error",
+                           "evidence": err["family"]},
+                ["info_disclosure"]))
+        else:
+            coverage.record("info_disclosure", "tested_negative",
+                            f"{ep.normalized_url}: {err['notes']}")
+    return findings
+
+
+_MAX_HPP_ENDPOINTS = 10
+_MAX_HPP_PARAMS = 3
+
+
+def hpp_probe(endpoints: List[Endpoint],
+              evidence: EvidenceStore, metrics: Metrics,
+              budgets: BudgetTracker,
+              coverage: CoverageTracker, client, cfg, scope,
+              controls: ProbeControls) -> List[Finding]:
+    """Duplicated-parameter handling over observed GET query fields.
+
+    Read-only GET pairs only. Inconsistent handling is a candidate
+    (filter-bypass primitive); identical handling is a genuine
+    negative.
+    """
+    from ...validation.param_pollution import check_hpp, query_params
+    targets = [e for e in endpoints or []
+               if (getattr(e, "method", "GET") or "GET").upper() == "GET"
+               and query_params(getattr(e, "url", "") or "")
+               and scope.active_test_allowed(e.url)][: _MAX_HPP_ENDPOINTS]
+    if not targets:
+        log.info("hpp: no in-scope parameterized GET endpoints — "
+                 "nothing to check")
+        return []
+    if not reserve_or_block(
+            budgets, coverage, "parameter_pollution",
+            plan_hpp(len(targets), _MAX_HPP_PARAMS)):
+        return []
+    findings: List[Finding] = []
+    for ep in targets:
+        if controls.halted():
+            log.info("hpp: halted by stop control")
+            break
+        params = [p for p in query_params(ep.url)
+                  if p][: _MAX_HPP_PARAMS]
+        if not budgets.consume_test("parameter_pollution",
+                                    ep.normalized_url,
+                                    limit=1 + 2 * len(params)):
+            coverage.record("parameter_pollution", "blocked",
+                            f"budget: {ep.normalized_url}")
+            continue
+        for param in params:
+            try:
+                res = check_hpp(client, ep.url, param,
+                                timeout=cfg.scan.http_timeout)
+            except BudgetExceeded:
+                coverage.record("parameter_pollution", "blocked",
+                                f"budget: {ep.normalized_url}")
+                break
+            if res.verdict == "candidate":
+                controls.noted()
+                coverage.record("parameter_pollution", "candidate",
+                                f"{ep.normalized_url}::{param}: "
+                                f"{res.notes}")
+                findings.append(_finding(
+                    ep, "hpp",
+                    "HTTP Parameter Pollution: inconsistent "
+                    "duplicate handling", "medium",
+                    res.notes,
+                    f"{res.notes}. Inconsistent duplicate handling "
+                    f"enables filter and WAF bypass chains. Confirm "
+                    f"which occurrence wins server-side and whether "
+                    f"a security control can be bypassed before "
+                    f"reporting.",
+                    evidence, {"check": "hpp",
+                               "evidence": res.evidence},
+                    ["parameter_pollution"]))
+            elif res.verdict == "negative":
+                coverage.record("parameter_pollution", "tested_negative",
+                                f"{ep.normalized_url}::{param}")
+            else:
+                coverage.record("parameter_pollution", "inconclusive",
+                                f"{ep.normalized_url}::{param}: "
+                                f"{res.notes}")
     return findings

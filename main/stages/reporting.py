@@ -177,6 +177,7 @@ def render_report(out_dir: Path, target: str, host: str,
         out_dir, target, host, started_epoch,
         getattr(client, "scope_denials", None) or [], cfg, profile,
         last_endpoints) or {}
+    from ..chains.builder import load_chains
     render_html(out_dir / "report.html", target, findings,
                 [h.to_dict() for h in hypotheses],
                 metrics.to_dict(),
@@ -186,10 +187,11 @@ def render_report(out_dir: Path, target: str, host: str,
                 safety_info=safety_info,
                 leads=leads,
                 burp=burp_summary,
-                changes=changes or None)
+                changes=changes or None,
+                chains=load_chains(out_dir))
     ck.mark("report")
     log.info("done: %s (%.1fs)", host, metrics.scan_duration_seconds)
-    from .sarif import write_sarif
+    from ..reporting.sarif import write_sarif
     from .. import __version__
     try:
         write_sarif(out_dir, [f.to_dict() for f in findings],

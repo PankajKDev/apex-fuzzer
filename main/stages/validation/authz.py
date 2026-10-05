@@ -12,6 +12,7 @@ from ...authorization.access_tests import swap_ids, sweep_methods
 from ...authorization.harvest import HarvestedId, harvest_ids
 from ...authorization.matrix import (AuthorizationMatrix, describe_cell,
                                      evaluate_cell)
+from ...authorization.write_replay import (PROOF_METHODS, prove_bfla)
 from ...budgets import BudgetExceeded, BudgetTracker
 from ...logging_setup import get_logger
 from ...logic.observations import (evaluate_observation,
@@ -27,6 +28,76 @@ from . import ProbeControls, reserve_or_block
 from .authz_graphql import authz_graphql_probe
 
 log = get_logger("stages-validation")
+
+# BFLA state-changing proofs per endpoint (each costs at most
+# baseline + replay + readback; the preflight reservation above
+# accounts for the worst case).
+_BFLA_PROOFS_PER_ENDPOINT = 2
+
+
+def _bfla_tester_reader(obs):
+    """Split a BFLA candidate cell into (tester, reader) observations.
+
+    The tester is the lower-privilege 200 identity (first non-admin
+    signal wins), preferring an authenticated identity over
+    anonymous: an anonymous 200 proves nothing about the tester's
+    shapes, and HAR/browser shapes are identity-bound. The reader
+    is a different 200 identity when one exists — preferring an
+    admin signal — else the tester itself.
+    Returns (None, None) when nobody reached 200.
+    """
+    ok = [o for o in obs or []
+          if getattr(o, "status", 0) == 200
+          and getattr(o, "identity", "")]
+    if not ok:
+        return None, None
+    authed = [o for o in ok if o.identity != "anonymous"] or ok
+
+    def _privileged(o):
+        blob = (f"{getattr(o, 'identity', '')} "
+                f"{getattr(o, 'role', '')}").lower()
+        return "admin" in blob
+
+    low = [o for o in authed if not _privileged(o)] or authed
+    tester = low[0]
+    others = [o for o in ok
+              if o.identity != tester.identity]
+    privileged = [o for o in others if _privileged(o)]
+    reader = (privileged or others or [tester])[0]
+    return tester, reader
+
+
+def attempt_bfla_proof(ep, method, obs, identities, owner_headers,
+                       client, cfg, scope, controls):
+    """Run one BFLA state-changing proof for a candidate cell.
+
+    Returns (proof, updates): the BflaProofResult (or None when the
+    cell has no 200 identity to prove with) and finding-field updates
+    that apply only on confirmation. Anything else leaves the sweep
+    candidate standing with the proof notes attached.
+    """
+    from types import SimpleNamespace
+    pair = _bfla_tester_reader(obs)
+    if pair == (None, None):
+        return None, {}
+    tester_obs, reader_obs = pair
+    by_name = {getattr(i, "name", ""): i for i in identities or []}
+    tester = by_name.get(tester_obs.identity) or SimpleNamespace(
+        name=tester_obs.identity, auth_headers={})
+    reader = by_name.get(reader_obs.identity) or SimpleNamespace(
+        name=reader_obs.identity, auth_headers={})
+    controls.paced()
+    proof = prove_bfla(
+        client, ep, method, tester, reader, owner_headers,
+        timeout=cfg.scan.http_timeout, scope=scope)
+    if proof.verdict == "confirmed":
+        return proof, {
+            "status": ValidationStatus.CONFIRMED.value,
+            "confidence": Confidence.CONFIRMED.value,
+            "extra_tags": ["verified-effect"],
+            "suffix": " [verified effect]",
+        }
+    return proof, {}
 
 
 def authz_matrix_probe(endpoints: List[Endpoint],
@@ -64,12 +135,16 @@ def authz_matrix_probe(endpoints: List[Endpoint],
                          max(0, len(identities) - 1))
     graphql_replays = (len(targets) * cfg_a.max_ids_per_endpoint *
                        max(0, len(identities) - 1))
+    bfla_proofs = (len(targets) * _BFLA_PROOFS_PER_ENDPOINT
+                   if write_gated else 0)
+    mass_assignments = len(targets) if write_gated else 0
     if not reserve_or_block(
             budgets, coverage, "authz",
             plan_authz_matrix(len(targets), len(identities),
                               len(cfg_a.methods),
                               cfg_a.max_ids_per_endpoint,
-                              write_replays, graphql_replays)):
+                              write_replays, graphql_replays,
+                              bfla_proofs, mass_assignments)):
         return [], AuthorizationMatrix(), []
     matrix = AuthorizationMatrix()
     findings: List[Finding] = []
@@ -250,6 +325,7 @@ def authz_matrix_probe(endpoints: List[Endpoint],
             coverage.record("authz", "blocked",
                             f"budget: {ep.normalized_url}")
             continue
+        proofs_for_ep = 0
         for cell_key, obs in matrix.cells().items():
             method, _, url = cell_key.partition("::")
             if url != ep.normalized_url or len(obs) < 2:
@@ -274,22 +350,53 @@ def authz_matrix_probe(endpoints: List[Endpoint],
             metrics.authorization_confirmed += 1
             controls.noted()
             coverage.record(kind or "authz", "candidate", notes)
+            # — BFLA state-changing proof (opt-in, same gate as write
+            # replay): replay the lower-privilege identity's observed
+            # mutating shape, verify persistence via readback. Only a
+            # confirmed proof upgrades the finding; anything else
+            # leaves the sweep candidate standing with proof notes.
+            proof, updates = None, {}
+            if (write_gated and kind == "bfla"
+                    and method in PROOF_METHODS
+                    and proofs_for_ep < _BFLA_PROOFS_PER_ENDPOINT
+                    and scope.active_test_allowed(ep.url)):
+                try:
+                    proof, updates = attempt_bfla_proof(
+                        ep, method, obs, identities, owner_headers,
+                        client, cfg, scope, controls)
+                    proofs_for_ep += 1
+                except BudgetExceeded:
+                    coverage.record("authz", "blocked",
+                                    f"budget: {ep.normalized_url}")
+                    continue
+            if proof is not None and proof.verdict == "confirmed":
+                coverage.record("bfla", "confirmed", proof.notes)
             names = [o.identity for o in obs if o.status == 200]
             tenants = sorted({o.tenant for o in obs
                               if o.status == 200 and o.tenant})
+            description = f"{notes} [{describe_cell(obs)}]"
+            if proof is not None:
+                description += f" Proof: {proof.notes}"
+            raw = {"observations": [o.to_dict() for o in obs]}
+            if proof is not None:
+                raw["bfla_proof"] = proof.to_dict()
             f = Finding(
                 id=stable_finding_id("bfla", cell_key),
                 source="authz-matrix",
                 name=(f"BFLA/{kind.upper()}: {method} {ep.path} "
-                      f"treats identities identically"),
+                      f"treats identities identically"
+                      f"{updates.get('suffix', '')}"),
                 severity="high",
-                confidence=Confidence.PROBABLE.value,
-                validation_status=ValidationStatus.STRONG_CANDIDATE.value,
+                confidence=updates.get("confidence",
+                                       Confidence.PROBABLE.value),
+                validation_status=updates.get(
+                    "status", ValidationStatus.STRONG_CANDIDATE.value),
                 host=ep.host, matched_at=ep.url,
                 endpoint_url=ep.url, method=method,
-                description=f"{notes} [{describe_cell(obs)}]",
-                tags=["bfla", kind, "authz", ep.endpoint_type],
-                raw={"observations": [o.to_dict() for o in obs]},
+                description=description,
+                tags=["bfla", kind, "authz", ep.endpoint_type] +
+                updates.get("extra_tags", []),
+                raw=raw,
                 false_positive_notes=(
                     "Same method compared across identities with "
                     "semantic shape matching; verify the 200s are "
@@ -315,6 +422,18 @@ def authz_matrix_probe(endpoints: List[Endpoint],
                     ep, pool, identities, owner_headers, evidence,
                     metrics, coverage, client, ep_params, cfg, scope,
                     controls))
+            except BudgetExceeded:
+                coverage.record("authz", "blocked",
+                                f"budget: {ep.normalized_url}")
+                continue
+            # — self-object mass assignment (same opt-in): privileged
+            # fields added to the tester's own shape, verified via
+            # own-object readback —
+            controls.paced()
+            try:
+                findings.extend(authz_mass_assignment(
+                    ep, identities, owner_headers, evidence,
+                    metrics, coverage, client, cfg, scope))
             except BudgetExceeded:
                 coverage.record("authz", "blocked",
                                 f"budget: {ep.normalized_url}")
@@ -462,4 +581,79 @@ def authz_write_replay(ep, pool, identities, owner_headers,
                 response_text=res.notes)
             findings.append(f)
             log.info("authz-write-replay: %s", res.notes)
+    return findings
+
+
+def authz_mass_assignment(ep, identities, owner_headers,
+                          evidence, metrics, coverage, client,
+                          cfg, scope) -> List[Finding]:
+    """Inject privileged fields into the tester's own object shape."""
+    from ...authorization.write_replay import replay_mass_assignment
+    tester = next(
+        (i for i in identities or []
+         if getattr(i, "name", "anonymous") != "anonymous"
+         and dict(getattr(i, "auth_headers", None) or {})), None)
+    if tester is None:
+        log.info("authz-mass-assignment: no authenticated identity "
+                 "with headers — skipping")
+        return []
+    tester_name = getattr(tester, "name", "tester")
+    try:
+        results = replay_mass_assignment(
+            client, ep, tester, owner_headers,
+            timeout=cfg.scan.http_timeout, scope=scope)
+    except BudgetExceeded:
+        raise
+    findings: List[Finding] = []
+    for res in results:
+        if res.verdict != "strong_candidate":
+            if getattr(res, "edge_denied", False):
+                coverage.record(
+                    "mass_assignment", "inconclusive",
+                    f"{ep.normalized_url}::{res.field}: "
+                    f"{tester_name} hit edge infrastructure")
+            elif res.verdict == "tested_negative":
+                coverage.record(
+                    "mass_assignment", "tested_negative",
+                    f"{ep.normalized_url}::{res.field}: "
+                    f"{tester_name}→{res.status}")
+            continue
+        metrics.authorization_tests += 1
+        metrics.authorization_confirmed += 1
+        coverage.record("mass_assignment", "candidate", res.notes)
+        f = Finding(
+            id=stable_finding_id("massassign", res.endpoint_url,
+                                 res.method, res.field),
+            source="mass-assignment",
+            name=(f"Mass assignment: '{res.field}' persisted on "
+                  f"'{tester_name}''s own object ({ep.path})"),
+            severity="high",
+            confidence=Confidence.PROBABLE.value,
+            validation_status=ValidationStatus.STRONG_CANDIDATE.value,
+            host=ep.host, matched_at=res.endpoint_url,
+            endpoint_url=res.endpoint_url, method=res.method,
+            parameter=res.field,
+            description=res.notes,
+            tags=["mass_assignment", "authz", "idor",
+                  ep.endpoint_type],
+            raw={"mass_assignment": res.to_dict()},
+            false_positive_notes=(
+                "The probe value is an inert marker, never a real "
+                "privilege: persistence proves the binder accepted "
+                "the field. Confirm the field carries privilege "
+                "impact (roles, tiers, ownership) interactively "
+                "before reporting."),
+            identity=tester_name,
+            tenant=getattr(tester, "tenant", "") or "",
+            resource_key=(f"{ep.normalized_url}::{res.field}"),
+        )
+        evidence.allocate(f)
+        evidence.record(
+            f,
+            request_text=(f"{res.method} {res.endpoint_url}\n(as "
+                          f"{tester_name}; own object; "
+                          f"readback: {res.readback})"),
+            response_text=res.notes)
+        findings.append(f)
+        log.info("authz-mass-assignment: %s", res.notes)
     return findings

@@ -16,7 +16,7 @@ from ..models import (Confidence, Finding, ValidationStatus, read_jsonl,
                       write_jsonl)
 from ..reporting.coverage import CoverageTracker
 from ..reporting.metrics import Metrics
-from ..shell import run, which
+from ..shell import redact, run, which
 from .recon import scoped_subprocess_input
 
 log = get_logger("stages-scanning")
@@ -87,7 +87,7 @@ def takeover_check(cfg, profile, scope, out_dir: Path, host: str,
                  else "fingerprint only")
         r = run(args, timeout=cfg.scan.timeout * 2)
         if r.stdout:
-            (out_dir / "takeover.txt").write_text(r.stdout)
+            (out_dir / "takeover.txt").write_text(redact(r.stdout))
         if tko_out.exists():
             return parse_tko(tko_out, metrics, coverage)
     # fallback: subzy fingerprint (detection-only)
@@ -100,7 +100,7 @@ def takeover_check(cfg, profile, scope, out_dir: Path, host: str,
             "--timeout", "10",
         ], timeout=cfg.scan.timeout * 2)
         if r.stdout:
-            (out_dir / "takeover.txt").write_text(r.stdout)
+            (out_dir / "takeover.txt").write_text(redact(r.stdout))
     return []
 
 

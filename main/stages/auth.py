@@ -102,8 +102,9 @@ def login_identities(out_dir: Path, metrics: Metrics, cfg, scope):
                              len(payload.cookies))
                 elif status == "mfa":
                     try:
+                        from ..scope import slug_filename
                         payload.save(out_dir /
-                                     f"mfa_{entry.name}.json")
+                                     f"mfa_{slug_filename(entry.name)}.json")
                     except Exception as e:
                         log.debug("login: checkpoint save failed: %s",
                                   e)

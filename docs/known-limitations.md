@@ -59,6 +59,12 @@ force, destructive actions, and any disallowed activity.
 - Dynamic responses, WAF behavior, asynchronous processing, and transient
   network failures can leave evidence inconclusive. Re-run only with a
   reviewed budget and program-permitted rate.
+- Run scans on trusted hosts under your own user. Takeover claims pass
+  provider tokens as subprocess flags (visible to local users via `ps`
+  during the check); session files are owner-only (`0600`) but scan
+  logs redact secrets only on known patterns. A `SIGKILL` mid-run can
+  orphan the Interactsh child and its temp dir; re-run cleanup is
+  best-effort.
 
 ## Sample output
 

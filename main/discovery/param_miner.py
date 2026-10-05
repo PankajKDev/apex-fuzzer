@@ -63,32 +63,43 @@ def mine_hidden_params(url: str, methods: Optional[List[str]] = None,
         log.debug("arjun not installed — skipping hidden param mining")
         return {}
     methods = [m.upper() for m in (methods or ["GET"])]
-    out_dir = out_dir or Path("/tmp")
+    tmp_output = None
+    if out_dir is None:
+        import tempfile
+        # Private per-call directory: never predictable /tmp paths
+        # shared between local users (symlink/file races).
+        tmp_output = tempfile.TemporaryDirectory(prefix="apex-arjun-")
+        out_dir = Path(tmp_output.name)
     out_dir.mkdir(parents=True, exist_ok=True)
     result: Dict[str, List[str]] = {}
-    for i, method in enumerate(methods):
-        json_path = out_dir / f"arjun-{i}.json"
-        if json_path.exists():
-            json_path.unlink()
-        args = ["arjun", "-u", url, "-m", method,
-                "-oJ", str(json_path),
-                "-t", str(threads), "-q"]
-        if stable:
-            args.append("--stable")
-        if rate_limit:
-            args += ["--rate-limit", str(rate_limit)]
-        log.info("arjun: %s %s (timeout=%ds%s)", method, url, timeout,
-                 ", stable" if stable else "")
-        r = run(args, timeout=timeout)
-        if r.timed_out:
-            log.warning("arjun %s %s timed out", method, url)
-        if json_path.exists():
-            found = parse_arjun_json(json_path.read_text(errors="ignore"),
-                                     url)
-            if found:
-                result[method] = found
-                log.info("arjun %s %s: %d hidden params: %s",
-                         method, url, len(found), ", ".join(found[:12]))
+    try:
+        for i, method in enumerate(methods):
+            json_path = out_dir / f"arjun-{i}.json"
+            if json_path.exists():
+                json_path.unlink()
+            args = ["arjun", "-u", url, "-m", method,
+                    "-oJ", str(json_path),
+                    "-t", str(threads), "-q"]
+            if stable:
+                args.append("--stable")
+            if rate_limit:
+                args += ["--rate-limit", str(rate_limit)]
+            log.info("arjun: %s %s (timeout=%ds%s)", method, url, timeout,
+                     ", stable" if stable else "")
+            r = run(args, timeout=timeout)
+            if r.timed_out:
+                log.warning("arjun %s %s timed out", method, url)
+            if json_path.exists():
+                found = parse_arjun_json(
+                    json_path.read_text(errors="ignore"), url)
+                if found:
+                    result[method] = found
+                    log.info("arjun %s %s: %d hidden params: %s",
+                             method, url, len(found),
+                             ", ".join(found[:12]))
+    finally:
+        if tmp_output is not None:
+            tmp_output.cleanup()
     return result
 
 

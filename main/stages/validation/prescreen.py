@@ -8,7 +8,7 @@ from ...models import (Confidence, Endpoint, Finding, ValidationStatus,
 from ...reporting.coverage import CoverageTracker, classify_finding
 from ...validation.evidence import EvidenceStore
 from ...reporting.metrics import Metrics
-from ...safety.preflight import plan_prescreen
+from ...safety.preflight import plan_deser, plan_prescreen
 from ...validation.base import Candidate
 from ...validation.differential import IDOR_PARAM_NAMES, has_idor_params
 from ...validation.mutate import MutationEngine
@@ -172,4 +172,128 @@ def prescreen_sweep(endpoints: List[Endpoint],
                 new_findings.append(f)
                 log.info("prescreen-sweep: %s %s on %s", test_class,
                          name, ep.url)
+    return new_findings
+
+
+def deser_probe(endpoints: List[Endpoint],
+                evidence: EvidenceStore, metrics: Metrics,
+                budgets: BudgetTracker,
+                coverage: CoverageTracker, client,
+                cfg, scope, controls: ProbeControls) -> List[Finding]:
+    """Type-confusion error oracle over JSON body parameters.
+
+    Always POSTs JSON, so state-change authorization is required.
+    Candidate-only: exception text proves a deserializer choked,
+    never gadget reachability.
+    """
+    from ...validation.deser_oracle import check_deser_oracle
+    if not getattr(getattr(cfg, "safety", None),
+                   "allow_state_change", False):
+        log.info("deser: needs --ack-state-change (JSON POST bodies) "
+                 "— skipping")
+        return []
+    cfg_v = cfg.validation
+    max_eps = max(0, int(getattr(cfg_v, "prescreen_max_endpoints",
+                                 30)))
+    max_params = max(0, int(getattr(cfg_v, "prescreen_max_params", 3)))
+    if max_eps == 0 or max_params == 0:
+        return []
+
+    def _json_params(ep):
+        ctypes = [str(c).lower() for c in
+                  list(getattr(ep, "request_content_types", []) or [])]
+        if not any("json" in c for c in ctypes):
+            return []
+        names = []
+        for item in list(getattr(ep, "body_parameters", None) or []):
+            name = getattr(item, "name", "")
+            if name and name not in names:
+                names.append(name)
+        return names[:max_params]
+
+    candidates = []
+    for ep in endpoints or []:
+        if ep.endpoint_type == "static":
+            continue
+        if not scope.active_test_allowed(ep.url):
+            continue
+        params = _json_params(ep)
+        if params:
+            candidates.append((ep, params))
+    candidates = candidates[:max_eps]
+    if not candidates:
+        log.info("deser: no JSON body endpoints discovered — "
+                 "nothing to probe")
+        return []
+    if not reserve_or_block(
+            budgets, coverage, "deserialization",
+            plan_deser(len(candidates), max_params)):
+        return []
+    new_findings: List[Finding] = []
+    for ep, params in candidates:
+        if controls.halted():
+            log.info("deser: halted by stop control")
+            break
+        controls.paced()
+        for name in params:
+            if not budgets.consume_test("deserialization",
+                                        ep.normalized_url, limit=3):
+                coverage.record("deserialization", "blocked",
+                                f"budget: {ep.normalized_url}")
+                break
+            try:
+                res = check_deser_oracle(
+                    client, ep.url, name,
+                    timeout=cfg.scan.http_timeout)
+            except BudgetExceeded:
+                coverage.record("deserialization", "blocked",
+                                f"budget: {ep.normalized_url}")
+                break
+            if res.verdict == "candidate":
+                metrics.validation_candidates += 1
+                controls.noted()
+                coverage.record("deserialization", "candidate",
+                                f"{ep.normalized_url}::{name}: "
+                                f"{res.notes}")
+                f = Finding(
+                    id=stable_finding_id("deser", ep.normalized_url,
+                                         name),
+                    source="deser-oracle",
+                    name=(f"Deserialization error oracle hit on "
+                          f"'{name}' ({ep.path})"),
+                    severity="medium",
+                    confidence=Confidence.PROBABLE.value,
+                    validation_status=ValidationStatus.
+                    STRONG_CANDIDATE.value,
+                    host=ep.host, matched_at=ep.url,
+                    endpoint_url=ep.url, method="POST",
+                    parameter=name,
+                    description=(res.notes or "") + " Error-oracle "
+                                    "signal only; gadget reachability "
+                                    "and code execution are unproven.",
+                    tags=["deserialization", "deser-oracle",
+                          ep.endpoint_type],
+                    raw={"deser": res.to_dict()},
+                    false_positive_notes=(
+                        "Exception text proves a deserializer saw "
+                        "unexpected types, not that attacker "
+                        "controlled classes instantiate. Confirm "
+                        "gadget reachability in an isolated fixture "
+                        "before reporting."),
+                )
+                evidence.allocate(f)
+                evidence.record(
+                    f,
+                    request_text=(f"POST {ep.url}\nbody::{name} "
+                                  f"(type-confusion shapes)"),
+                    response_text=(res.notes or "")[:2000])
+                new_findings.append(f)
+                log.info("deser: %s on %s", name, ep.url)
+            elif res.verdict == "negative":
+                coverage.record("deserialization", "tested_negative",
+                                f"{ep.normalized_url}::{name}")
+            else:
+                coverage.record("deserialization", "inconclusive",
+                                f"{ep.normalized_url}::{name}: "
+                                f"{res.notes}")
     return new_findings

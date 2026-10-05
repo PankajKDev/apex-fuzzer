@@ -103,16 +103,23 @@ def plan_differential(n_endpoints: int, n_contexts: int) -> RequestPlan:
 def plan_authz_matrix(n_endpoints: int, n_identities: int,
                       n_methods: int, max_ids: int,
                       write_replays: int = 0,
-                      graphql_replays: int = 0) -> RequestPlan:
+                      graphql_replays: int = 0,
+                      bfla_proofs: int = 0,
+                      mass_assignments: int = 0) -> RequestPlan:
     harvest = n_endpoints * n_identities
     swap = n_endpoints * max_ids * max(0, n_identities - 1) * 2
     sweep = n_endpoints * n_methods * n_identities
     # write replay: baseline + replay + readback per attempt;
-    # GraphQL operation replay: owner baseline + tester replay
+    # GraphQL operation replay: owner baseline + tester replay;
+    # BFLA proof: reader baseline + tester replay + reader readback;
+    # mass assignment: own-object baseline + replay + readback per
+    # field (up to 2 fields)
     write = write_replays * 3
     graphql = graphql_replays * 2
+    bfla = bfla_proofs * 3
+    mass = mass_assignments * 5
     return RequestPlan("authz_matrix", "*", harvest,
-                       swap + sweep + write + graphql)
+                       swap + sweep + write + graphql + bfla + mass)
 
 
 def plan_race(n_endpoints: int, concurrency: int,
@@ -140,6 +147,11 @@ def plan_second_order_ssrf(n_injections: int,
 def plan_prescreen(n_endpoints: int, max_params: int) -> RequestPlan:
     # baseline + boolean pairs + error ladder per parameter, worst case
     return RequestPlan("prescreen", "*", 0, n_endpoints * max_params * 10)
+
+
+def plan_deser(n_endpoints: int, max_params: int) -> RequestPlan:
+    # scalar control plus array/object probes per parameter
+    return RequestPlan("deser", "*", 0, n_endpoints * max_params * 3)
 
 
 def plan_cache(n_endpoints: int) -> RequestPlan:
@@ -177,6 +189,27 @@ def plan_upload(n_endpoints: int) -> RequestPlan:
 def plan_misconfig(n_endpoints: int) -> RequestPlan:
     # one read-only GET per page endpoint (headers + body analyzed)
     return RequestPlan("misconfig", "*", 0, n_endpoints)
+
+
+def plan_info(n_endpoints: int) -> RequestPlan:
+    # endpoint fetch (headers) plus one 404-handler probe per endpoint
+    return RequestPlan("info", "*", 0, n_endpoints * 2)
+
+
+def plan_hpp(n_endpoints: int, max_params: int) -> RequestPlan:
+    # baseline plus duplicate and repeat-control probes per parameter
+    return RequestPlan("hpp", "*", 0,
+                       n_endpoints * (1 + 2 * max_params))
+
+
+def plan_reset(n_endpoints: int) -> RequestPlan:
+    # enumeration pair plus one host-poison reset request per endpoint
+    return RequestPlan("reset", "*", 0, n_endpoints * 3)
+
+
+def plan_otp(n_endpoints: int) -> RequestPlan:
+    # wrong-code baseline plus empty-code and omitted-code probes
+    return RequestPlan("otp", "*", 0, n_endpoints * 3)
 
 
 # ── dry-run (zero network: file reads only) ───────────────────────────
