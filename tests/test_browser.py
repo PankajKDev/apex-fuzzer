@@ -188,7 +188,7 @@ def test_authenticated_capture_allows_only_in_scope_same_origin_reads():
 
 def test_authenticated_capture_request_material_is_runtime_only():
     from main.models import Endpoint
-    from main.orchestrator import Orchestrator
+    from main.stages.endpoints import merge_browser_entry
     from main.discovery.url_normalizer import normalize_url
 
     url = ("https://user:pass@example.com/api?access_token=stored-secret"
@@ -199,7 +199,7 @@ def test_authenticated_capture_request_material_is_runtime_only():
                  "identity": "alice", "method": "POST", "url": url,
                  "headers": {"X-Trace": "captured"},
                  "post_data": '{"id":1}'}]}
-    Orchestrator._merge_browser_entry(
+    merge_browser_entry(
         {normalize_url(url): endpoint}, "example.com", entry)
     assert endpoint.observed_requests[0]["identity"] == "alice"
     assert endpoint.observed_requests[0]["post_data"] == '{"id":1}'
@@ -434,41 +434,35 @@ def test_workflow_unknown_action_and_break():
 
 # ── orchestrator merge helpers ────────────────────────────────────────
 def test_merge_browser_entry_and_resolve_link():
-    from main.orchestrator import Orchestrator
-    from main.config import Config
-    from main.profiles import get as get_profile
-    import tempfile
-    from pathlib import Path
-    orch = Orchestrator(Config(), Path(tempfile.mkdtemp()),
-                        profile=get_profile("standard"))
+    from main.stages.endpoints import merge_browser_entry, resolve_link
     by_norm = {}
-    orch._merge_browser_entry(by_norm, "t.com",
-                              {"url": "https://t.com/api/u?id=1",
-                               "method": "GET", "params": ["id"],
-                               "body": {}})
+    merge_browser_entry(by_norm, "t.com",
+                        {"url": "https://t.com/api/u?id=1",
+                         "method": "GET", "params": ["id"],
+                         "body": {}})
     assert "browser" in by_norm[
         "https://t.com/api/u?id=1"].source
     # merge into existing keeps both sources + adds body params
-    orch._merge_browser_entry(by_norm, "t.com",
-                              {"url": "https://t.com/api/u?id=1",
-                               "method": "POST",
-                               "params": ["id"],
-                               "body": {"name": "x"}})
+    merge_browser_entry(by_norm, "t.com",
+                        {"url": "https://t.com/api/u?id=1",
+                         "method": "POST",
+                         "params": ["id"],
+                         "body": {"name": "x"}})
     ep = by_norm["https://t.com/api/u?id=1"]
     assert {p.name for p in ep.body_parameters} == {"name"}
     # form entry upgrades method + records inputs
-    orch._merge_browser_entry(
+    merge_browser_entry(
         by_norm, "t.com",
         {"url": "https://t.com/login", "method": "GET", "params": {},
          "body": {}, "inputs": ["user", "pw"], "form_method": "POST"})
     lep = [e for e in by_norm.values() if e.path == "/login"][0]
     assert lep.method == "POST"
     assert {p.name for p in lep.body_parameters} == {"user", "pw"}
-    assert orch._resolve_link("https://t.com/a",
-                              "/b?x=1#f") == "https://t.com/b?x=1"
-    assert orch._resolve_link("https://t.com/a",
-                              "javascript:void(0)") is None
-    assert orch._resolve_link("https://t.com/a", "/x.png") is None
+    assert resolve_link("https://t.com/a",
+                        "/b?x=1#f") == "https://t.com/b?x=1"
+    assert resolve_link("https://t.com/a",
+                        "javascript:void(0)") is None
+    assert resolve_link("https://t.com/a", "/x.png") is None
 
 
 def test_browser_discover_skip_paths(monkeypatch, tmp_path):
@@ -477,10 +471,12 @@ def test_browser_discover_skip_paths(monkeypatch, tmp_path):
     from main.profiles import get as get_profile
     from main.reporting.metrics import Metrics
     from main.budgets import BudgetTracker
+    from main.stages.endpoints import browser_discover
     orch = Orchestrator(Config(), tmp_path,
                         profile=get_profile("standard"))
     # disabled by default profile
-    assert orch._browser_discover(
+    assert browser_discover(
+        orch.cfg, orch.profile, orch.scope,
         "https://t.com/", "t.com", tmp_path, BudgetTracker(Config()),
         Metrics()) == []
     # enabled but no playwright
@@ -491,7 +487,8 @@ def test_browser_discover_skip_paths(monkeypatch, tmp_path):
                         lambda: True)
     import main.browser.browser as bmod
     monkeypatch.setattr(bmod, "playwright_available", lambda: False)
-    assert orch2._browser_discover(
+    assert browser_discover(
+        orch2.cfg, orch2.profile, orch2.scope,
         "https://t.com/", "t.com", tmp_path, BudgetTracker(cfg),
         Metrics()) == []
 
@@ -651,7 +648,9 @@ def test_orchestrator_browser_crawl(local_site, tmp_path):
     cfg.scope.allowed_domains = [host]
     orch = Orchestrator(cfg, tmp_path, profile=get_profile("deep"))
     metrics = Metrics()
-    entries = orch._browser_discover(
+    from main.stages.endpoints import browser_discover, merge_browser_entry
+    entries = browser_discover(
+        cfg, orch.profile, orch.scope,
         local_site + "/", host, tmp_path, BudgetTracker(cfg), metrics)
     assert metrics.browser_pages >= 2
     assert any("/api/data" in e["url"] for e in entries)
@@ -660,5 +659,5 @@ def test_orchestrator_browser_crawl(local_site, tmp_path):
     # merge path produces pipeline endpoints incl. form bodies
     by_norm = {}
     for entry in entries:
-        orch._merge_browser_entry(by_norm, host, entry)
+        merge_browser_entry(by_norm, host, entry)
     assert any("browser" in e.source for e in by_norm.values())

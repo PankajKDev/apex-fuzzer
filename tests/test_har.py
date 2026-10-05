@@ -112,15 +112,15 @@ def test_oversized_body_keeps_inventory_drops_bytes():
 def test_merge_attributes_har_source():
     from main.discovery.url_normalizer import normalize_url
     from main.models import Endpoint
-    from main.orchestrator import Orchestrator
     data = _har(_req("https://example.com/api/docs?id=7",
                      query={"id": "7"}))
     (entry,) = har_mod.parse_har(data, _scope())
+    from main.stages.endpoints import merge_browser_entry
     n = normalize_url(entry["url"])
     by_norm = {n: Endpoint(url=entry["url"], normalized_url=n,
                            host="example.com", path="/api/docs",
                            method="GET", source=["recon"])}
-    Orchestrator._merge_browser_entry(by_norm, "example.com", entry)
+    merge_browser_entry(by_norm, "example.com", entry)
     ep = by_norm[n]
     assert "har" in ep.source and "browser" not in ep.source
     locs = {(p.name, p.location) for p in ep.query_parameters}
@@ -130,19 +130,18 @@ def test_merge_attributes_har_source():
 
 def test_orchestrator_har_import_skips_missing(tmp_path):
     from main.config import Config
-    from main.orchestrator import Orchestrator
-    from main.profiles import get as get_profile
+    from main.stages.endpoints import har_import
+    from main.scope import Scope
     cfg = Config()
     cfg.scope.allowed_domains = ["example.com"]
     cfg.har_files = [str(tmp_path / "missing.har")]
-    orch = Orchestrator(cfg, tmp_path, profile=get_profile("standard"))
-    assert orch._har_import("example.com") == []
+    assert har_import(cfg, Scope(cfg.scope)) == []
 
 
 def test_orchestrator_har_import_merges_endpoints(tmp_path):
     from main.config import Config
-    from main.orchestrator import Orchestrator
-    from main.profiles import get as get_profile
+    from main.stages.endpoints import har_import
+    from main.scope import Scope
     har = tmp_path / "capture.har"
     har.write_text(json.dumps(_har(
         _req("https://example.com/api/orders?order_id=9",
@@ -150,6 +149,5 @@ def test_orchestrator_har_import_merges_endpoints(tmp_path):
     cfg = Config()
     cfg.scope.allowed_domains = ["example.com"]
     cfg.har_files = [str(har)]
-    orch = Orchestrator(cfg, tmp_path, profile=get_profile("standard"))
-    found = orch._har_import("example.com")
+    found = har_import(cfg, Scope(cfg.scope))
     assert len(found) == 1 and found[0]["params"] == ["order_id"]

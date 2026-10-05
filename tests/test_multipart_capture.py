@@ -162,7 +162,7 @@ def test_authenticated_multipart_values_are_blanked():
 
 def test_merge_browser_entry_keeps_multipart_runtime_only():
     from main.discovery.url_normalizer import normalize_url
-    from main.orchestrator import Orchestrator
+    from main.stages.endpoints import merge_browser_entry
     url = "https://example.com/upload"
     endpoint = Endpoint(url=url, normalized_url=normalize_url(url))
     entry = {"url": url, "method": "POST", "params": [],
@@ -174,7 +174,7 @@ def test_merge_browser_entry_keeps_multipart_runtime_only():
                  "multipart": [{"name": "upload", "filename": "r.pdf",
                                 "content_type": "application/pdf",
                                 "size": 20}]}]}
-    Orchestrator._merge_browser_entry(
+    merge_browser_entry(
         {normalize_url(url): endpoint}, "example.com", entry)
     assert {p.name for p in endpoint.body_parameters} == {
         "title", "upload"}
