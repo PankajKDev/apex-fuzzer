@@ -23,6 +23,15 @@ URL_PARAM_NAMES = {
     "feed", "fetch", "target", "dest", "destination", "u", "r",
 }
 
+# Path segments worth a human look even with zero parameters:
+# /panel, /inv, /api ... — robots/sitemap paths on login-walled apps
+# are often the whole inventory.
+INTERESTING_PATH_HINTS = {
+    "panel", "admin", "login", "invite", "inv", "api", "internal",
+    "debug", "console", "dashboard", "account", "auth", "manage",
+    "private", "register", "settings", "config",
+}
+
 # Parameter names that commonly control redirects.
 REDIRECT_PARAM_NAMES = {
     "next", "redirect", "redirect_url", "redirect_uri", "return",
@@ -123,6 +132,17 @@ def collect_leads(endpoints: List[Any], technologies: List[Dict],
             add("upload-surface", "medium", url,
                 "upload endpoint; file-type handling untested (manual)",
                 "manual file-upload review (out of normal scans)")
+        segments = [seg.lower() for seg in
+                    (getattr(endpoint, "path", "") or "").split("/")
+                    if seg]
+        hits = [seg for seg in segments
+                if seg in INTERESTING_PATH_HINTS]
+        if hits and endpoint_type not in ("admin", "authentication"):
+            add("interesting-path", "medium", url,
+                "path suggests hidden functionality: " +
+                ", ".join(hits[:3]),
+                "Repeater: fetch by hand, map it, retest with a "
+                "session (auth/IDOR/BFLA)")
         forms = getattr(endpoint, "forms", None) or []
         if forms and not id_params:
             add("html-form", "medium", url,

@@ -233,11 +233,15 @@ class Orchestrator:
             metrics.urls_discovered = len(self._recon(target, out_dir))
             ck.mark("recon")
 
-        # Robots / sitemap appended to raw URL pool (spec §6)
+        # Robots / sitemap appended to raw URL pool (spec §6).
+        # Harvest runs after recon, so re-merge: robots.txt.out would
+        # otherwise sit on disk while endpoints build without it.
         if self.profile.robots and self.cfg.discovery.robots_sitemap:
             self._harvest_robots(client, base_url, out_dir)
+            self._merge_recon(out_dir)
 
         raw_urls = self._read_lines(out_dir / "raw.txt")
+        metrics.urls_discovered = len(raw_urls)
         scoped = [u for u in raw_urls if self.scope.is_in_scope(u)]
         log.info("in-scope URLs: %d / %d", len(scoped), len(raw_urls))
 
@@ -635,6 +639,14 @@ class Orchestrator:
             if ext and ext in excl:
                 continue
             raw.add(line)
+        # Preserve what a previous merge already banked: re-merging
+        # (e.g. after the robots harvest lands) must only add.
+        existing = out_dir / "raw.txt"
+        if existing.exists():
+            for line in existing.read_text(errors="ignore").splitlines():
+                line = line.strip()
+                if line.startswith("http"):
+                    raw.add(line)
         for f in ("param.txt", "wayback.txt", "gau.txt",
                   "hakrawler.txt", "katana.txt",
                   "hakrawler-authed.txt", "katana-authed.txt",

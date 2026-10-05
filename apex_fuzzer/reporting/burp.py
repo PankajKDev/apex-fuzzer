@@ -179,6 +179,10 @@ BURP_STEPS = {
         "Intruder + Param Miner (Pro) or manual GET/POST/JSON/cookie "
         "guessing on this endpoint. New params loop back into the "
         "steps above."),
+    "interesting-path": (
+        "Repeater + Proxy: fetch the path by hand, run Engagement "
+        "tools > Content discovery on its directory, retest every "
+        "input with a session attached (auth/IDOR/BFLA)."),
 }
 
 

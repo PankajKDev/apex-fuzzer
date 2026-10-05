@@ -13,8 +13,10 @@ from apex_fuzzer.safety.preflight import resolve_modules
 
 
 def _ep(url, endpoint_type="unknown", params=(), forms=()):
+    from urllib.parse import urlparse
     return SimpleNamespace(
         url=url, normalized_url=url, endpoint_type=endpoint_type,
+        path=urlparse(url).path,
         query_parameters=[SimpleNamespace(name=name) for name in params],
         body_parameters=[], header_parameters=[], forms=list(forms))
 
@@ -151,3 +153,41 @@ def test_report_renders_leads_section(tmp_path):
     out2 = tmp_path / "report2.html"
     render_html(out2, "example.test", [], [], {})
     assert "Leads" not in out2.read_text()
+
+
+def test_interesting_paths_become_leads():
+    endpoints = [_ep("https://example.test/panel/", "page"),
+                 _ep("https://example.test/inv/", "page"),
+                 _ep("https://example.test/about", "page"),
+                 _ep("https://example.test/invoice-regulations", "page")]
+    leads = collect_leads(endpoints, [], [])
+    by_url = {lead["url"]: lead for lead in leads
+              if lead["kind"] == "interesting-path"}
+    assert "https://example.test/panel/" in by_url
+    assert "https://example.test/inv/" in by_url
+    assert "https://example.test/about" not in by_url
+    # segment match only: 'inv' must not fire on invoice-regulations
+    assert "https://example.test/invoice-regulations" not in by_url
+    assert "Repeater" in by_url["https://example.test/panel/"][
+        "suggested_followup"]
+
+
+def test_robots_harvest_reaches_endpoint_pool(tmp_path):
+    """Robots/sitemap URLs harvested after recon must enter raw.txt.
+
+    Regression: _harvest_robots wrote robots.txt.out after _merge_recon
+    had already run, so its URLs never became endpoints (live run on a
+    login-walled target kept 1 endpoint while robots named 19 paths).
+    """
+    from apex_fuzzer.config import Config
+    from apex_fuzzer.orchestrator import Orchestrator
+    from apex_fuzzer.profiles import get as get_profile
+    (tmp_path / "raw.txt").write_text("http://example.test/\n")
+    (tmp_path / "robots.txt.out").write_text(
+        "https://example.test/panel/\nhttps://example.test/inv/\n")
+    orch = Orchestrator(Config(), tmp_path, profile=get_profile("leads"))
+    orch._merge_recon(tmp_path)
+    raw = (tmp_path / "raw.txt").read_text()
+    assert "https://example.test/panel/" in raw
+    assert "https://example.test/inv/" in raw
+    assert "http://example.test/" in raw
