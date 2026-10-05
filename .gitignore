@@ -29,3 +29,6 @@ htmlcov/
 *.swp
 *~
 .DS_Store
+
+# stray root-level artifact (never commit scan output)
+output.html

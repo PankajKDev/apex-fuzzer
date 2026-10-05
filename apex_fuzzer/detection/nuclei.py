@@ -70,17 +70,37 @@ class NucleiRunner:
                       "community set only", self.bb_templates_dir)
         return ["-t", ",".join(dirs)]
 
+    def scoped_input(self, live_file: Path) -> Path:
+        """Scope-filtered nuclei input.
+
+        Nuclei follows redirects itself, outside the gate — findings
+        are still scope-filtered after the scan, but requests must
+        never start out-of-scope.
+        """
+        from ..scope import Scope
+        dest = self.output_dir / "nuclei-input.txt"
+        lines = ([l.strip() for l in live_file.read_text(
+            errors="ignore").splitlines() if l.strip()]
+            if live_file.exists() else [])
+        checker = Scope(self.cfg.scope)
+        kept = [u for u in lines if checker.is_in_scope(u)]
+        dest.write_text("\n".join(kept) + ("\n" if kept else ""))
+        log.info("nuclei input: %d in-scope / %d total",
+                 len(kept), len(lines))
+        return dest
+
     def run_scan(self, live_file: Path,
                  extra_templates_dir: Optional[Path] = None) -> List[Finding]:
         if not self.check_ready():
             return []
-        if not live_file.exists() or live_file.stat().st_size == 0:
-            log.warning("no live hosts to scan")
+        scoped = self.scoped_input(live_file)
+        if scoped.stat().st_size == 0:
+            log.warning("no in-scope live hosts to scan")
             return []
         if self.jsonl.exists():
             self.jsonl.unlink()
         args = [
-            "nuclei", "-l", str(live_file),
+            "nuclei", "-l", str(scoped),
         ]
         tdirs = [str(self.templates_dir)]
         if extra_templates_dir and extra_templates_dir.is_dir():
@@ -254,11 +274,14 @@ def run_hypothesis_templates(runner: "NucleiRunner",
         written.append(tpl["id"])
     if not written or not live_file.exists():
         return []
+    scoped = runner.scoped_input(live_file)
+    if scoped.stat().st_size == 0:
+        return []
     out_jsonl = runner.output_dir / "nuclei-ai.jsonl"
     if out_jsonl.exists():
         out_jsonl.unlink()
     args = [
-        "nuclei", "-l", str(live_file), "-t", str(tdir),
+        "nuclei", "-l", str(scoped), "-t", str(tdir),
         "-rl", str(runner.cfg.scan.rate_limit),
         "-jsonl", "-no-color",
         "-timeout", "10", "-retries", "1", "-o", str(out_jsonl),

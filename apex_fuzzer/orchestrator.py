@@ -66,8 +66,10 @@ from .safety.preflight import (StopFlag, Pacer, get_interrupt_flag,
                                plan_differential,
                                plan_authz_matrix, plan_race,
                                plan_business, plan_second_order,
-                               plan_second_order_ssrf, plan_oast)
+                               plan_second_order_ssrf, plan_oast,
+                               plan_graphql_introspection)
 from .safety.impact import max_level
+from .safety.gate import ScopeRefused
 from .safety.authorization import (
     Authorization, AuthorizationRefused, GATED_MODULES)
 
@@ -162,6 +164,7 @@ class Orchestrator:
         self._harvest_pool: list = []
         self._page_ids: list = []
         self._last_matrix = None
+        self._last_endpoints: list = []
 
     # =====================================================================
     def run(self, targets: List[str], resume: bool = False):
@@ -210,9 +213,24 @@ class Orchestrator:
             extra_headers["X-HackerOne"] = hacker_header
         configured_ua = str(getattr(self.cfg.scan, "user_agent", "")
                             or "").strip()
+        # Local-lab mode is a pure hostname check (no DNS, pre-network):
+        # loopback literals stay testable while public targets keep the
+        # private-range block (redirects to 169.254.x, 10/8, … stay dead).
+        lab_host = (target_hostname(target) or "").lower().strip("[]")
+        try:
+            lab_target = lab_host in ("localhost", "::1") or not ipaddress.ip_address(
+                lab_host).is_global
+        except ValueError:
+            lab_target = lab_host == "localhost"
         client = _HTTPClient(limiter=limiter, budgets=budgets,
                              extra_headers=extra_headers,
-                             user_agent=configured_ua)
+                             user_agent=configured_ua,
+                             scope=self.scope,
+                             allow_private_targets=lab_target,
+                             allow_state_change=bool(
+                                 self.cfg.safety.allow_state_change),
+                             approved_cidrs=list(
+                                 self.cfg.safety.approved_cidrs or []))
         app_graph = ApplicationGraph()
         application: Optional[Application] = None
         stop = StopFlag()
@@ -274,6 +292,11 @@ class Orchestrator:
                                      client)
             write_jsonl(out_dir / "endpoints.jsonl", endpoints)
             ck.mark("mapping")
+        # Runtime inventory snapshot for the audit store (flushed with
+        # the run record; JSONL stays the system of record). Stashed
+        # on both fresh and resume paths so a resumed mapping never
+        # diffs as all-gone.
+        self._last_endpoints = list(endpoints or [])
 
         # ── 4b. APPLICATION MODEL + GRAPH (§4–5, built incrementally) ────
         application, app_graph = self._build_app_state(
@@ -419,6 +442,7 @@ class Orchestrator:
                  burp_summary["requests"])
 
         # ── 10. REPORT ──────────────────────────────────────────────────
+        self._apply_reviews(findings, out_dir)
         ck.mark("report", "running")
         metrics.scan_duration_seconds = time.time() - started
         metrics.result_status_counts = {status: sum(
@@ -430,6 +454,9 @@ class Orchestrator:
             __import__("json").dumps(coverage.to_dict(), indent=2))
         ck.save_blob("coverage", coverage.to_dict())
         ck.save_blob("budgets", budgets.to_dict())
+        changes = self._flush_run_audit(
+            out_dir, target, host, started,
+            getattr(client, "scope_denials", None) or []) or {}
         render_html(out_dir / "report.html", target, findings,
                     [h.to_dict() for h in hypotheses],
                     metrics.to_dict(),
@@ -438,9 +465,137 @@ class Orchestrator:
                     coverage=coverage.to_dict(),
                     safety_info=getattr(self, "_safety_info", None),
                     leads=leads,
-                    burp=burp_summary)
+                    burp=burp_summary,
+                    changes=changes or None)
         ck.mark("report")
         log.info("done: %s (%.1fs)", host, metrics.scan_duration_seconds)
+
+    @staticmethod
+    def _apply_reviews(findings: List[Finding],
+                       out_dir: Path) -> int:
+        """Attach operator review marks to findings (report-time).
+
+        Marks surface in ``false_positive_notes`` (rendered by the
+        HTML report) and ``raw.review`` (persisted to findings.jsonl),
+        so triage decisions stick across runs via stable finding IDs.
+        Returns the number of marked findings.
+        """
+        from .reporting.reviews import load_reviews
+        index = load_reviews(out_dir / "reviews.jsonl")
+        if not len(index):
+            return 0
+        marked = 0
+        for f in findings or []:
+            record = index.verdict_for_finding(getattr(f, "id", ""))
+            if not record:
+                continue
+            verdict, reason = record["verdict"], record["reason"]
+            note = f"Operator review ({verdict})" + \
+                   (f": {reason}" if reason else "")
+            existing = str(getattr(f, "false_positive_notes", "") or "")
+            f.false_positive_notes = (
+                f"{existing} [{note}]" if existing else note)
+            try:
+                f.raw["review"] = record
+            except (TypeError, AttributeError):
+                pass
+            marked += 1
+        if marked:
+            log.info("reviews: %d finding(s) marked", marked)
+        return marked
+
+    @staticmethod
+    def _fp_suppression_reason(f, test_class, reviews) -> str:
+        """Why this finding must skip plugin re-validation, or "".
+
+        Finding-ID marks stick across runs via stable IDs; triple
+        marks catch findings whose IDs rotate per run (swap findings
+        embed victim values). Either suppresses — the probe already
+        ran and a human ruled it out.
+        """
+        if reviews is None:
+            return ""
+        mark = reviews.verdict_for_finding(getattr(f, "id", ""))
+        if mark and mark.get("verdict") == "false_positive":
+            reason = mark.get("reason", "")
+            return (f"operator-marked false positive ({f.id})"
+                    + (f": {reason}" if reason else ""))
+        from .reporting.reviews import finding_test_class
+        cls = test_class or finding_test_class(f)
+        url = normalize_url(getattr(f, "endpoint_url", "") or
+                            getattr(f, "matched_at", "") or "")
+        param = getattr(f, "parameter", "") or ""
+        if cls and url and reviews.is_fp_triple(cls, url, param):
+            from .reporting.reviews import (canonical_test_class,
+                                            canonical_triple_url)
+            return (f"operator-marked false positive "
+                    f"({canonical_test_class(cls)} "
+                    f"{canonical_triple_url(url)}::{param.strip().lower()})")
+        return ""
+
+    def _flush_run_audit(self, out_dir: Path, target: str, host: str,
+                           started_epoch: float,
+                           denials) -> dict:
+        """Persist the run + scope-gate audit trail to apex.db.
+
+        Best-effort by design: a store failure logs and never fails
+        the scan (artifacts on disk stay the system of record).
+        Returns the endpoint-change diff (for the report), or {}.
+        """
+        try:
+            from datetime import datetime, timezone
+            from . import __version__
+            from .reporting.run_store import (
+                RunStore, diff_endpoint_runs)
+            import json as _json
+            started_utc = datetime.fromtimestamp(
+                started_epoch, tz=timezone.utc).isoformat(
+                    timespec="seconds")
+            with RunStore(out_dir / "apex.db") as store:
+                previous = store.latest_run(target)
+                if previous is not None and \
+                        not previous.get("finished_utc"):
+                    # an interrupted run leaves partial inventory:
+                    # never diff against it, wait for a clean baseline
+                    previous = None
+                run_id = store.begin_run(
+                    target, host,
+                    profile=getattr(self.profile, "name", "standard"),
+                    tool_version=str(__version__),
+                    authorization_ref=str(
+                        self.cfg.safety.authorization_ref or ""),
+                    started_utc=started_utc)
+                stored = store.record_denials(run_id, denials)
+                inventoried = store.record_endpoints(
+                    run_id, list(getattr(self, "_last_endpoints",
+                                         None) or []))
+                previous_rows = [] if previous is None else \
+                    store.endpoints_for_run(previous["id"])
+                current_rows = store.endpoints_for_run(run_id)
+                changes = diff_endpoint_runs(previous_rows,
+                                             current_rows)
+                changes["against_run"] = (previous or {}).get("id")
+                (out_dir / "changes.json").write_text(
+                    _json.dumps(changes, indent=2))
+                store.finish_run(run_id)
+            if stored:
+                log.info("audit: %d scope denial(s) -> apex.db",
+                         stored)
+            log.debug("audit: %d endpoint(s) -> apex.db", inventoried)
+            if not changes.get("baseline"):
+                log.info("changes: %d new, %d changed, %d gone "
+                         "(vs run %s) -> changes.json",
+                         len(changes["new"]), len(changes["changed"]),
+                         len(changes["gone"]), changes["against_run"])
+            else:
+                log.info("changes: baseline established (%d endpoints) "
+                         "-> changes.json", len(current_rows))
+            return changes
+        except Exception as e:
+            log.debug("run audit skipped: %s", e)
+            return {}
+        except Exception as e:
+            log.debug("run audit skipped: %s", e)
 
     # =====================================================================
     # PREFLIGHT + DRY-RUN (Milestone 1)
@@ -784,16 +939,42 @@ class Orchestrator:
         for entry in self._browser_discover(
                 base_url, host, out_dir, budgets, metrics):
             self._merge_browser_entry(by_norm, host, entry)
+        # ── HAR import (first-party captures: real endpoints + shapes) ──
+        for entry in self._har_import(host):
+            self._merge_browser_entry(by_norm, host, entry)
         return list(by_norm.values())
+
+    def _har_import(self, host: str) -> List[Dict]:
+        """Parse configured HAR files into merge-ready entry dicts.
+
+        Inventory only: files are read from disk, never fetched; no
+        request is sent. Missing/unreadable files log a skip.
+        """
+        from .discovery import har as har_mod
+        out: List[Dict] = []
+        for path in (getattr(self.cfg, "har_files", None) or []):
+            data = har_mod.load_har_file(path)
+            if data is None:
+                log.info("har: skipping unreadable file %s", path)
+                continue
+            found = har_mod.parse_har(data, self.scope)
+            log.info("har: %s → %d endpoints", path, len(found))
+            out.extend(found)
+        return out
 
     @staticmethod
     def _merge_browser_entry(by_norm: Dict[str, Endpoint], host: str,
                              entry: Dict):
-        """Merge one browser-discovered request/form into the pipeline."""
+        """Merge one discovered request/form into the pipeline.
+
+        Shared by browser crawl and HAR import (both produce the same
+        entry contract); the entry's ``source`` tag drives attribution.
+        """
         from urllib.parse import urlparse
         url = entry.get("url", "")
         if not url:
             return
+        sources = list(entry.get("source") or ["browser"])
         method = (entry.get("method") or "GET").upper()
         n = normalize_url(url)
         ep = by_norm.get(n)
@@ -801,23 +982,26 @@ class Orchestrator:
             p = urlparse(n)
             ep = Endpoint(url=url, normalized_url=n,
                           host=p.hostname or host, path=p.path,
-                          method=method, source=["browser"])
+                          method=method, source=list(sources))
             by_norm[n] = ep
-        elif "browser" not in ep.source:
-            ep.source.append("browser")
+        else:
+            for src in sources:
+                if src not in ep.source:
+                    ep.source.append(src)
         new_params = []
         for name in entry.get("params") or []:
             new_params.append(Parameter(
-                name=name, location="query", source=["browser"],
+                name=name, location="query", source=list(sources),
                 confidence=Confidence.PROBABLE.value))
         for name, sample in (entry.get("body") or {}).items():
             new_params.append(Parameter(
-                name=name, location="body", source=["browser"],
+                name=name, location="body", source=list(sources),
                 sample_value=sample,
                 confidence=Confidence.PROBABLE.value))
         for name in entry.get("inputs") or []:
             new_params.append(Parameter(
-                name=name, location="body", source=["browser:form"],
+                name=name, location="body",
+                source=[f"{sources[0]}:form"],
                 confidence=Confidence.POSSIBLE.value))
         if entry.get("form_method") and ep.method == "GET":
             ep.method = entry["form_method"].upper()
@@ -1366,19 +1550,37 @@ class Orchestrator:
                 log.info("linkfinder: attached %d JS params", attached)
 
     # ── PROBE LIVE  (BUGFIX A) ──────────────────────────────────────────
+    def _scoped_subprocess_input(self, out_dir: Path, src: str,
+                                   name: str) -> Path:
+        """Write a scope-filtered input file for an external tool.
+
+        Subprocesses (httpx, nuclei, …) follow redirects themselves,
+        outside the gate — so they only ever receive in-scope lines.
+        The unfiltered source file stays intact for audit/resume.
+        """
+        lines = self._read_lines(out_dir / src)
+        kept = [u for u in lines if self.scope.is_in_scope(u)]
+        dest = out_dir / name
+        dest.write_text("\n".join(kept) + ("\n" if kept else ""))
+        log.info("subprocess input: %d in-scope / %d total -> %s",
+                 len(kept), len(lines), name)
+        return dest
+
     def _probe_live(self, out_dir: Path, live_file: Path):
-        raw = out_dir / "raw.txt"
-        if not raw.exists() or raw.stat().st_size == 0:
-            log.warning("nothing to probe — raw.txt empty")
+        probe_input = self._scoped_subprocess_input(
+            out_dir, "raw.txt", "probe-input.txt")
+        if probe_input.stat().st_size == 0:
+            log.warning("nothing to probe — no in-scope URLs")
+            live_file.write_text("")
             return
         if not which("httpx"):
-            log.warning("httpx missing — falling back to raw.txt as live set")
-            live_file.write_text(raw.read_text())
+            log.warning("httpx missing — falling back to in-scope raw set")
+            live_file.write_text(probe_input.read_text())
             return
         r = run([
             "httpx", "-silent",
             "-mc", LIVE_CODES,
-            "-l", str(raw),
+            "-l", str(probe_input),
             "-o", str(live_file),
         ], timeout=self.cfg.scan.timeout * 2)
         if r.timed_out:
@@ -1509,6 +1711,14 @@ class Orchestrator:
                   budgets: BudgetTracker, coverage: CoverageTracker,
                   app_graph=None, ck=None) -> List[Finding]:
         out: List[Finding] = []
+        # Operator review marks (reviews.jsonl): FP triples suppress
+        # repeat prescreen probing; finding-ID marks link via triples.
+        from .reporting.reviews import load_reviews, resolve_finding_triples
+        reviews = load_reviews(out_dir / "reviews.jsonl")
+        if len(reviews):
+            linked = resolve_finding_triples(reviews, findings)
+            log.info("reviews: %d mark(s), %d FP triple(s) (%d linked)",
+                     len(reviews), len(reviews.triples), linked)
 
         # Open redirects are checked only during an explicitly enabled
         # validation run, never merely because OAST/differential was selected.
@@ -1520,6 +1730,11 @@ class Orchestrator:
                 max_endpoints=self.cfg.validation.open_redirect_max_endpoints,
                 max_params=self.cfg.validation.open_redirect_max_params,
                 timeout=self.cfg.scan.http_timeout)
+
+        # GraphQL introspection exposure (schema disclosure inventory).
+        if (self.profile.run_validation or self.cfg.validation.enabled):
+            out += self._graphql_introspection_probe(
+                endpoints, evidence, metrics, budgets, coverage, client)
 
         # 0) WAF fingerprint from a live probe (drives mutation choice)
         waf = metrics.waf_detected or ""
@@ -1652,7 +1867,7 @@ class Orchestrator:
                     and self.cfg.validation.mutation):
                 findings += self._prescreen_sweep(
                     endpoints, findings, evidence, metrics, budgets,
-                    coverage, client)
+                    coverage, client, reviews)
 
             # 3) per-finding plugins (§48: registry + TestResult)
             test_ctx = TestContext(
@@ -1666,6 +1881,13 @@ class Orchestrator:
             by_norm = {e.normalized_url: e for e in endpoints}
             for f in findings:
                 test_class = _classify_finding(f)
+                suppressed = self._fp_suppression_reason(
+                    f, test_class, reviews)
+                if suppressed:
+                    coverage.mark_untestable(test_class, suppressed)
+                    log.info("plugins: skipping %s (%s)", f.id,
+                             suppressed)
+                    continue
                 ep = self._finding_endpoint(f, by_norm)
                 target = TestTarget(
                     f.matched_at,
@@ -2000,7 +2222,8 @@ class Orchestrator:
                            findings: List[Finding],
                            evidence: EvidenceStore, metrics: Metrics,
                            budgets: BudgetTracker,
-                           coverage: CoverageTracker, client
+                           coverage: CoverageTracker, client,
+                           reviews=None
                            ) -> List[Finding]:
         """Probe endpoint parameters with the mutation prescreens directly.
 
@@ -2008,7 +2231,8 @@ class Orchestrator:
         sweep closes that lead dependency for SQLi/XSS prescreens only
         (no heavy tools, no delays). Hits become findings so the plugin
         loop below can drive sqlmap/dalfox confirmation. Silence records
-        nothing: a prescreen miss is not a negative.
+        nothing: a prescreen miss is not a negative. Triples marked
+        false-positive in reviews.jsonl are skipped as untestable.
         """
         from .safety.preflight import plan_prescreen
         from .validation.differential import IDOR_PARAM_NAMES
@@ -2079,6 +2303,16 @@ class Orchestrator:
                 for test_class in ("sqli", "xss"):
                     if (test_class, ep.normalized_url, name) in covered:
                         continue
+                    if reviews is not None and reviews.is_fp_triple(
+                            test_class, ep.normalized_url, name):
+                        coverage.mark_untestable(
+                            test_class,
+                            f"operator-marked false positive: "
+                            f"{ep.normalized_url}::{name}")
+                        log.info("prescreen-sweep: skipping %s (marked "
+                                 "false positive in reviews.jsonl)",
+                                 f"{ep.normalized_url}::{name}")
+                        continue
                     candidate = Candidate(
                         finding=Finding(id="probe", source="prescreen"),
                         test_class=test_class, endpoint_url=ep.url,
@@ -2139,6 +2373,97 @@ class Orchestrator:
                              name, ep.url)
         return new_findings
 
+    def _graphql_introspection_probe(self, endpoints: List[Endpoint],
+                                         evidence: EvidenceStore,
+                                         metrics: Metrics,
+                                         budgets: BudgetTracker,
+                                         coverage: CoverageTracker,
+                                         client) -> List[Finding]:
+        """Probe GraphQL endpoints for enabled __schema introspection.
+
+        One minimal document per endpoint (type inventory only). POST
+        endpoints go through the state-change gate like any mutating
+        method — introspection is read-only by contract, but the gate
+        cannot prove that, so POST needs --ack-state-change.
+        """
+        from .validation.graphql_introspection import (
+            _MAX_ENDPOINTS, probe_introspection)
+        targets = [e for e in endpoints or []
+                   if getattr(e, "endpoint_type", "") == "graphql"]
+        targets = targets[:_MAX_ENDPOINTS]
+        if not targets:
+            log.info("graphql-introspection: no GraphQL endpoints "
+                     "discovered — nothing to probe")
+            return []
+        if not self._reserve_or_block(
+                budgets, coverage, "graphql",
+                plan_graphql_introspection(len(targets))):
+            return []
+        findings: List[Finding] = []
+        for ep in targets:
+            if self._halted():
+                log.info("graphql-introspection: halted by stop control")
+                break
+            if not self.scope.active_test_allowed(ep.url):
+                continue
+            if not budgets.consume_test(
+                    "graphql", ep.normalized_url, limit=2):
+                coverage.record("graphql", "blocked",
+                                f"budget: {ep.normalized_url}")
+                continue
+            try:
+                res = probe_introspection(
+                    client, ep.url, ep.method or "GET",
+                    timeout=self.cfg.scan.http_timeout)
+            except BudgetExceeded:
+                coverage.record("graphql", "blocked",
+                                f"budget: {ep.normalized_url}")
+                continue
+            if res.exposed is None:
+                coverage.record("graphql", "inconclusive",
+                                f"{ep.normalized_url}: {res.notes}")
+                continue
+            if not res.exposed:
+                coverage.record("graphql", "tested_negative",
+                                f"{ep.normalized_url}: {res.notes}")
+                continue
+            self._note_candidate()
+            coverage.record("graphql", "candidate", res.notes)
+            coverage.record("info_disclosure", "candidate", res.notes)
+            f = Finding(
+                id=stable_finding_id("graphql-intro",
+                                     ep.normalized_url),
+                source="graphql-introspection",
+                name=(f"GraphQL introspection enabled "
+                      f"({len(res.types)} types disclosed, {ep.path})"),
+                severity="low",
+                confidence=Confidence.PROBABLE.value,
+                validation_status=ValidationStatus.
+                STRONG_CANDIDATE.value,
+                host=ep.host, matched_at=ep.url,
+                endpoint_url=ep.url, method=(ep.method or "GET"),
+                description=res.notes,
+                tags=["graphql", "info_disclosure",
+                      ep.endpoint_type],
+                raw={"types": res.types, "method": res.method,
+                     "status": res.status},
+                false_positive_notes=(
+                    "Schema exposure alone is not a vulnerability: "
+                    "assess whether disclosed types/fields reveal "
+                    "non-public operations or data before reporting. "
+                    "Some frameworks scope introspection per role — "
+                    "compare authenticated vs anonymous answers by hand."),
+            )
+            evidence.allocate(f)
+            evidence.record(
+                f,
+                request_text=(f"{res.method} {ep.url}\n"
+                              f"introspection document (type inventory)"),
+                response_text=res.notes)
+            findings.append(f)
+            log.info("graphql-introspection: %s", res.notes)
+        return findings
+
     def _differential_probe(self, endpoints: List[Endpoint],
                             diff: DifferentialTester,
                             evidence: EvidenceStore, metrics: Metrics,
@@ -2193,6 +2518,13 @@ class Orchestrator:
                                 f"{ep.normalized_url}: edge/bot-wall "
                                 f"answers; app never reached")
                 continue
+            if any(getattr(c, "error", "") for c in res.contexts):
+                # Rule 1: incomplete comparisons stay inconclusive,
+                # never tested_negative.
+                coverage.record("authz", "inconclusive",
+                                f"{ep.normalized_url}: incomplete "
+                                f"context comparison")
+                continue
             if res.verdict != "strong_candidate":
                 # tested, no authorization gap observed (§45)
                 coverage.record("authz", "tested_negative",
@@ -2224,7 +2556,10 @@ class Orchestrator:
                 description=res.notes,
                 tags=["bola", "idor", "authz", ep.endpoint_type],
                 raw={"contexts": [vars(c) for c in res.contexts],
-                     "endpoint_type": ep.endpoint_type},
+                     "endpoint_type": ep.endpoint_type,
+                     "confirmed": bool(getattr(res, "confirmed", False)),
+                     "confirmation_notes": getattr(
+                         res, "confirmation_notes", "")},
                 false_positive_notes=(
                     "Responses compared across auth contexts; volatile "
                     "keys (csrf/token/timestamp/nonce) excluded; length "
@@ -2240,7 +2575,10 @@ class Orchestrator:
                     "GET " + ep.url + "\n--- per-context results ---\n" +
                     "\n".join(f"{c.name}: HTTP {c.status} "
                               f"(len={c.length}, shape={c.key_shape[:60] or 'n/a'}, "
-                              f"hash={c.body_hash})"
+                              f"hash={c.body_hash}, "
+                              f"ct={getattr(c, 'content_type', '') or 'n/a'}, "
+                              f"{getattr(c, 'elapsed_ms', 0.0):.0f}ms"
+                              f"{', sig=' + getattr(c, 'error_signature', '') if getattr(c, 'error_signature', '') else ''})"
                               for c in res.contexts)),
                 response_text=res.notes)
             findings.append(f)
@@ -3731,6 +4069,14 @@ class Orchestrator:
                     response = client.post(request_url, **request_kwargs)
                 else:
                     raise RuntimeError("HTTP client lacks generic request support")
+            except ScopeRefused as exc:
+                # Gate denial (a BudgetExceeded subclass): the injection
+                # never ran — blocked, never incomplete/negative.
+                coverage.record("second_order_ssrf", "blocked",
+                                f"scope-gate {exc.reason}: "
+                                f"{ep.normalized_url}::{parameter.name}")
+                budget_blocked = True
+                continue
             except BudgetExceeded:
                 coverage.record("second_order_ssrf", "blocked",
                                 f"budget: {ep.normalized_url}"
@@ -5070,10 +5416,20 @@ def _classify_finding(f: Finding) -> str:
 
 
 class _HTTPClient:
+    # Methods that never change server state (read-only discovery).
+    # Everything else goes through the gate as an active, state-changing
+    # test (scope + private-IP + state-change acknowledgement).
+    _READ_METHODS = frozenset({"GET", "HEAD", "OPTIONS"})
+
     def __init__(self, limiter: Optional[AdaptiveRateLimiter] = None,
                  budgets: Optional[BudgetTracker] = None,
                  extra_headers: Optional[Dict[str, str]] = None,
-                 user_agent: str = ""):
+                 user_agent: str = "",
+                 scope=None,
+                 resolver=None,
+                 allow_private_targets: bool = False,
+                 allow_state_change: bool = False,
+                 approved_cidrs=None):
         import requests
         self.session = requests.Session()
         self.session.headers.update({
@@ -5085,6 +5441,15 @@ class _HTTPClient:
                 self.session.headers[name.strip()] = value
         self.limiter = limiter
         self.budgets = budgets
+        # Default-deny gate (safety/gate.py). None = ungated, preserving
+        # today's behavior for direct unit calls; the orchestrator always
+        # passes its Scope. Denials are recorded, never sent.
+        self.scope = scope
+        self.resolver = resolver
+        self.allow_private_targets = allow_private_targets
+        self.allow_state_change = allow_state_change
+        self.approved_cidrs = list(approved_cidrs or [])
+        self.scope_denials: List[Dict[str, str]] = []
 
     def _budget_ok(self, url: str, mutating: bool = False):
         if not self.budgets:
@@ -5101,7 +5466,32 @@ class _HTTPClient:
         if not self.budgets.consume_request(host, url):
             raise BudgetExceeded(f"budget exceeded for {host}")
 
+    def _gate(self, url: str, method: str):
+        """Enforce the default-deny gate before any request is sent.
+
+        Ungated (``scope=None``) clients keep today's behavior for
+        direct unit calls. Denials raise ScopeRefused and are recorded
+        in ``scope_denials``; denied requests never touch the limiter,
+        budgets, or the network.
+        """
+        if self.scope is None:
+            return
+        from .safety.gate import can_send, ScopeRefused
+        read_only = method.upper() in self._READ_METHODS
+        decision = can_send(
+            url, self.scope, self.resolver, method=method,
+            active_test=not read_only, is_state_changing=not read_only,
+            allow_private_targets=self.allow_private_targets,
+            allow_state_change=self.allow_state_change,
+            approved_cidrs=self.approved_cidrs)
+        if not decision.allowed:
+            self.scope_denials.append(
+                {"url": url, "method": method.upper(),
+                 "reason": decision.reason})
+            raise ScopeRefused(decision.reason, url)
+
     def get(self, url, **kw):
+        self._gate(url, "GET")
         if self.limiter:
             self.limiter.before_request()
         self._budget_ok(url)
@@ -5111,6 +5501,7 @@ class _HTTPClient:
         return r
 
     def post(self, url, **kw):
+        self._gate(url, "POST")
         if self.limiter:
             self.limiter.before_request()
         self._budget_ok(url, mutating=True)
@@ -5121,6 +5512,7 @@ class _HTTPClient:
 
     def request(self, method, url, **kw):
         """Generic verb (PUT/PATCH/DELETE…) with limiter + budget gates."""
+        self._gate(url, method)
         if self.limiter:
             self.limiter.before_request()
         self._budget_ok(url, mutating=method.upper() != "GET")
