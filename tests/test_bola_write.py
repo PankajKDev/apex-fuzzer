@@ -311,10 +311,13 @@ def test_orchestrator_emits_confirmed_write_finding(tmp_path):
     owner = SimpleNamespace(name="owner", tenant="acme",
                             auth_headers={"Cookie": "session=OWNER"})
     victims = [_victim()]
-    findings = orch._authz_write_replay(
+    from main.stages.validation import ProbeControls
+    from main.stages.validation.authz import authz_write_replay
+    findings = authz_write_replay(
         ep, victims, [owner, _tester()], _owner_headers(),
         EvidenceStore(tmp_path / "proofs"), Metrics(), CoverageTracker(),
-        http, {"id"})
+        http, {"id"}, orch.cfg, orch.scope,
+        ProbeControls.from_orchestrator(orch))
     assert len(findings) == 1
     finding = findings[0]
     assert finding.source == "bola-write"

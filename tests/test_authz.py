@@ -357,9 +357,12 @@ def test_extended_artifact_and_escalation_coverage(tmp_path):
     ids = [Identity(name="user_a", auth_headers={"Cookie": "s=A"}),
            Identity(name="admin", roles=["admin"],
                     auth_headers={"Cookie": "s=ROOT"})]
-    found = orch._authz_matrix_probe(
+    from main.stages.validation import ProbeControls
+    from main.stages.validation.authz import authz_matrix_probe
+    found, _, _ = authz_matrix_probe(
         [ep], EvidenceStore(out / "proofs"), Metrics(),
-        BudgetTracker(cfg), CoverageTracker(), H(), out, ids)
+        BudgetTracker(cfg), CoverageTracker(), H(), out, ids,
+        cfg, orch.scope, ProbeControls.from_orchestrator(orch))
     art = json.loads((out / "authorization_matrix.json").read_text())
     assert "extended" in art and "views" in art
     assert set(art["views"]) == {"roles", "vertical_escalations",

@@ -200,11 +200,6 @@ def run_nuclei_stage(cfg, profile, scope, out_dir: Path,
                         f"nuclei template {f.template_id}")
     return findings, fresh_nuclei
 def _classify(finding: Finding) -> str:
-    """Nuclei finding → coverage class.
-
-    Deferred import: the canonical mapping lives on the orchestrator
-    until the validation slice moves it; stages must not import the
-    orchestrator at module load (circular).
-    """
-    from ..orchestrator import _classify_finding
-    return _classify_finding(finding)
+    """Nuclei finding → coverage class."""
+    from ..reporting.coverage import classify_finding
+    return classify_finding(finding)

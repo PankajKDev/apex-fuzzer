@@ -407,9 +407,12 @@ def test_authz_matrix_probe_bola_and_bfla():
            Identity(name="user_b", tenant="t1",
                     auth_headers={"Cookie": "s=B"})]
     m, cov = Metrics(), CoverageTracker()
-    found = orch._authz_matrix_probe(
+    from main.stages.validation import ProbeControls
+    from main.stages.validation.authz import authz_matrix_probe
+    found, _, _ = authz_matrix_probe(
         eps, EvidenceStore(out / "proofs"), m, BudgetTracker(cfg),
-        cov, _matrix_http(), out, ids)
+        cov, _matrix_http(), out, ids, cfg, orch.scope,
+        ProbeControls.from_orchestrator(orch))
     kinds = {f.source for f in found}
     assert "idor-swap" in kinds and "authz-matrix" in kinds
     swap = [f for f in found if f.source == "idor-swap"][0]
@@ -427,10 +430,13 @@ def test_authz_matrix_single_identity_untestable(tmp_path):
     from main.budgets import BudgetTracker
     from main.validation.evidence import EvidenceStore
     cov = CoverageTracker()
-    found = orch._authz_matrix_probe(
+    from main.stages.validation import ProbeControls
+    from main.stages.validation.authz import authz_matrix_probe
+    found, _, _ = authz_matrix_probe(
         [_ep("https://t.com/api/u")], EvidenceStore(out / "proofs"),
         Metrics(), BudgetTracker(Config()), cov, _matrix_http(), out,
-        [Identity(name="anonymous")])
+        [Identity(name="anonymous")], Config(), orch.scope,
+        ProbeControls.from_orchestrator(orch))
     assert found == [] and cov.summary()["authz"] == "untestable"
 
 
@@ -443,10 +449,13 @@ def test_authz_matrix_budget_blocked():
     cfg = Config()
     cfg.budgets.authz_tests_per_endpoint = 0
     cov = CoverageTracker()
-    found = orch._authz_matrix_probe(
+    from main.stages.validation import ProbeControls
+    from main.stages.validation.authz import authz_matrix_probe
+    found, _, _ = authz_matrix_probe(
         [_ep("https://t.com/api/u")], EvidenceStore(out / "proofs"),
         Metrics(), BudgetTracker(cfg), cov, _matrix_http(), out,
-        [Identity(name="anonymous"), Identity(name="user_a")])
+        [Identity(name="anonymous"), Identity(name="user_a")],
+        cfg, orch.scope, ProbeControls.from_orchestrator(orch))
     assert found == [] and cov.summary()["authz"] == "blocked"
 
 

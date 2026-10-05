@@ -266,6 +266,8 @@ def _run_matrix(out_dir, http, identities, app_graph=None):
     from main.reporting.coverage import CoverageTracker
     from main.budgets import BudgetTracker
     from main.validation.evidence import EvidenceStore
+    from main.stages.validation import ProbeControls
+    from main.stages.validation.authz import authz_matrix_probe
     out = Path(out_dir)
     cfg = Config()
     cfg.authorization.enabled = True
@@ -274,10 +276,15 @@ def _run_matrix(out_dir, http, identities, app_graph=None):
     eps = [_ep("https://t.com/api/u")]
     eps[0].query_parameters.append(Parameter(
         name="id", location="query", source=["url"], sample_value="1"))
-    found = orch._authz_matrix_probe(
+    found, matrix, pool = authz_matrix_probe(
         eps, EvidenceStore(out / "proofs"), Metrics(),
         BudgetTracker(cfg), CoverageTracker(), http, out, identities,
+        cfg, orch.scope, ProbeControls.from_orchestrator(orch),
         app_graph=app_graph)
+    orch._harvest_pool = pool
+    orch._last_matrix = matrix
+    if app_graph is not None:
+        orch._record_behavioral_state(app_graph, matrix, out)
     return orch, out, found
 
 

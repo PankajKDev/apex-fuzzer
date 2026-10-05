@@ -557,9 +557,12 @@ def test_swap_negative_coverage_recorded():
     eps = [_ep("https://t.com/denied?uid=9", [("uid", "9")])]
     ids = [_ident("anonymous"), _ident("user_a", headers={"Cookie": "s"})]
     cov = CoverageTracker()
-    found = orch._authz_matrix_probe(
+    from main.stages.validation import ProbeControls
+    from main.stages.validation.authz import authz_matrix_probe
+    found, _, _ = authz_matrix_probe(
         eps, EvidenceStore(out / "proofs"), Metrics(),
-        BudgetTracker(cfg), cov, H(), out, ids)
+        BudgetTracker(cfg), cov, H(), out, ids, cfg, orch.scope,
+        ProbeControls.from_orchestrator(orch))
     assert found == []  # owner gets 403 too → nothing harvested, no swap
     # matrix still ran the method sweep; no false candidate recorded
     assert cov.summary()["bola"] == "not_tested"
