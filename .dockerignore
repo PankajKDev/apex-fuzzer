@@ -1,0 +1,17 @@
+.venv/
+.venv*/
+__pycache__/
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+.git/
+output/
+output.html
+.env
+*.egg-info/
+build/
+dist/
+progress.md
+guide.md
+tests/
+docs/local-lab/

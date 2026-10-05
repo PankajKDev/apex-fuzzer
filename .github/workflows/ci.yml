@@ -47,7 +47,7 @@ jobs:
         run: |
           python -m pip install --upgrade pip
           pip install -e '.[integration]' pytest pyyaml pytest-cov
-      - name: Test suite with coverage (floor: measured baseline)
+      - name: "Test suite with coverage (floor: measured baseline)"
         run: python -m pytest tests/ -q --cov=apex_fuzzer
           --cov-report=term-missing --cov-fail-under=70
 
@@ -91,3 +91,12 @@ jobs:
         run: |
           pip install --force-reinstall --no-deps dist/*.tar.gz
           python -c "import apex_fuzzer; print(apex_fuzzer.__version__)"
+
+  container:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build runtime image
+        run: docker build -t apex-fuzzer:ci .
+      - name: "Smoke test (no network: help + config check)"
+        run: docker run --rm --network none apex-fuzzer:ci --help

@@ -33,6 +33,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--seed-urls", default=None,
                    help="File with manual seed URLs (one per line), "
                         "merged into discovery for every target")
+    p.add_argument("--har", default=None, action="append",
+                   help="HAR 1.2 capture to import into the endpoint "
+                        "pool (repeatable; inventory only, no replay)")
     p.add_argument("-c", "--config", help="Path to config.yaml")
     p.add_argument("--fast", action="store_true")
     p.add_argument("--deep", action="store_true")
@@ -86,6 +89,11 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--no-js", action="store_true")
     p.add_argument("--min-sev", default=None,
                    choices=["info", "low", "medium", "high", "critical"])
+    p.add_argument("--fail-on", default=None,
+                   choices=["info", "low", "medium", "high", "critical"],
+                   help="CI mode: exit 1 when any finding meets the "
+                        "severity (bounty mode stays exit 0 with a "
+                        "report; refusals always exit 2)")
     p.add_argument("--resume", action="store_true")
     p.add_argument("--output", default="output")
     p.add_argument("--profile", default="standard",
@@ -390,6 +398,44 @@ def load_dotenv(path: "Path | str" = ".env") -> int:
     return loaded
 
 
+_SEVERITY_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3,
+                  "critical": 4}
+
+
+def fail_on_triggered(output_base, targets,
+                      threshold: str) -> list[str]:
+    """Findings at/above threshold after a run (CI gating).
+
+    Reads each target's findings.jsonl (the same artifacts the report
+    renders). Returns "severity: name (id)" lines for triage logs;
+    empty means the gate passes. Never raises on missing files.
+    """
+    import json as _json
+    hits: list[str] = []
+    rank = _SEVERITY_RANK.get((threshold or "").lower(), 4)
+    for target in targets or []:
+        host = (str(target or "").replace("http://", "")
+                .replace("https://", "").split("/")[0])
+        path = Path(output_base or "output") / host / "findings.jsonl"
+        try:
+            lines = path.read_text(errors="ignore").splitlines()
+        except OSError:
+            continue
+        for line in lines:
+            try:
+                finding = _json.loads(line)
+            except ValueError:
+                continue
+            if not isinstance(finding, dict):
+                continue
+            sev = str(finding.get("severity", "info")).lower()
+            if _SEVERITY_RANK.get(sev, 0) >= rank:
+                hits.append(f"{sev}: "
+                            f"{finding.get('name', '')} "
+                            f"({finding.get('id', '')})")
+    return hits
+
+
 def main():
     import logging
     load_dotenv()
@@ -461,6 +507,16 @@ def main():
                   "--ack-state-change, approved domains/modules and a "
                   "valid window, or drop --strict", EXIT_REFUSED)
         sys.exit(EXIT_REFUSED)
+    if getattr(args, "fail_on", None):
+        hits = fail_on_triggered(args.output, targets, args.fail_on)
+        if hits:
+            log.error("--fail-on %s: %d finding(s) at/above threshold",
+                      args.fail_on, len(hits))
+            for hit in hits[:20]:
+                log.error("  %s", hit)
+            sys.exit(1)
+        log.info("--fail-on %s: gate passes (no findings at/above)",
+                 args.fail_on)
 
 
 if __name__ == "__main__":

@@ -426,6 +426,24 @@ def test_seed_urls_config_file_and_scope_filter(tmp_path):
     assert cfg.validate()["errors"] == []
 
 
+def test_har_files_cli_config_and_missing_warns(tmp_path):
+    from apex_fuzzer.cli import build_parser
+    from apex_fuzzer.config import apply_cli_overrides
+    har = tmp_path / "capture.har"
+    har.write_text('{"log": {"entries": []}}')
+    args = build_parser().parse_args(
+        ["-d", "example.test", "--har", str(har), "--har", "other.har"])
+    cfg = apply_cli_overrides(Config(), args)
+    assert cfg.har_files == [str(har), "other.har"]
+    result = cfg.validate()
+    assert result["errors"] == []
+    assert any("other.har" in w for w in result["warnings"])
+    cfg_file = tmp_path / "c.yaml"
+    cfg_file.write_text("har_files:\n"
+                        f"  - {har}\n")
+    assert Config.load(str(cfg_file)).har_files == [str(har)]
+
+
 def test_authenticated_recon_identity_headers(tmp_path):
     from apex_fuzzer.orchestrator import Orchestrator, _header_arg
     from apex_fuzzer.profiles import get as get_profile
@@ -505,3 +523,25 @@ def test_recon_stays_anonymous_by_default(tmp_path, monkeypatch):
     orch._recon("https://example.test", tmp_path)
     assert not [a for a in seen if "-H" in a or "-h" in a[1:2]]
     assert not (tmp_path / "katana-authed.txt").exists()
+
+
+def test_fail_on_flag_and_threshold(tmp_path):
+    import json
+    from apex_fuzzer.cli import build_parser, fail_on_triggered
+    args = build_parser().parse_args(["-d", "example.test",
+                                      "--fail-on", "high"])
+    assert args.fail_on == "high"
+    host_dir = tmp_path / "example.test"
+    host_dir.mkdir()
+    (host_dir / "findings.jsonl").write_text("\n".join([
+        json.dumps({"id": "a", "name": "XSS", "severity": "medium"}),
+        json.dumps({"id": "b", "name": "BOLA", "severity": "high"}),
+        "not json",
+    ]))
+    hits = fail_on_triggered(tmp_path, ["https://example.test/x"],
+                             "high")
+    assert len(hits) == 1 and hits[0].startswith("high: BOLA")
+    assert fail_on_triggered(tmp_path, ["https://example.test/x"],
+                             "critical") == []
+    assert fail_on_triggered(tmp_path, ["https://missing.test/x"],
+                             "low") == []

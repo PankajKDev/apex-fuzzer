@@ -110,6 +110,12 @@ Practical guidance:
 - `deep` is the broadest automated pass; `api`/`authenticated` focus
   the auth engines. Race and business-logic stay opt-in flags because
   they submit state-changing requests.
+- **CI mode for owned apps** (`--fail-on high`): exit 1 when any
+  finding meets the severity — gate merges on it. Bounty mode is the
+  default (exit 0 with a report; strict refusals always exit 2).
+  A pinned `python:3.12-slim` runtime image lives in `Dockerfile`
+  (`docker build -t apex-fuzzer .`); DAST binaries stay out of the
+  image — run `apex-fuzzer --update` inside, or mount a tools volume.
 
 ## 3b. Burp handoff (verify leads by hand)
 
@@ -127,6 +133,30 @@ values — templates for manual testing, never probes. Cookie and
 Authorization values are never exported: attach your own session
 (session handling / a logged-in Burp browser) before replaying
 anything authenticated.
+
+## 3c. Review marks (tune out repeat noise)
+
+After triaging a run, record verdicts in `output/<host>/reviews.jsonl`
+(one JSON object per line — stable finding IDs keep marks valid
+across runs):
+
+```json
+{"finding_id": "diff-abc123…", "verdict": "false_positive",
+ "reason": "login page served with 200 to everyone"}
+{"finding_id": "diff-abc123…", "verdict": "false_positive",
+ "test_class": "sqli", "endpoint": "https://h/api/u/1",
+ "parameter": "id"}
+```
+
+The next run attaches marks to findings (visible in the report's
+false-positive notes) and skips prescreen re-probing of exact
+false-positive triples — finding-ID marks link to triples via the
+finding's class, endpoint, and parameter. Plugin re-validation
+(sqlmap/dalfox) skips marked findings the same way, including swap
+findings whose IDs rotate per run (matched by triple, with the
+authorization family idor/bola/authz treated as one class and
+query strings stripped from endpoint keys). True-positive marks are
+retained as evidence. Malformed lines never fail a scan.
 
 ## 4. Configuration
 
@@ -151,10 +181,43 @@ sections:
   acknowledgment, request/state caps, stop-on-candidate, pacer.
 - `scope`: allowed domains (auto-seeded from the first target),
   subdomain handling, exclusions.
+- Top-level `seed_urls` / `har_files`: operator-supplied discovery
+  input (see §4b). `--seed-urls FILE` merges manual URLs into the
+  recon pool; `--har FILE` (repeatable) imports HAR 1.2 captures
+  into the endpoint pool with observed request shapes. Both are
+  scope-filtered; HAR import is inventory only (nothing sent).
 
 Validate any edit with `Config.load('config.yaml')` semantics — the
 suite checks this — and preview impact with `--dry-run` (zero network,
 exit 0, writes `preflight.json` with per-module cost estimates).
+
+## 4b. First-party captures (HAR import)
+
+Export an authenticated session from DevTools (Network → Export HAR)
+or Burp, then import it — captures beat crawling for real endpoints,
+request bodies, and object IDs:
+
+```bash
+apex-fuzzer -d example.com --har user-a.har --har admin.har
+```
+
+```yaml
+har_files: ["captures/user-a.har"]   # same input via config file
+```
+
+Rules: out-of-scope and static-asset entries are dropped; Cookie /
+Authorization headers never enter retained material; body and query
+sample values are blanked (exact bytes stay runtime-only for replay
+fidelity and never reach artifacts); oversized bodies keep inventory
+but drop bytes. Imported POST/PUT shapes feed the same observed-request
+consumers as browser traffic (sqlmap raw replay, write replay).
+
+External tools (httpx, nuclei, crawlers) run as subprocesses and
+follow redirects themselves, outside the scope gate. The tool only
+ever hands them scope-filtered inputs (`probe-input.txt`,
+`nuclei-input.txt`; findings stay scope-filtered after the scan), but
+a redirect chain inside a subprocess can still resolve out-of-scope —
+treat subprocess output as untrusted discovery, never as proof.
 
 ## 5. Authentication contexts (two accounts unlock everything)
 
@@ -197,26 +260,42 @@ stop at a manual checkpoint: never bypassed, never auto-retried.
 
 Validation runs only in validation-enabled scans, in this order:
 
-1. **Differential testing** — same endpoint under each identity;
+1. **GraphQL introspection** — one minimal `__schema` document per
+   GraphQL endpoint (type inventory only). Disclosure is a candidate
+   (sensitivity needs human review); a valid GraphQL answer without
+   `__schema` is a genuine negative. POST endpoints pass through the
+   state-change gate, so they need `--ack-state-change`.
+2. **Differential testing** — same endpoint under each identity;
    two matching 200s (or anonymous 200 on admin/API) become BOLA /
-   broken-access candidates.
-2. **MFA transitions** — needs one `mfa_pending` context: a pre-MFA
+   broken-access candidates. Shape matches require agreeing
+   content types; an anonymous HTML 200 against API content is
+   login-wall shadowing, not access. Same-status error-signature
+   asymmetry (one context leaks a framework traceback, the other
+   does not) and redirect-path divergence across sessions are
+   candidates; anonymous-redirect-while-authed-200 is healthy.
+   Latency is recorded per context for evidence (single samples
+   never decide). Candidates get one confirmation repeat:
+   a contradictory second run downgrades to inconclusive (single-sample
+   dynamics), while a blocked repeat keeps the candidate as
+   single-sample evidence. Errored comparisons stay inconclusive,
+   never negatives.
+3. **MFA transitions** — needs one `mfa_pending` context: a pre-MFA
    session seeing the same protected object as a post-MFA session is
    a session-issuance flaw; a denied pre-session is healthy.
-3. **Authz matrix** — harvest object IDs per identity, swap them
+4. **Authz matrix** — harvest object IDs per identity, swap them
    cross-identity (GET reads), sweep HTTP methods per identity
    (BFLA), replay GraphQL query operations with victim variables.
    Optional **write replay** (`authorization.write_replay` plus
    `--ack-state-change`, test accounts only): the attacker's own
    observed mutating request with the victim ID, confirmed only by
    owner readback showing persisted values.
-4. **OAST sweep** — URL-like params get per-request Interactsh
+5. **OAST sweep** — URL-like params get per-request Interactsh
    callbacks (HTTP + HTTPS). A correlated callback confirms a
    server-side fetch. When direct callbacks miss, bounded
    parser-bypass variants (IP forms, userinfo-decoy, …) fire with
    fresh nonces. Callback ≠ internal data access: a reflected token
    is recorded as a full-read *signal*, never proof.
-5. **Per-finding plugins** — mutation prescreens run first (cheap
+6. **Per-finding plugins** — mutation prescreens run first (cheap
    signal on WAF-blocked targets), then the heavy validators:
    parameter-pinned sqlmap (`--level 1 --risk 1`, boolean/error/union;
    time-based only with `--sqli-time`), Dalfox with Playwright
@@ -224,18 +303,18 @@ Validation runs only in validation-enabled scans, in this order:
    paired-arithmetic SSTI, nonce-correlated XXE on retained XML,
    marker-file traversal. Each tool's result is kept; conflicting
    positive/negative signals resolve to inconclusive.
-6. **Lead-independent prescreen sweep** — endpoint parameters go
+7. **Lead-independent prescreen sweep** — endpoint parameters go
    through the SQLi/XSS prescreens even with no Nuclei lead; hits
    re-enter the plugin loop for tool confirmation.
-7. **Stored XSS / stored SSRF** (opt-in, they persist server-side
+8. **Stored XSS / stored SSRF** (opt-in, they persist server-side
    canaries), **business logic** (needs your invariants plus
    readback), **race** (synchronized bursts, most aggressive test in
    the suite — enable deliberately or not at all).
-8. **OAuth transitions** — authorize URLs from traffic analyzed
+9. **OAuth transitions** — authorize URLs from traffic analyzed
    offline (missing `state`, implicit flow); PKCE-strip and
    OAST-redirect probes only *observe* the authorize answer, never
    redeem codes or follow redirects.
-9. **Cache deception** — anonymous/victim/re-read triple under unique
+10. **Cache deception** — anonymous/victim/re-read triple under unique
    cache keys; shared entries never touched. Poisoning stays manual.
 
 Result vocabulary (canonical `result_status`): `observation` (signal
