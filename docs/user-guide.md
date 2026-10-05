@@ -345,8 +345,13 @@ Open `report.html`: Verified Effects, Candidates, then Observations &
 Inconclusive, each with severity, reproduction steps, FP notes, a curl
 one-liner, and evidence-file links. The Coverage section names tested
 vs explicitly untested classes — untested means untested, not safe.
-`findings.jsonl` is the machine-readable record; `proofs/finding-NNN/`
-holds the raw evidence; `coverage.json`/`metrics.json` summarize.
+`findings.jsonl` is the machine-readable record; `sarif.json` is the
+same findings as SARIF 2.1.0 for CI ingestion (triage feed, not
+evidence); `proofs/finding-NNN/` holds the raw evidence;
+`coverage.json`/`metrics.json` summarize. Ask for any finding's full
+story with `apex-fuzzer --explain FINDING-ID` (searches `--output`,
+zero network): status, signals, FP checks, review marks, and the
+human checklist.
 
 Triage rules that prevent false reports:
 

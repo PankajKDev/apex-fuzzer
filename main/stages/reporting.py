@@ -189,4 +189,11 @@ def render_report(out_dir: Path, target: str, host: str,
                 changes=changes or None)
     ck.mark("report")
     log.info("done: %s (%.1fs)", host, metrics.scan_duration_seconds)
+    from .sarif import write_sarif
+    from .. import __version__
+    try:
+        write_sarif(out_dir, [f.to_dict() for f in findings],
+                    str(__version__))
+    except Exception as e:
+        log.debug("sarif export skipped: %s", e)
     return leads, burp_summary

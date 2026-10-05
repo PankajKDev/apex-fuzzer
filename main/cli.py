@@ -34,6 +34,9 @@ def build_parser() -> argparse.ArgumentParser:
                    metavar="URL",
                    help="Explain the scope decision for URL(s) and exit "
                         "(repeatable; zero network; exit 1 if any denied)")
+    p.add_argument("--explain", default=None, metavar="FINDING-ID",
+                   help="Explain every signal behind a finding ID from "
+                        "a previous run (searches --output; zero network)")
     p.add_argument("--seed-urls", default=None,
                    help="File with manual seed URLs (one per line), "
                         "merged into discovery for every target")
@@ -484,6 +487,12 @@ def main():
         text, denied = scope_check_report(cfg, args.scope_check)
         print(text)
         sys.exit(1 if denied else 0)
+    if getattr(args, "explain", None):
+        from .reporting.explain import explain_in_output_base
+        text, found = explain_in_output_base(args.output,
+                                             args.explain)
+        print(text)
+        sys.exit(0 if found else 1)
     problems = cfg.validate()
     for message in problems["warnings"]:
         log.warning("%s", message)
