@@ -153,6 +153,11 @@ def plan_oast(n_endpoints: int, max_params: int) -> RequestPlan:
     return RequestPlan("oast", "*", 0, n_endpoints * max_params * 12)
 
 
+def plan_graphql_introspection(n_endpoints: int) -> RequestPlan:
+    # one minimal introspection document per GraphQL endpoint
+    return RequestPlan("graphql_introspection", "*", 0, n_endpoints)
+
+
 # ── dry-run (zero network: file reads only) ───────────────────────────
 def dry_run_plan(target: str, cfg, profile,
                  out_dir) -> Dict:

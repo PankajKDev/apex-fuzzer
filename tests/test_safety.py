@@ -11,7 +11,7 @@ from apex_fuzzer.safety.authorization import (
 from apex_fuzzer.safety.preflight import (
     resolve_modules, RequestPlan, plan_differential, plan_authz_matrix,
     plan_race, plan_business, plan_second_order, plan_oast,
-    plan_second_order_ssrf,
+    plan_second_order_ssrf, plan_graphql_introspection,
     render_plan_text, check_fit, StopFlag, Pacer,
     get_interrupt_flag, install_signal_handlers)
 from apex_fuzzer.config import Config
@@ -181,6 +181,8 @@ def test_planner_math():
     ssrf = plan_second_order_ssrf(6, 4)
     assert (ssrf.mutation_requests, ssrf.verification_requests,
             ssrf.total) == (6, 24, 30)
+    g = plan_graphql_introspection(4)
+    assert (g.mutation_requests, g.total) == (4, 4)
 
 
 # ── dry-run: zero network ─────────────────────────────────────────────
