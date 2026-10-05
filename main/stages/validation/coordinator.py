@@ -31,6 +31,7 @@ from .cache import cache_probe
 from .differential import differential_probe
 from .identity import mfa_transition_probe, oauth_probe
 from .introspection import graphql_introspection_probe
+from .misconfig import misconfig_probe
 from .oast import maybe_register_oast, oast_sweep
 from .plugins import apply_plugin_results, finding_endpoint
 from .prescreen import prescreen_sweep
@@ -76,6 +77,12 @@ def run_validation(findings: List[Finding],
     # GraphQL introspection exposure (schema disclosure inventory).
     if (profile.run_validation or cfg.validation.enabled):
         out += graphql_introspection_probe(
+            endpoints, evidence, metrics, budgets, coverage, client,
+            cfg, scope, controls)
+
+    # Passive misconfiguration sweep (framing + form tokens).
+    if (profile.run_validation or cfg.validation.enabled):
+        out += misconfig_probe(
             endpoints, evidence, metrics, budgets, coverage, client,
             cfg, scope, controls)
 

@@ -270,7 +270,11 @@ Validation runs only in validation-enabled scans, in this order:
    (sensitivity needs human review); a valid GraphQL answer without
    `__schema` is a genuine negative. POST endpoints pass through the
    state-change gate, so they need `--ack-state-change`.
-2. **Differential testing** — same endpoint under each identity;
+2. **Misconfiguration sweep** — read-only GETs over page endpoints:
+   missing framing protection (clickjacking) and state-changing
+   forms without token fields (CSRF exposure). Informational
+   candidates only; protected pages record genuine negatives.
+3. **Differential testing** — same endpoint under each identity;
    two matching 200s (or anonymous 200 on admin/API) become BOLA /
    broken-access candidates. Shape matches require agreeing
    content types; an anonymous HTML 200 against API content is
@@ -284,23 +288,23 @@ Validation runs only in validation-enabled scans, in this order:
    dynamics), while a blocked repeat keeps the candidate as
    single-sample evidence. Errored comparisons stay inconclusive,
    never negatives.
-3. **MFA transitions** — needs one `mfa_pending` context: a pre-MFA
+4. **MFA transitions** — needs one `mfa_pending` context: a pre-MFA
    session seeing the same protected object as a post-MFA session is
    a session-issuance flaw; a denied pre-session is healthy.
-4. **Authz matrix** — harvest object IDs per identity, swap them
+5. **Authz matrix** — harvest object IDs per identity, swap them
    cross-identity (GET reads), sweep HTTP methods per identity
    (BFLA), replay GraphQL query operations with victim variables.
    Optional **write replay** (`authorization.write_replay` plus
    `--ack-state-change`, test accounts only): the attacker's own
    observed mutating request with the victim ID, confirmed only by
    owner readback showing persisted values.
-5. **OAST sweep** — URL-like params get per-request Interactsh
+6. **OAST sweep** — URL-like params get per-request Interactsh
    callbacks (HTTP + HTTPS). A correlated callback confirms a
    server-side fetch. When direct callbacks miss, bounded
    parser-bypass variants (IP forms, userinfo-decoy, …) fire with
    fresh nonces. Callback ≠ internal data access: a reflected token
    is recorded as a full-read *signal*, never proof.
-6. **Per-finding plugins** — mutation prescreens run first (cheap
+7. **Per-finding plugins** — mutation prescreens run first (cheap
    signal on WAF-blocked targets), then the heavy validators:
    parameter-pinned sqlmap (`--level 1 --risk 1`, boolean/error/union;
    time-based only with `--sqli-time`), Dalfox with Playwright
@@ -308,18 +312,18 @@ Validation runs only in validation-enabled scans, in this order:
    paired-arithmetic SSTI, nonce-correlated XXE on retained XML,
    marker-file traversal. Each tool's result is kept; conflicting
    positive/negative signals resolve to inconclusive.
-7. **Lead-independent prescreen sweep** — endpoint parameters go
+8. **Lead-independent prescreen sweep** — endpoint parameters go
    through the SQLi/XSS prescreens even with no Nuclei lead; hits
    re-enter the plugin loop for tool confirmation.
-8. **Stored XSS / stored SSRF** (opt-in, they persist server-side
+9. **Stored XSS / stored SSRF** (opt-in, they persist server-side
    canaries), **business logic** (needs your invariants plus
    readback), **race** (synchronized bursts, most aggressive test in
    the suite — enable deliberately or not at all).
-9. **OAuth transitions** — authorize URLs from traffic analyzed
+10. **OAuth transitions** — authorize URLs from traffic analyzed
    offline (missing `state`, implicit flow); PKCE-strip and
    OAST-redirect probes only *observe* the authorize answer, never
    redeem codes or follow redirects.
-10. **Cache deception** — anonymous/victim/re-read triple under unique
+11. **Cache deception** — anonymous/victim/re-read triple under unique
    cache keys; shared entries never touched. Poisoning stays manual.
 
 Result vocabulary (canonical `result_status`): `observation` (signal

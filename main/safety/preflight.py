@@ -158,6 +158,11 @@ def plan_graphql_introspection(n_endpoints: int) -> RequestPlan:
     return RequestPlan("graphql_introspection", "*", 0, n_endpoints)
 
 
+def plan_misconfig(n_endpoints: int) -> RequestPlan:
+    # one read-only GET per page endpoint (headers + body analyzed)
+    return RequestPlan("misconfig", "*", 0, n_endpoints)
+
+
 # ── dry-run (zero network: file reads only) ───────────────────────────
 def dry_run_plan(target: str, cfg, profile,
                  out_dir) -> Dict:
