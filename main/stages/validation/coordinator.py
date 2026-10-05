@@ -38,6 +38,7 @@ from .prescreen import prescreen_sweep
 from .race import race_probe
 from .second_order import (blind_xss_probe, second_order_probe,
                              second_order_ssrf_probe)
+from .upload import upload_probe
 
 log = get_logger("stages-validation")
 
@@ -309,6 +310,11 @@ def run_validation(findings: List[Finding],
             out += race_probe(
                 endpoints, evidence, metrics, budgets, coverage,
                 client, cfg, scope, controls, identities)
+        # 7) file-upload review (opt-in: persists benign files)
+        if cfg.validation.upload:
+            out += upload_probe(
+                endpoints, evidence, metrics, budgets, coverage,
+                client, cfg, scope, controls)
         # behavioral state accumulated above → persist the graph
         # (agent Phase 3: validation findings ride on observations)
         if app_graph is not None:

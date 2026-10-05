@@ -320,7 +320,9 @@ Validation runs only in validation-enabled scans, in this order:
 9. **Stored XSS / stored SSRF / blind XSS** (opt-in, they persist
    server-side canaries; blind XSS correlates a stored script-src
    URL with an OAST callback and stays a candidate until script
-   execution is proven in a controlled browser), **business logic** (needs your invariants plus
+   execution is proven in a controlled browser), **file-upload review**
+   (opt-in `--upload`: benign text files under probing filenames,
+   verified by readback; test accounts only), **business logic** (needs your invariants plus
    readback), **race** (synchronized bursts, most aggressive test in
    the suite — enable deliberately or not at all).
 10. **OAuth transitions** — authorize URLs from traffic analyzed

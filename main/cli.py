@@ -63,6 +63,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--second-order-ssrf", action="store_true",
                    help="Enable stored-SSRF OAST correlation "
                         "(persists callback URLs)")
+    p.add_argument("--upload", action="store_true",
+                   help="Enable file-upload workflow review "
+                        "(persists benign files; test accounts only)")
     p.add_argument("--business-logic", action="store_true",
                    help="Enable business-logic mutation engine")
     p.add_argument("--sqli-time", action="store_true",

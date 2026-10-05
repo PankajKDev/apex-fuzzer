@@ -102,6 +102,9 @@ class ValidationConfig:
     second_order_max_endpoints: int = 10
     second_order_max_renders: int = 40
     second_order_ssrf_max_fields: int = 3
+    # File-upload workflow review persists benign files: opt-in only.
+    upload: bool = False
+    upload_max_endpoints: int = 10
     min_severity: str = "medium"
 
 
@@ -557,7 +560,8 @@ class Config:
                     "cors_max_endpoints", "cors_max_identities",
                     "second_order_max_endpoints", "second_order_max_renders",
                     "second_order_ssrf_max_fields", "prescreen_max_endpoints",
-                    "prescreen_max_params", "cache_max_endpoints"):
+                    "prescreen_max_params", "cache_max_endpoints",
+                    "upload_max_endpoints"):
             need_non_negative(f"validation.{key}",
                               getattr(self.validation, key, 0))
         if self.validation.sqli_time_sec not in (1, 2, 3, 4, 5, 6, 7, 8,
@@ -755,6 +759,8 @@ def apply_cli_overrides(cfg: Config, args) -> Config:
     if getattr(args, "second_order_ssrf", False):
         cfg.validation.second_order_ssrf = True
         cfg.oast.enabled = True
+    if getattr(args, "upload", False):
+        cfg.validation.upload = True
     if getattr(args, "business_logic", False):
         cfg.business.enabled = True
     if getattr(args, "sqli_time", False):

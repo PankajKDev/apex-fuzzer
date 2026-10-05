@@ -90,6 +90,9 @@ validation:
   second_order_max_endpoints: 10
   second_order_max_renders: 40
   second_order_ssrf_max_fields: 3
+  # File-upload review persists benign files: opt-in, test accounts.
+  upload: false             # or --upload
+  upload_max_endpoints: 10
 
 # Cross-user swap + per-method authz matrix (BOLA/BFLA/tenant isolation).
 # [active] harvest/swap reads; NOTE: the method sweep sends state-changing

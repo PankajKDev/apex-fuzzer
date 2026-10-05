@@ -158,6 +158,11 @@ def plan_graphql_introspection(n_endpoints: int) -> RequestPlan:
     return RequestPlan("graphql_introspection", "*", 0, n_endpoints)
 
 
+def plan_upload(n_endpoints: int) -> RequestPlan:
+    # submit plus bounded readback per upload endpoint
+    return RequestPlan("upload", "*", 0, n_endpoints * 3)
+
+
 def plan_misconfig(n_endpoints: int) -> RequestPlan:
     # one read-only GET per page endpoint (headers + body analyzed)
     return RequestPlan("misconfig", "*", 0, n_endpoints)
@@ -232,6 +237,8 @@ def dry_run_plan(target: str, cfg, profile,
                       cfg.validation.second_order_ssrf_max_fields)
         plans.append(plan_second_order_ssrf(
             injections, cfg.validation.second_order_max_renders))
+    if cfg.validation.upload:
+        plans.append(plan_upload(cfg.validation.upload_max_endpoints))
     if "oast" in names:
         plans.append(plan_oast(cfg.oast.max_endpoints,
                                cfg.oast.max_params_per_endpoint))
