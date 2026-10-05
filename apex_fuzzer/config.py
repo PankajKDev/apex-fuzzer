@@ -386,6 +386,10 @@ class Config:
     # devtools on a JS SPA). Merged into the recon pool and scope-filtered
     # like any discovered URL. Set via --seed-urls; never scanned directly.
     seed_urls: List[str] = field(default_factory=list)
+    # First-party traffic captures (HAR 1.2). Parsed into the endpoint
+    # pool with observed request shapes; scope-filtered, inventory only
+    # (nothing is sent or replayed at import). Set via --har (repeatable).
+    har_files: List[str] = field(default_factory=list)
     # dotted `section.key` paths from the file that match no known field.
     # Unknown content stays ignored (backward compatibility), but the
     # paths are reported so typos do not fail silently.
@@ -409,6 +413,10 @@ class Config:
             if section == "seed_urls" and isinstance(values, list):
                 cfg.seed_urls = [str(u).strip() for u in values
                                  if str(u).strip()]
+                continue
+            if section == "har_files" and isinstance(values, list):
+                cfg.har_files = [str(p).strip() for p in values
+                                 if str(p).strip()]
                 continue
             if not hasattr(cfg, section) or not isinstance(values, dict):
                 if isinstance(values, dict):
@@ -698,6 +706,12 @@ class Config:
             if not isinstance(url, str) or not url.startswith(
                     ("http://", "https://")):
                 err(f"seed_urls entries must be http(s) URLs (got {url!r})")
+        for path in self.har_files or []:
+            if not isinstance(path, str) or not path:
+                err(f"har_files entries must be file paths (got {path!r})")
+            elif not Path(path).exists():
+                warn(f"har_files entry {path!r} not found: it will be "
+                     f"skipped at import")
         for unknown in self.unknown_keys:
             warn(f"unknown configuration key {unknown!r} is ignored "
                  f"(possible typo)")
@@ -767,4 +781,7 @@ def apply_cli_overrides(cfg: Config, args) -> Config:
             raise SystemExit(f"seed file unreadable: {exc}")
         cfg.seed_urls = [line.strip() for line in seeds
                          if line.strip() and not line.startswith("#")]
+    if getattr(args, "har", None):
+        cfg.har_files = list(cfg.har_files or []) + [
+            str(p) for p in args.har if str(p).strip()]
     return cfg
