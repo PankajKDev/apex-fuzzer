@@ -144,6 +144,46 @@ def sqli_error_families(text: str) -> List[str]:
                    if rx.search(window)})
 
 
+# Shell/command error markers for the CMDI prescreen. Narrow by
+# design: command-output shapes (`uid=`) and shell diagnostics, not
+# generic words like "error" that appear in healthy copy. Every match
+# stays candidate-level: error text alone never confirms execution.
+_CMDI_MARKERS = [
+    ("command-output", r"uid=\d+\([^)]{0,64}\)"),
+    ("command-output", r"\bgid=\d+\([^)]{0,64}\)"),
+    ("shell-error", r"command not found"),
+    ("shell-error", r"/bin/(?:ba)?sh\b"),
+    ("shell-error", r"\bsh: \d*:"),
+    ("shell-error", r"syntax error near unexpected"),
+    ("shell-error", r"is not recognized as an internal or external"),
+    ("shell-error", r"Windows IP Configuration"),
+]
+_CMDI_MARKER_RES = [(family, re.compile(pattern, re.I))
+                    for family, pattern in _CMDI_MARKERS]
+
+# Bounded prescreen ladder: quoting breakers first (error oracle),
+# then one harmless `id` execution for positive confirmation.
+CMDI_PAYLOADS = [
+    "'",
+    '"',
+    ";id",
+    "|id",
+]
+
+
+def cmdi_error_markers(text: str) -> List[str]:
+    """Return sorted marker families whose signals appear."""
+    if not text:
+        return []
+    window = text[:200_000]
+    return sorted({family for family, rx in _CMDI_MARKER_RES
+                   if rx.search(window)})
+
+
+def cmdi_error_signal(text: str) -> bool:
+    return bool(cmdi_error_markers(text))
+
+
 def _inject(url: str, param: str, payload: str) -> str:
     from urllib.parse import urlsplit, urlunsplit, parse_qsl, urlencode
     parts = urlsplit(url)
@@ -509,6 +549,132 @@ class MutationEngine:
         hit = any(d in low for d in dangerous)
         return hit and (payload.lower() in low or
                         payload.replace(" ", "") in low.replace(" ", ""))
+
+    # ── cmdi ────────────────────────────────────────────────────────────
+    def prescreen_cmdi(self, candidate: Candidate) -> Optional[ValidationOutcome]:
+        """Error-oracle command-injection prescreen (candidate only).
+
+        Sends quoting breakers plus one harmless `id` execution and
+        looks for shell diagnostics or command output. There is no
+        boolean oracle for shell context, so boolean differentials
+        never run here; a marker reflected in output is a candidate
+        that needs independent confirmation, never proof.
+        """
+        param = candidate.parameter or self._guess_param(candidate.endpoint_url)
+        if not param:
+            return None
+
+        method = (candidate.method or "GET").upper()
+        if method not in {"GET", "POST", "PUT", "PATCH"}:
+            return ValidationOutcome(
+                status=ValidationStatus.INCONCLUSIVE.value,
+                confidence=Confidence.UNKNOWN.value,
+                notes=f"CMDi prescreen skipped: unsupported method {method}")
+        if method != "GET" and not getattr(
+                getattr(self.cfg, "safety", None), "allow_state_change", False):
+            return ValidationOutcome(
+                status=ValidationStatus.INCONCLUSIVE.value,
+                confidence=Confidence.UNKNOWN.value,
+                notes="CMDi body probes skipped: state-changing requests "
+                      "require allow_state_change")
+        if candidate.parameter_location == "body" and method == "GET":
+            return ValidationOutcome(
+                status=ValidationStatus.INCONCLUSIVE.value,
+                confidence=Confidence.UNKNOWN.value,
+                notes="CMDi body probe skipped: GET body shape is unsupported")
+        if getattr(candidate, "observed_ambiguous", None):
+            return ValidationOutcome(
+                status=ValidationStatus.INCONCLUSIVE.value,
+                confidence=Confidence.UNKNOWN.value,
+                notes="CMDi probe skipped: ambiguous observed requests; "
+                      "fail closed without guessing")
+
+        # Identity and framing carriers are never probed: testing them
+        # would break the tester's own session, not the application.
+        from .request_shape import is_protected_parameter
+        location = (candidate.parameter_location or "query").lower()
+        if location in ("header", "cookie") and is_protected_parameter(
+                location, param):
+            return ValidationOutcome(
+                status=ValidationStatus.INCONCLUSIVE.value,
+                confidence=Confidence.UNKNOWN.value,
+                notes=f"CMDi {location} probe skipped: {param!r} carries "
+                      f"identity or framing and is never mutated")
+
+        # Baseline first: if the clean response already carries shell
+        # markers, error-text verdicts are unsafe (the page always
+        # carries them), so the marker stage is skipped.
+        from urllib.parse import parse_qsl, urlsplit
+        if location == "body":
+            try:
+                base_value = self._body_sample(candidate, param)
+            except ValueError as exc:
+                return ValidationOutcome(
+                    status=ValidationStatus.INCONCLUSIVE.value,
+                    confidence=Confidence.UNKNOWN.value,
+                    notes=f"CMDi body shape unsupported: {exc}")
+        elif location == "header":
+            from .request_shape import header_parameter_value
+            try:
+                base_value = header_parameter_value(candidate, param) or "1"
+            except ValueError as exc:
+                return ValidationOutcome(
+                    status=ValidationStatus.INCONCLUSIVE.value,
+                    confidence=Confidence.UNKNOWN.value,
+                    notes=f"CMDi header shape unsupported: {exc}")
+        elif location == "cookie":
+            from .request_shape import cookie_parameter_value
+            try:
+                base_value = cookie_parameter_value(
+                    candidate.request_headers or {}, param) or "1"
+            except ValueError as exc:
+                return ValidationOutcome(
+                    status=ValidationStatus.INCONCLUSIVE.value,
+                    confidence=Confidence.UNKNOWN.value,
+                    notes=f"CMDi cookie shape unsupported: {exc}")
+        else:
+            base_value = next((value for key, value in parse_qsl(
+                urlsplit(candidate.endpoint_url).query, keep_blank_values=True)
+                if key == param), "1")
+        baseline = self._fetch_candidate(candidate, param, str(base_value))
+        if baseline is not None and cmdi_error_signal(
+                baseline.get("text") or ""):
+            return None
+
+        for payload in CMDI_PAYLOADS[:self.max_payloads]:
+            try:
+                r = self._fetch_candidate(candidate, param, payload)
+            except BudgetExceeded:
+                raise
+            except ValueError:
+                return ValidationOutcome(
+                    status=ValidationStatus.INCONCLUSIVE.value,
+                    confidence=Confidence.UNKNOWN.value,
+                    notes="CMDi body shape unsupported: cannot build "
+                          "request safely")
+            if r is None:
+                continue
+            text = r.get("text") or ""
+            # Reflection guard: an echoed payload without a shell
+            # marker proves nothing (mirrors the SQLi guard).
+            if payload in text and not cmdi_error_signal(text):
+                continue
+            markers = cmdi_error_markers(text)
+            if markers:
+                return ValidationOutcome(
+                    status=ValidationStatus.STRONG_CANDIDATE.value,
+                    confidence=Confidence.PROBABLE.value,
+                    evidence={
+                        "waf": self.waf,
+                        "param": param,
+                        "payload": payload,
+                        "markers": markers,
+                        "response_tail": redact_tail(text),
+                    },
+                    notes=f"shell marker reflected after payload "
+                          f"{payload!r} (WAF: {self.waf or 'unknown'}; "
+                          f"markers: {', '.join(markers)})")
+        return None
 
     # ── helpers ─────────────────────────────────────────────────────────
     def _fetch(self, url: str) -> Optional[Dict]:

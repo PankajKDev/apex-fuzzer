@@ -29,8 +29,8 @@ def prescreen_sweep(endpoints: List[Endpoint],
     """Probe endpoint parameters with the mutation prescreens directly.
 
     Nuclei misses an endpoint and the deep validators never run: this
-    sweep closes that lead dependency for SQLi/XSS prescreens only
-    (no heavy tools, no delays). Hits become findings so the plugin
+    sweep closes that lead dependency for SQLi/XSS/CMDi prescreens
+    only (no heavy tools, no delays). Hits become findings so the plugin
     loop below can drive sqlmap/dalfox confirmation. Silence records
     nothing: a prescreen miss is not a negative. Triples marked
     false-positive in reviews.jsonl are skipped as untestable.
@@ -99,7 +99,7 @@ def prescreen_sweep(endpoints: List[Endpoint],
         content_type = ((content_types[0] if content_types else "")
                         or getattr(ep, "content_type", ""))
         for name, location in pairs:
-            for test_class in ("sqli", "xss"):
+            for test_class in ("sqli", "xss", "cmdi"):
                 if (test_class, ep.normalized_url, name) in covered:
                     continue
                 if reviews is not None and reviews.is_fp_triple(
@@ -122,6 +122,8 @@ def prescreen_sweep(endpoints: List[Endpoint],
                 try:
                     if test_class == "sqli":
                         outcome = engine.prescreen_sqli(candidate)
+                    elif test_class == "cmdi":
+                        outcome = engine.prescreen_cmdi(candidate)
                     else:
                         outcome = engine.prescreen_xss(candidate)
                 except BudgetExceeded:
@@ -140,7 +142,7 @@ def prescreen_sweep(endpoints: List[Endpoint],
                     id=stable_finding_id(f"prescreen-{test_class}",
                                          ep.normalized_url, name),
                     source=f"prescreen-{test_class}",
-                    name=(f"{'SQLi' if test_class == 'sqli' else 'XSS'} "
+                    name=(f"{'SQLi' if test_class == 'sqli' else 'XSS' if test_class == 'xss' else 'CMDi'} "
                           f"prescreen hit on '{name}' ({ep.path})"),
                     severity="medium",
                     confidence=Confidence.PROBABLE.value,

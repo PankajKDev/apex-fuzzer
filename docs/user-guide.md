@@ -313,8 +313,10 @@ Validation runs only in validation-enabled scans, in this order:
    marker-file traversal. Each tool's result is kept; conflicting
    positive/negative signals resolve to inconclusive.
 8. **Lead-independent prescreen sweep** — endpoint parameters go
-   through the SQLi/XSS prescreens even with no Nuclei lead; hits
-   re-enter the plugin loop for tool confirmation.
+   through the SQLi/XSS/CMDi prescreens even with no Nuclei lead; hits
+   re-enter the plugin loop for tool confirmation (CMDi stays
+   prescreen-only: shell-error/command-output markers are candidates
+   needing manual confirmation, never proof of execution).
 9. **Stored XSS / stored SSRF** (opt-in, they persist server-side
    canaries), **business logic** (needs your invariants plus
    readback), **race** (synchronized bursts, most aggressive test in

@@ -161,14 +161,14 @@ def finding_test_class(finding) -> str:
                           ("oast", "ssrf")):
         if alias in source:
             return mapped
-    for candidate in ("sqli", "xss", "ssrf", "ssti", "xxe",
+    for candidate in ("sqli", "xss", "cmdi", "ssrf", "ssti", "xxe",
                       "idor", "bola", "authz", "cors", "redirect",
                       "traversal", "cache"):
         if candidate in source:
             return candidate
     tags = [str(t).lower() for t in
             (getattr(finding, "tags", None) or [])]
-    for candidate in ("sqli", "xss", "ssrf", "ssti", "xxe",
+    for candidate in ("sqli", "xss", "cmdi", "ssrf", "ssti", "xxe",
                       "idor", "bola", "authz", "cors", "redirect",
                       "traversal", "cache"):
         if candidate in tags:

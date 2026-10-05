@@ -384,6 +384,34 @@ class XssMutationPlugin(_ClassGated):
         return _from_sqli_mutation(outcome)
 
 
+class CmdiMutationPlugin(_ClassGated):
+    name = "cmdi-mutation"
+    handled_classes = ("cmdi",)
+    prerequisites = ("net",)
+    allocates_evidence = False
+
+    def run(self, target: TestTarget, ctx: TestContext) -> TestResult:
+        gated = self._class_ok(target)
+        if gated:
+            return gated
+        if not ctx.cfg.validation.mutation:
+            return TestResult(status="skipped",
+                              observations=["mutation engine disabled"])
+        if ctx.scope is not None and not ctx.scope.active_test_allowed(
+                target.endpoint_url):
+            return TestResult(status="blocked",
+                              observations=["target is not active-test "
+                                            "eligible"])
+        engine = MutationEngine(ctx.cfg, ctx.http, ctx.waf)
+        try:
+            outcome = engine.prescreen_cmdi(
+                _candidate_from(target, "cmdi", scope=ctx.scope))
+        except BudgetExceeded as exc:
+            return TestResult(status="blocked",
+                              observations=[str(exc)[:300]])
+        return _from_sqli_mutation(outcome)
+
+
 class XssPlugin(_ClassGated):
     name = "xss-dalfox"
     handled_classes = ("xss",)
@@ -533,11 +561,12 @@ class PathTraversalPlugin(_ClassGated):
 
 
 for _p in (SqliMutationPlugin(), SqliPlugin(), XssMutationPlugin(),
-           XssPlugin(), SsrfPlugin(), SstiPlugin(), XxePlugin(),
-           PathTraversalPlugin()):
+           XssPlugin(), CmdiMutationPlugin(), SsrfPlugin(), SstiPlugin(),
+           XxePlugin(), PathTraversalPlugin()):
     register(_p)
 
 # fixed execution order: prescreen before heavy tool, same class grouped
 PLUGIN_ORDER = ["sqli-mutation", "sqli-sqlmap", "xss-mutation",
-                "xss-dalfox", "ssrf-oast", "ssti-arithmetic", "xxe-oast",
+                "xss-dalfox", "cmdi-mutation", "ssrf-oast",
+                "ssti-arithmetic", "xxe-oast",
                 "path-traversal-marker"]
