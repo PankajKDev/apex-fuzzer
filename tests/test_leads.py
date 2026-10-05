@@ -7,7 +7,7 @@ from types import SimpleNamespace
 
 from main.config import Config
 from main.leads import MAX_LEADS, collect_leads, write_leads
-from main.orchestrator import takeover_notes_from_file
+from main.stages.reporting import takeover_notes_from_file
 from main.stages.recon import katana_rl
 from main.profiles import get as get_profile
 from main.safety.preflight import resolve_modules

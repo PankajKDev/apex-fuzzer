@@ -20,8 +20,7 @@ from .scope import Scope, target_hostname
 from .profiles import Profile, get as get_profile
 from .models import (Endpoint, Parameter, Finding, Hypothesis,
                      write_jsonl, read_jsonl, Confidence,
-                     ValidationStatus, stable_finding_id,
-                     RESULT_STATUSES)
+                     ValidationStatus, stable_finding_id)
 from .logging_setup import get_logger, attach_file_handler
 from .shell import which, AdaptiveRateLimiter
 from .budgets import BudgetTracker
@@ -30,6 +29,9 @@ from .http import HTTPClient
 from .stages.recon import (harvest_api_specs, harvest_robots, merge_recon,
                            run_recon)
 from .stages.mapping import build_app_state, map_attack_surface
+from .stages.intel import (build_resource_intel, discover_invariants,
+                           discover_workflows, record_behavioral_state)
+from .stages.reporting import render_report
 from .stages.validation import ProbeControls
 from .stages.validation.coordinator import run_validation
 from .stages.endpoints import build_endpoints
@@ -52,7 +54,6 @@ from .validation.differential import DifferentialTester
 from .validation.mutate import MutationEngine
 from .ai.planner import AIPlanner
 from .reporting.metrics import Metrics
-from .reporting.html import render_html
 from .safety.preflight import (StopFlag, Pacer, get_interrupt_flag,
                                resolve_modules, dry_run_plan)
 from .safety.impact import max_level
@@ -62,51 +63,6 @@ from .safety.authorization import (
 log = get_logger("orchestrator")
 
 
-def takeover_notes_from_file(path) -> List[str]:
-    """Vulnerable-host lines from subzy stdout.
-
-    Subzy prints banner/config lines even with zero hits; only lines
-    naming a vulnerable host become leads. Pure file read, no network.
-    """
-    import re as _re
-    notes: List[str] = []
-    try:
-        text = Path(path).read_text(errors="ignore")
-    except OSError:
-        return []
-    for line in text.splitlines():
-        clean = _re.sub(r"\x1b\[[0-9;]*m", "", line).strip()
-        # subzy prints banner/config lines even with zero hits; only
-        # lines naming a vulnerable host become leads. Flag
-        # descriptions (e.g. --hide_fails) mention "vulnerable" too,
-        # so lines documenting a CLI flag are excluded.
-        if clean and "vuln" in clean.lower() and "(--" not in clean:
-            notes.append(clean)
-        if len(notes) >= 20:
-            break
-    return notes
-
-# Endpoint types that give OAST sink candidates extra priority.
-_OAST_PRIORITY_TYPES = ("proxy", "webhook", "callback", "import",
-                        "export", "download", "api")
-
-# invariant check → finding-tag classes that already cover the same
-# verdict space (a violation there corroborates, never duplicates)
-_INVARIANT_CLASSES = {
-    "no_cross_user_read": {"bola", "idor", "tenant_isolation",
-                           "authz"},
-    "no_unauthorized_write": {"authz", "bfla"},
-    "no_access_deleted": {"authz"},
-    "no_modify_deleted": {"authz"},
-    "no_self_promote": {"authz"},
-    "no_expired_session": {"authz", "broken_auth"},
-    "no_recharge_refunded": {"business_logic"},
-    "quantity_non_negative": {"business_logic"},
-    "price_stable": {"business_logic"},
-    "refund_lte_payment": {"business_logic"},
-    "single_use_token": {"business_logic"},
-    "no_revert_completed": {"business_logic"},
-}
 
 
 class Orchestrator:
@@ -326,8 +282,8 @@ class Orchestrator:
             self._harvest_pool = result.harvest_pool
             self._last_matrix = result.matrix
             if app_graph is not None and result.matrix is not None:
-                self._record_behavioral_state(app_graph, result.matrix,
-                                              out_dir)
+                record_behavioral_state(app_graph, result.matrix,
+                                        out_dir)
             write_jsonl(out_dir / "findings.jsonl", findings)
             ck.mark("validation")
         else:
@@ -335,21 +291,23 @@ class Orchestrator:
 
         # ── 8b. WORKFLOW DISCOVERY (agent Phase 4, offline) ─────────
         # Pure analysis over collected data — zero network, always safe.
-        self._discover_workflows(out_dir, endpoints, application,
-                                 app_graph, metrics, ck)
+        discover_workflows(out_dir, endpoints, application,
+                           app_graph, metrics, ck, self._harvest_pool)
 
         # ── 8c. RESOURCE INTEL (agent Phase 5, offline) ──────────────
         # Lifecycle-aware records from everything collected so far.
         # Zero network: only cached files and in-memory sweep data.
-        self._build_resource_intel(out_dir, endpoints, application,
-                                   app_graph, metrics, ck)
+        build_resource_intel(
+            out_dir, endpoints, application, app_graph, metrics, ck,
+            self._harvest_pool, self._page_ids, self._last_matrix)
 
         # ── 8d. INVARIANT DISCOVERY (agent Phase 6, offline) ─────────
         # Mine holding rules from matrix observations; second-opinion
         # re-evaluation that corroborates existing findings or emits
         # genuinely new ones — never duplicates.
-        inv_findings = self._discover_invariants(
-            out_dir, endpoints, evidence, metrics, coverage, findings)
+        inv_findings = discover_invariants(
+            out_dir, endpoints, evidence, metrics, coverage, findings,
+            self._last_matrix, self._harvest_pool)
         if inv_findings:
             findings += inv_findings
             write_jsonl(out_dir / "findings.jsonl", findings)
@@ -382,143 +340,15 @@ class Orchestrator:
         # Pure ranking over collected artifacts: zero network. Leads
         # mode exists for this output; every other profile gets it as
         # a free work list alongside findings.
-        from .leads import collect_leads, write_leads
-        takeover_notes = takeover_notes_from_file(out_dir / "takeover.txt")
-        tech_dicts = read_jsonl(out_dir / "technologies.jsonl")
-        leads = collect_leads(endpoints, tech_dicts, takeover_notes)
-        write_leads(out_dir / "leads.jsonl", leads)
-        metrics.leads_total = len(leads)
-        log.info("leads: %d ranked follow-ups -> leads.jsonl", len(leads))
-        from .reporting.burp import export_burp
-        burp_summary = export_burp(out_dir, endpoints, leads)
-        log.info("burp: %d requests + sitemap + checklist -> burp/",
-                 burp_summary["requests"])
-
         # ── 10. REPORT ──────────────────────────────────────────────────
-        self._apply_reviews(findings, out_dir)
-        ck.mark("report", "running")
-        metrics.scan_duration_seconds = time.time() - started
-        metrics.result_status_counts = {status: sum(
-            1 for finding in findings
-            if finding.result_status == status)
-            for status in RESULT_STATUSES}
-        metrics.write(out_dir / "metrics.json")
-        (out_dir / "coverage.json").write_text(
-            __import__("json").dumps(coverage.to_dict(), indent=2))
-        ck.save_blob("coverage", coverage.to_dict())
-        ck.save_blob("budgets", budgets.to_dict())
-        changes = self._flush_run_audit(
-            out_dir, target, host, started,
-            getattr(client, "scope_denials", None) or []) or {}
-        render_html(out_dir / "report.html", target, findings,
-                    [h.to_dict() for h in hypotheses],
-                    metrics.to_dict(),
-                    min_severity=self.cfg.reporting.min_severity,
-                    output_dir=out_dir,
-                    coverage=coverage.to_dict(),
-                    safety_info=getattr(self, "_safety_info", None),
-                    leads=leads,
-                    burp=burp_summary,
-                    changes=changes or None)
-        ck.mark("report")
-        log.info("done: %s (%.1fs)", host, metrics.scan_duration_seconds)
-
-    @staticmethod
-    def _apply_reviews(findings: List[Finding],
-                       out_dir: Path) -> int:
-        """Attach operator review marks to findings (report-time).
-
-        Marks surface in ``false_positive_notes`` (rendered by the
-        HTML report) and ``raw.review`` (persisted to findings.jsonl),
-        so triage decisions stick across runs via stable finding IDs.
-        Returns the number of marked findings.
-        """
-        from .reporting.reviews import load_reviews
-        index = load_reviews(out_dir / "reviews.jsonl")
-        if not len(index):
-            return 0
-        marked = 0
-        for f in findings or []:
-            record = index.verdict_for_finding(getattr(f, "id", ""))
-            if not record:
-                continue
-            verdict, reason = record["verdict"], record["reason"]
-            note = f"Operator review ({verdict})" + \
-                   (f": {reason}" if reason else "")
-            existing = str(getattr(f, "false_positive_notes", "") or "")
-            f.false_positive_notes = (
-                f"{existing} [{note}]" if existing else note)
-            try:
-                f.raw["review"] = record
-            except (TypeError, AttributeError):
-                pass
-            marked += 1
-        if marked:
-            log.info("reviews: %d finding(s) marked", marked)
-        return marked
+        render_report(out_dir, target, host, started, findings,
+                      hypotheses, metrics, coverage, budgets, ck,
+                      self.cfg, self.profile, client,
+                      getattr(self, "_safety_info", None), endpoints,
+                      self._last_endpoints)
 
 
-    def _flush_run_audit(self, out_dir: Path, target: str, host: str,
-                           started_epoch: float,
-                           denials) -> dict:
-        """Persist the run + scope-gate audit trail to apex.db.
 
-        Best-effort by design: a store failure logs and never fails
-        the scan (artifacts on disk stay the system of record).
-        Returns the endpoint-change diff (for the report), or {}.
-        """
-        try:
-            from datetime import datetime, timezone
-            from . import __version__
-            from .reporting.run_store import (
-                RunStore, diff_endpoint_runs)
-            import json as _json
-            started_utc = datetime.fromtimestamp(
-                started_epoch, tz=timezone.utc).isoformat(
-                    timespec="seconds")
-            with RunStore(out_dir / "apex.db") as store:
-                previous = store.latest_run(target)
-                if previous is not None and \
-                        not previous.get("finished_utc"):
-                    # an interrupted run leaves partial inventory:
-                    # never diff against it, wait for a clean baseline
-                    previous = None
-                run_id = store.begin_run(
-                    target, host,
-                    profile=getattr(self.profile, "name", "standard"),
-                    tool_version=str(__version__),
-                    authorization_ref=str(
-                        self.cfg.safety.authorization_ref or ""),
-                    started_utc=started_utc)
-                stored = store.record_denials(run_id, denials)
-                inventoried = store.record_endpoints(
-                    run_id, list(getattr(self, "_last_endpoints",
-                                         None) or []))
-                previous_rows = [] if previous is None else \
-                    store.endpoints_for_run(previous["id"])
-                current_rows = store.endpoints_for_run(run_id)
-                changes = diff_endpoint_runs(previous_rows,
-                                             current_rows)
-                changes["against_run"] = (previous or {}).get("id")
-                (out_dir / "changes.json").write_text(
-                    _json.dumps(changes, indent=2))
-                store.finish_run(run_id)
-            if stored:
-                log.info("audit: %d scope denial(s) -> apex.db",
-                         stored)
-            log.debug("audit: %d endpoint(s) -> apex.db", inventoried)
-            if not changes.get("baseline"):
-                log.info("changes: %d new, %d changed, %d gone "
-                         "(vs run %s) -> changes.json",
-                         len(changes["new"]), len(changes["changed"]),
-                         len(changes["gone"]), changes["against_run"])
-            else:
-                log.info("changes: baseline established (%d endpoints) "
-                         "-> changes.json", len(current_rows))
-            return changes
-        except Exception as e:
-            log.debug("run audit skipped: %s", e)
-            return {}
 
     # =====================================================================
     # PREFLIGHT + DRY-RUN (Milestone 1)
@@ -735,301 +565,8 @@ class Orchestrator:
 
 
     # ── BEHAVIORAL STATE (agent Phase 3) ─────────────────────────────
-    @staticmethod
-    def _record_behavioral_state(app_graph, matrix, out_dir: Path):
-        """Sync matrix observations into the graph; snapshot every cell;
-        link cross-run changes as transitions. Additive and idempotent."""
-        from .state.graph import (sync_matrix_observations,
-                                  record_transition)
-        from .state.snapshots import StateSnapshot, SnapshotStore
-        from .state.transitions import TransitionLog
-        sync_matrix_observations(app_graph, matrix.observations)
-        state_dir = out_dir / "state"
-        store = SnapshotStore.load(state_dir / "snapshots.jsonl")
-        tlog = TransitionLog.load(state_dir / "transitions.jsonl")
-        for o in matrix.observations:
-            snap = StateSnapshot.capture(
-                identity=o.identity, endpoint=o.endpoint,
-                method=o.method, status=o.status, shape=o.shape)
-            prev = store.latest(o.identity, o.endpoint, o.method)
-            store.add(snap)
-            if prev is not None:
-                t = tlog.record_if_changed(
-                    prev, snap, via=snap.snapshot_id, actor=o.identity)
-                if t is not None:
-                    record_transition(app_graph, prev.snapshot_id,
-                                      snap.snapshot_id, snap.snapshot_id,
-                                      actor=o.identity)
-        store.save(state_dir / "snapshots.jsonl")
-        tlog.save(state_dir / "transitions.jsonl")
 
     # ── WORKFLOW DISCOVERY (agent Phase 4, offline) ────────────────
-    def _discover_workflows(self, out_dir: Path, endpoints, application,
-                            app_graph, metrics: Metrics, ck: Checkpoint):
-        """Infer flows from collected data only — no requests sent.
-
-        Sources: REST stem grouping, timestamp-ordered browser traffic,
-        CRUD linkage, harvested value overlap. Persists workflows.json
-        (+ mutation catalog), appends stored workflows to the
-        application model, and links step chains in the graph.
-        """
-        from .workflows.discovery import discover_all
-        from .workflows.mutations import mutation_catalog
-        from .state.resources import ResourceTracker, \
-            link_crud_from_endpoints
-        from .state.graph import ensure_workflow
-        import json as _json
-        traffic: dict = {}
-        traffic_file = out_dir / "browser_traffic.json"
-        if traffic_file.exists():
-            try:
-                traffic = _json.loads(traffic_file.read_text())
-            except Exception as e:
-                log.debug("workflow discovery: bad traffic file: %s", e)
-        # CRUD linkage from app resources × endpoint methods
-        tracker = ResourceTracker()
-        resources = []
-        if application is not None:
-            resources = getattr(application, "resources", []) or []
-        link_crud_from_endpoints(tracker, resources, endpoints)
-        flows = discover_all(
-            endpoints=endpoints, traffic=traffic,
-            resources=list(tracker.resources.values()),
-            harvest_pool=list(getattr(self, "_harvest_pool", []) or []))
-        payload = {"flows": [f.to_dict() for f in flows],
-                   "mutations": mutation_catalog(flows)}
-        (out_dir / "workflows.json").write_text(
-            _json.dumps(payload, indent=2))
-        if application is not None:
-            try:
-                stored = [f.to_stored() for f in flows]
-                existing = {w.name for w in
-                            getattr(application, "workflows", []) or []}
-                application.workflows.extend(
-                    w for w in stored if w.name not in existing)
-                (out_dir / "application.json").write_text(
-                    _json.dumps(application.to_dict(), indent=2))
-                ck.save_blob("application", application.to_dict())
-            except Exception as e:
-                log.debug("workflow discovery: app persist failed: %s",
-                          e)
-        metrics.workflows_discovered = len(flows)
-        if app_graph is not None:
-            try:
-                for f in flows:
-                    ensure_workflow(app_graph, f.name,
-                                    [s.name for s in f.steps])
-            except Exception as e:
-                log.debug("workflow discovery: graph link failed: %s",
-                          e)
-        log.info("workflows: %d discovered (%d observed)",
-                 len(flows), sum(1 for f in flows if f.observed))
-
-    # ── RESOURCE INTEL (agent Phase 5, offline) ──────────────────────
-    def _build_resource_intel(self, out_dir: Path, endpoints, application,
-                              app_graph, metrics: Metrics, ck: Checkpoint):
-        """Lifecycle-aware resource records from all collected sources.
-
-        Producers (all offline): harvest pool, stashed page IDs, JS
-        cache, browser traffic, OpenAPI-declared params (already
-        endpoints). Records never drive swap verdicts unless their
-        source is an authenticated response (see source filter).
-        """
-        from .application.resources import (
-            discover_ids_from_js, discover_ids_from_traffic)
-        from .authorization.harvest import HarvestedId
-        from .authz.resources import enrich_resource_records
-        from .state.resources import (ResourceTracker,
-                                      link_crud_from_endpoints)
-        import json as _json
-        pool = list(getattr(self, "_harvest_pool", []) or [])
-        extra: list = []
-
-        def _add(url: str, param: str, value: str, source: str):
-            if not url or not param or not value:
-                return
-            try:
-                norm = normalize_url(url)
-            except Exception:
-                norm = url
-            if any(e.normalized_url == norm and e.param == param
-                   and e.value == value for e in pool + extra):
-                return
-            extra.append(HarvestedId(
-                endpoint_url=url, normalized_url=norm, param=param,
-                value=value, owner="", owner_tenant="", shape="",
-                body_hash=""))
-            extra[-1].source = source
-
-        # stashed page IDs (HTML/headers parsed during mapping)
-        for url, param, value, source in \
-                getattr(self, "_page_ids", []) or []:
-            _add(url, param, value, source)
-        # JS bundle cache (meta files carry the source URL)
-        cache_dir = out_dir / "cache"
-        if cache_dir.exists():
-            for meta_file in sorted(cache_dir.glob("*.meta"))[:50]:
-                try:
-                    data_file = meta_file.with_name(
-                        meta_file.name[:-len(".meta")])
-                    if not data_file.exists():
-                        continue
-                    meta = _json.loads(meta_file.read_text())
-                    url = str(meta.get("url", ""))
-                    text = data_file.read_text(
-                        errors="ignore")[:200_000]
-                except Exception as e:
-                    log.debug("resource intel: cache read failed: %s",
-                              e)
-                    continue
-                if not url:
-                    continue
-                try:
-                    found = discover_ids_from_js(text)
-                except Exception:
-                    continue
-                for pname, pvalue in found.items():
-                    _add(url, pname, pvalue, "javascript")
-        # browser traffic URLs
-        traffic_file = out_dir / "browser_traffic.json"
-        if traffic_file.exists():
-            try:
-                traffic = _json.loads(traffic_file.read_text())
-                reqs = traffic.get("requests", [])
-            except Exception:
-                reqs = []
-            try:
-                for url, pname, pvalue in discover_ids_from_traffic(
-                        reqs):
-                    _add(url, pname, pvalue, "traffic")
-            except Exception as e:
-                log.debug("resource intel: traffic parse failed: %s", e)
-        # matrix observations (permissions) + CRUD linkage + enrich
-        matrix = getattr(self, "_last_matrix", None)
-        observations = list(getattr(matrix, "observations", []) or [])
-        tracker = ResourceTracker()
-        app_resources = []
-        if application is not None:
-            app_resources = getattr(application, "resources", []) or []
-        link_crud_from_endpoints(tracker, app_resources, endpoints)
-        combined = pool + extra
-        records = enrich_resource_records(
-            combined, observations, tracker, endpoints)
-        (out_dir / "resources.json").write_text(
-            _json.dumps({"records": records}, indent=2))
-        if app_graph is not None and extra:
-            try:
-                from .authz.graph import sync_extended
-                sync_extended(app_graph, extra)
-                app_graph.save(out_dir / "application_graph.json")
-                ck.save_blob("application_graph", app_graph.to_dict())
-                metrics.graph_nodes = len(app_graph.nodes)
-                metrics.graph_edges = len(app_graph.edges)
-            except Exception as e:
-                log.debug("resource intel: graph sync failed: %s", e)
-        log.info("resources: %d enriched records (%d harvest, %d "
-                 "supplementary)", len(records), len(pool), len(extra))
-
-    # ── INVARIANT DISCOVERY (agent Phase 6, offline) ───────────────
-    def _discover_invariants(self, out_dir: Path, endpoints,
-                             evidence: EvidenceStore, metrics: Metrics,
-                             coverage: CoverageTracker,
-                             findings: List[Finding]) -> List[Finding]:
-        """Mine holding rules from matrix observations, then run every
-        invariant (built-in + discovered) as a second opinion.
-
-        - holding + fires + existing finding in mapped classes →
-          corroboration attached, no duplicate;
-        - holding + fires + no such finding → new invariant finding;
-        - holdings that hold → persisted as enforcement evidence.
-        Zero network; findings only on observed violations.
-        """
-        from .logic.invariant_discovery import discover_invariants
-        from .logic.invariant_engine import InvariantEngine
-        from .logic.observations import observation_from_matrix_cell
-        matrix = getattr(self, "_last_matrix", None)
-        observations = list(getattr(matrix, "observations", []) or [])
-        if not observations:
-            log.debug("invariant discovery: no matrix observations")
-            return []
-        pool = list(getattr(self, "_harvest_pool", []) or [])
-        discovered = discover_invariants(observations, pool)
-        engine = InvariantEngine()
-        for rule in discovered:
-            engine.add(rule.invariant)
-        obs_dicts = [observation_from_matrix_cell(o, pool)
-                     for o in observations]
-        new_findings: List[Finding] = []
-        for obs in obs_dicts:
-            for res in engine.evaluate(obs):
-                metrics.invariants_tested += 1
-                if not res.violated:
-                    continue
-                metrics.invariants_violated += 1
-                covered = _INVARIANT_CLASSES.get(
-                    self._check_of(engine, res.invariant_id), set())
-                dup = next((f for f in findings
-                            if covered & set(f.tags or [])), None)
-                if dup is not None:
-                    inv_list = dup.raw.setdefault("invariants", [])
-                    if not any(e.get("invariant_id") == res.invariant_id
-                               for e in inv_list):
-                        inv_list.append({
-                            "invariant_id": res.invariant_id,
-                            "detail": res.detail,
-                            "corroborated_by": "invariant-engine"})
-                    continue
-                f = Finding(
-                    id=stable_finding_id(
-                        "inv", res.invariant_id,
-                        str(obs.get("endpoint", "")),
-                        str(obs.get("actor", ""))),
-                    source="invariant",
-                    name=(f"Invariant violated: {res.invariant_id} "
-                          f"on {obs.get('endpoint', '')}"),
-                    severity="high",
-                    confidence=Confidence.PROBABLE.value,
-                    validation_status=ValidationStatus.STRONG_CANDIDATE.value,
-                    host="", matched_at=obs.get("endpoint", ""),
-                    endpoint_url=obs.get("endpoint", ""),
-                    method="GET",
-                    description=res.detail,
-                    tags=["invariant", self._check_of(
-                        engine, res.invariant_id)],
-                    raw={"invariant_id": res.invariant_id,
-                         "observation": obs},
-                    false_positive_notes=(
-                        "Second-opinion evaluation over recorded matrix "
-                        "observations — same evidence the verdict passes "
-                        "saw, judged by an independent rule. Confirm "
-                        "interactively before reporting."),
-                    identity=str(obs.get("actor", "")),
-                )
-                evidence.allocate(f)
-                evidence.record(
-                    f,
-                    request_text=(f"invariant {res.invariant_id} "
-                                  f"over recorded observations"),
-                    response_text=res.detail)
-                new_findings.append(f)
-                for cls in sorted(covered) or ["authz"]:
-                    coverage.record(cls, "candidate",
-                                    f"invariant {res.invariant_id}: "
-                                    f"{res.detail}")
-                log.info("invariant: NEW violation %s — %s",
-                         res.invariant_id, res.detail)
-        import json as _json
-        (out_dir / "invariants.json").write_text(_json.dumps(
-            {"discovered": [r.to_dict() for r in discovered],
-             "summary": engine.summary()}, indent=2))
-        return new_findings
-
-    @staticmethod
-    def _check_of(engine, invariant_id: str) -> str:
-        for inv in engine.invariants:
-            if inv.id == invariant_id:
-                return inv.check
-        return ""
 
     # ── STORED-XSS CORRELATION (bounty item #3) ────────────────────────
 

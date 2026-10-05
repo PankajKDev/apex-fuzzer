@@ -77,12 +77,12 @@ def test_finding_test_class_mapping():
 
 def test_apply_reviews_marks_findings(tmp_path):
     from main.models import Finding
-    from main.orchestrator import Orchestrator
+    from main.stages.reporting import apply_reviews
     _write(tmp_path / "reviews.jsonl", [
         {"finding_id": "diff-abc", "verdict": "false_positive",
          "reason": "login wall"}])
     f = Finding(id="diff-abc", source="differential")
-    assert Orchestrator._apply_reviews([f], tmp_path) == 1
+    assert apply_reviews([f], tmp_path) == 1
     assert "Operator review (false_positive): login wall" in \
         f.false_positive_notes
     assert f.raw["review"]["verdict"] == "false_positive"

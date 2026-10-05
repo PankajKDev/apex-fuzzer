@@ -348,13 +348,9 @@ def test_discover_workflows_end_to_end(tmp_path):
     import tempfile
     from pathlib import Path
     from types import SimpleNamespace
-    from main.orchestrator import Orchestrator
-    from main.config import Config
-    from main.profiles import get as get_profile
     from main.reporting.metrics import Metrics
     from main.checkpoints import Checkpoint
     out = Path(tempfile.mkdtemp())
-    orch = Orchestrator(Config(), out, profile=get_profile("standard"))
     eps = [_ep("https://t.com/api/p", method="POST"),
            _ep("https://t.com/api/p", method="GET"),
            _ep("https://t.com/api/d?pid=zz99qq88",
@@ -362,8 +358,9 @@ def test_discover_workflows_end_to_end(tmp_path):
     app = SimpleNamespace(resources=[], workflows=[],
                           to_dict=lambda: {"workflows": []})
     m = Metrics()
-    orch._discover_workflows(out, eps, app, None, m,
-                             Checkpoint(out / "checkpoint.json"))
+    from main.stages.intel import discover_workflows
+    discover_workflows(out, eps, app, None, m,
+                       Checkpoint(out / "checkpoint.json"), [])
     payload = json.loads((out / "workflows.json").read_text())
     assert payload["flows"]  # REST lifecycle found
     assert m.workflows_discovered == len(payload["flows"])

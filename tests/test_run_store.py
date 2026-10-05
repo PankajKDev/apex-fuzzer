@@ -53,10 +53,12 @@ def test_flush_run_audit_persists_denials(tmp_path):
     import time
     orch = Orchestrator(Config(), tmp_path,
                         profile=get_profile("standard"))
-    orch._flush_run_audit(tmp_path, "https://example.com", "example.com",
-                          time.time(), [
+    from main.stages.reporting import flush_run_audit
+    flush_run_audit(tmp_path, "https://example.com", "example.com",
+                    time.time(), [
                               {"url": "https://evil.com/", "method": "GET",
-                               "reason": "out_of_scope"}])
+                               "reason": "out_of_scope"}],
+                    orch.cfg, orch.profile, orch._last_endpoints)
     with RunStore(tmp_path / "apex.db") as store:
         run = store.latest_run("https://example.com")
         assert run is not None and run["tool_version"] != ""
@@ -102,8 +104,10 @@ def test_flush_persists_stashed_inventory(tmp_path):
     orch._last_endpoints = [Endpoint(
         url="https://example.com/a", normalized_url="https://e.com/a",
         host="example.com", path="/a")]
-    orch._flush_run_audit(tmp_path, "https://example.com", "example.com",
-                          time.time(), [])
+    from main.stages.reporting import flush_run_audit
+    flush_run_audit(tmp_path, "https://example.com", "example.com",
+                    time.time(), [], orch.cfg, orch.profile,
+                    orch._last_endpoints)
     with RunStore(tmp_path / "apex.db") as store:
         run = store.latest_run("https://example.com")
         rows = store.endpoints_for_run(run["id"])
@@ -124,8 +128,10 @@ def test_flush_run_audit_never_fails_scan(tmp_path):
     locked.mkdir()
     locked.chmod(0o500)
     try:
-        orch._flush_run_audit(locked, "https://example.com",
-                              "example.com", time.time(), [])
+        from main.stages.reporting import flush_run_audit
+        flush_run_audit(locked, "https://example.com",
+                        "example.com", time.time(), [], orch.cfg,
+                        orch.profile, orch._last_endpoints)
     finally:
         locked.chmod(0o700)
 
@@ -178,20 +184,25 @@ def test_flush_writes_changes_against_previous_run(tmp_path):
     from main.models import Endpoint
     from main.orchestrator import Orchestrator
     from main.profiles import get as get_profile
+    from main.stages.reporting import flush_run_audit
     import time
     orch = Orchestrator(Config(), tmp_path,
                         profile=get_profile("standard"))
     orch._last_endpoints = [Endpoint(
         url="https://example.com/a", normalized_url="https://e.com/a",
         host="example.com", path="/a", endpoint_type="page")]
-    first = orch._flush_run_audit(tmp_path, "https://example.com",
-                                  "example.com", time.time(), [])
+    first = flush_run_audit(tmp_path, "https://example.com",
+                                  "example.com", time.time(), [],
+                                  orch.cfg, orch.profile,
+                                  orch._last_endpoints)
     assert first["baseline"] is True
     orch._last_endpoints = [Endpoint(
         url="https://example.com/a", normalized_url="https://e.com/a",
         host="example.com", path="/a", endpoint_type="api")]
-    second = orch._flush_run_audit(tmp_path, "https://example.com",
-                                   "example.com", time.time(), [])
+    second = flush_run_audit(tmp_path, "https://example.com",
+                                   "example.com", time.time(), [],
+                                   orch.cfg, orch.profile,
+                                   orch._last_endpoints)
     assert second["baseline"] is False
     assert len(second["changed"]) == 1
     assert second["against_run"] == 1

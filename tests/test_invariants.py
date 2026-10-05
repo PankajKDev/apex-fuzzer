@@ -220,8 +220,10 @@ def test_invariants_new_finding_when_uncovered(tmp_path):
     _stash_matrix(orch, [owner, tester])
     m = Metrics()
     cov = CoverageTracker()
-    new = orch._discover_invariants(
-        out, [], EvidenceStore(out / "proofs"), m, cov, [])
+    from main.stages.intel import discover_invariants
+    new = discover_invariants(
+        out, [], EvidenceStore(out / "proofs"), m, cov, [],
+        orch._last_matrix, orch._harvest_pool)
     assert len(new) == 1
     f = new[0]
     assert f.source == "invariant"
@@ -251,9 +253,11 @@ def test_invariants_corroborate_instead_of_duplicating(tmp_path):
     existing = Finding(id="f1", source="idor-swap", name="BOLA",
                        matched_at="https://t.com/api/u",
                        tags=["bola", "idor"], raw={})
-    new = orch._discover_invariants(
+    from main.stages.intel import discover_invariants
+    new = discover_invariants(
         out, [], EvidenceStore(out / "proofs"), Metrics(),
-        CoverageTracker(), [existing])
+        CoverageTracker(), [existing], orch._last_matrix,
+        orch._harvest_pool)
     assert new == []
     attached = existing.raw.get("invariants", [])
     assert any(e["invariant_id"] == "inv-cross-user-read"
@@ -272,8 +276,9 @@ def test_invariants_silent_without_matrix(tmp_path):
     out = Path(tempfile.mkdtemp())
     orch = Orchestrator(Config(), out, profile=get_profile("standard"))
     m = Metrics()
-    assert orch._discover_invariants(
+    from main.stages.intel import discover_invariants
+    assert discover_invariants(
         out, [], EvidenceStore(out / "proofs"), m, CoverageTracker(),
-        []) == []
+        [], orch._last_matrix, orch._harvest_pool) == []
     assert m.invariants_tested == 0
     assert not (out / "invariants.json").exists()

@@ -231,8 +231,11 @@ def test_intel_step_offline_end_to_end(tmp_path):
                           to_dict=lambda: {"workflows": []})
     g = ApplicationGraph()
     m = Metrics()
-    orch._build_resource_intel(out, eps, app, g, m,
-                               Checkpoint(out / "checkpoint.json"))
+    from main.stages.intel import build_resource_intel
+    build_resource_intel(out, eps, app, g, m,
+                         Checkpoint(out / "checkpoint.json"),
+                         orch._harvest_pool, orch._page_ids,
+                         orch._last_matrix)
     payload = _json.loads((out / "resources.json").read_text())
     recs = payload["records"]
     by_src = {}
@@ -244,8 +247,11 @@ def test_intel_step_offline_end_to_end(tmp_path):
     # graph grew with resource nodes, metrics untouched (no new metric)
     assert g.nodes
     # run twice: artifact stable, no duplicates
-    orch._build_resource_intel(out, eps, app, g, m,
-                               Checkpoint(out / "checkpoint.json"))
+    from main.stages.intel import build_resource_intel
+    build_resource_intel(out, eps, app, g, m,
+                         Checkpoint(out / "checkpoint.json"),
+                         orch._harvest_pool, orch._page_ids,
+                         orch._last_matrix)
     payload2 = _json.loads((out / "resources.json").read_text())
     assert len(payload2["records"]) == len(recs)
 
@@ -255,8 +261,11 @@ def test_intel_step_empty_inputs():
     from main.reporting.metrics import Metrics
     from main.checkpoints import Checkpoint
     m = Metrics()
-    orch._build_resource_intel(out, [], None, None, m,
-                               Checkpoint(out / "checkpoint.json"))
+    from main.stages.intel import build_resource_intel
+    build_resource_intel(out, [], None, None, m,
+                         Checkpoint(out / "checkpoint.json"),
+                         orch._harvest_pool, orch._page_ids,
+                         orch._last_matrix)
     import json as _json
     assert _json.loads(
         (out / "resources.json").read_text()) == {"records": []}

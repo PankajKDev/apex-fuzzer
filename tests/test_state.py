@@ -284,7 +284,8 @@ def _run_matrix(out_dir, http, identities, app_graph=None):
     orch._harvest_pool = pool
     orch._last_matrix = matrix
     if app_graph is not None:
-        orch._record_behavioral_state(app_graph, matrix, out)
+        from main.stages.intel import record_behavioral_state
+        record_behavioral_state(app_graph, matrix, out)
     return orch, out, found
 
 
