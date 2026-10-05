@@ -490,7 +490,9 @@ def test_build_app_state_fresh_and_resume():
     ck = Checkpoint(out / "checkpoint.json")
     cov = CoverageTracker()
     m = Metrics()
-    app, g = orch._build_app_state(eps, "a.com", out, ck, False, m, cov)
+    from main.stages.mapping import build_app_state
+    app, g = build_app_state(eps, "a.com", out, ck, False, m, cov,
+                             orch.cfg)
     assert m.resources_discovered == 1
     assert (out / "application.json").exists()
     assert (out / "application_graph.json").exists()
@@ -498,7 +500,8 @@ def test_build_app_state_fresh_and_resume():
     assert ck.has_blob("application")
     # resume path reloads instead of rebuilding
     ck.mark("mapping")
-    app2, g2 = orch._build_app_state([], "a.com", out, ck, True, m, cov)
+    app2, g2 = build_app_state([], "a.com", out, ck, True, m, cov,
+                               orch.cfg)
     assert len(app2.endpoints) == 1 and len(g2.nodes) == len(g.nodes)
 
 

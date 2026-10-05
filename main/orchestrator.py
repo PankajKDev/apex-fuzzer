@@ -28,24 +28,19 @@ from .budgets import BudgetTracker
 from .checkpoints import Checkpoint
 from .http import HTTPClient
 from .stages.recon import (harvest_api_specs, harvest_robots, merge_recon,
-                           recon_identity_headers, run_recon)
+                           run_recon)
+from .stages.mapping import build_app_state, map_attack_surface
 from .stages.validation import ProbeControls
 from .stages.validation.coordinator import run_validation
 from .stages.endpoints import build_endpoints
 from .stages.scanning import (probe_live, run_nuclei_stage,
                               takeover_check)
-from .application.application_model import (Application,
-                                            build_from_scan)
-from .graph.application_graph import (ApplicationGraph,
-                                      build_from_application)
+from .application.application_model import Application
+from .graph.application_graph import ApplicationGraph
 from .reporting.coverage import CoverageTracker
 from .plugins import adapters as _plugin_adapters  # noqa: F401 (registry)
 from .discovery.url_normalizer import normalize_url
-from .discovery import parameters as param_mod
-from .discovery import technologies as tech_mod
-from .discovery import param_miner
 from .discovery.javascript import chunk_js
-from .discovery.classifier import classify
 from .detection.nuclei import NucleiRunner, run_hypothesis_templates
 from .validation.evidence import EvidenceStore
 from .validation.base import Candidate
@@ -54,7 +49,7 @@ from .validation.xss import XssValidator
 from .validation.ssrf import endpoint_from_url
 from .validation.oast import (InteractshProvider, probe_endpoint)
 from .validation.differential import DifferentialTester
-from .validation.mutate import MutationEngine, fingerprint_waf
+from .validation.mutate import MutationEngine
 from .ai.planner import AIPlanner
 from .reporting.metrics import Metrics
 from .reporting.html import render_html
@@ -257,8 +252,9 @@ class Orchestrator:
             log.info("mapping complete (resume)")
         else:
             ck.mark("mapping", "running")
-            self._map_attack_surface(endpoints, host, out_dir, metrics,
-                                     client)
+            self._page_ids = map_attack_surface(
+                endpoints, host, out_dir, metrics, client,
+                self.cfg, self.profile, self.scope)
             write_jsonl(out_dir / "endpoints.jsonl", endpoints)
             ck.mark("mapping")
         # Runtime inventory snapshot for the audit store (flushed with
@@ -268,8 +264,9 @@ class Orchestrator:
         self._last_endpoints = list(endpoints or [])
 
         # ── 4b. APPLICATION MODEL + GRAPH (§4–5, built incrementally) ────
-        application, app_graph = self._build_app_state(
-            endpoints, host, out_dir, ck, resume, metrics, coverage)
+        application, app_graph = build_app_state(
+            endpoints, host, out_dir, ck, resume, metrics, coverage,
+            self.cfg)
 
         # ── 5. LIVE HOST PROBE  (BUGFIX A) ──────────────────────────────
         live_file = out_dir / "live.txt"
@@ -614,253 +611,7 @@ class Orchestrator:
 
 
 
-    def _map_attack_surface(self, endpoints: List[Endpoint], host: str,
-                            out_dir: Path, metrics: Metrics, client):
-        tech_by_name = {}
-        html_params: List[Parameter] = []
-        all_headers: Dict[str, str] = {}
-        page_ids: List[tuple] = []  # (url, param, value, source)
-        passes: List[Optional[dict]] = [None]
-        authed = recon_identity_headers(self.cfg)
-        if authed:
-            passes.append(authed)
-        for pass_headers in passes:
-            for ep in [e for e in endpoints
-                       if e.method == "GET"][:30]:
-                fetch_kwargs = {"timeout": self.cfg.scan.http_timeout}
-                if pass_headers:
-                    fetch_kwargs["headers"] = pass_headers
-                try:
-                    r = client.get(ep.url, **fetch_kwargs)
-                    set_cookies = []
-                    if r.headers.get("set-cookie"):
-                        set_cookies = [r.headers.get("set-cookie")]
-                    for t in tech_mod.detect(r.headers, r.text[:200_000],
-                                             set_cookies):
-                        if t.name in tech_by_name:
-                            cur = tech_by_name[t.name]
-                            for e in t.evidence:
-                                if e not in cur.evidence:
-                                    cur.evidence.append(e)
-                        else:
-                            tech_by_name[t.name] = t
-                    for k, v in (r.headers or {}).items():
-                        all_headers.setdefault(k.lower(), v)
-                    if self.cfg.discovery.html_forms:
-                        html_params.extend(param_mod.from_html(r.text))
-                    # Phase 5: harvest IDs from already-fetched bodies —
-                    # zero extra requests, feeds resource intel only
-                    try:
-                        from .application.resources import (
-                            discover_ids_from_html, discover_ids_from_headers)
-                        ctype = str((r.headers or {}).get(
-                            "content-type", "")).lower()
-                        if "html" in ctype:
-                            for pname, pvalue in \
-                                    discover_ids_from_html(
-                                        r.text or "").items():
-                                page_ids.append(
-                                    (ep.url, pname, pvalue, "html"))
-                        for pname, pvalue in discover_ids_from_headers(
-                                r.headers or {}).items():
-                            page_ids.append(
-                                (ep.url, pname, pvalue, "headers"))
-                    except Exception as e:
-                        log.debug("page-id harvest failed: %s", e)
-                except Exception:
-                    continue
-        self._page_ids = page_ids
-        # techs discovered from JS bundles (spec §7)
-        for entry in read_jsonl(out_dir / "js_analysis.jsonl"):
-            metrics.source_maps_found += len(entry.get("source_maps") or [])
-            for t in entry.get("techs") or []:
-                tech = tech_mod.Technology(
-                    name=t.get("name", ""),
-                    version=t.get("version"),
-                    confidence=t.get("confidence", "possible"),
-                    evidence=t.get("evidence", []),
-                    category=t.get("category", "other"))
-                if tech.name in tech_by_name:
-                    for e in tech.evidence:
-                        if e not in tech_by_name[tech.name].evidence:
-                            tech_by_name[tech.name].evidence.append(e)
-                else:
-                    tech_by_name[tech.name] = tech
-        for ep in endpoints:
-            ep.endpoint_type = classify(ep.path or ep.normalized_url)
-            if ep.host:
-                ep.technology = list(tech_by_name.keys())
-        for ep in endpoints:
-            if ep.endpoint_type == "page":
-                ep.body_parameters = param_mod.merge(ep.body_parameters,
-                                                     html_params)
-        # WAF fingerprint (drives the mutation engine, spec §4)
-        waf = fingerprint_waf(all_headers)
-        metrics.waf_detected = waf or ""
-        if waf:
-            log.info("WAF fingerprinted: %s", waf)
-        metrics.technologies_detected = len(tech_by_name)
-        metrics.js_files_analyzed = sum(
-            1 for e in endpoints if "javascript" in e.source)
-        write_jsonl(out_dir / "technologies.jsonl",
-                    list(tech_by_name.values()))
 
-        # ── active parameter mining: Arjun + LinkFinder (spec §1) ───────
-        if self.profile.param_mining:
-            self._mine_hidden_params(endpoints, host, out_dir, metrics,
-                                     all_headers, tech_by_name)
-
-    # ── APPLICATION MODEL + GRAPH (§4–5) ─────────────────────────────
-    def _build_app_state(self, endpoints: List[Endpoint], host: str,
-                         out_dir: Path, ck: Checkpoint, resume: bool,
-                         metrics: Metrics,
-                         coverage: CoverageTracker):
-        """Build (or resume-load) the incremental application model and
-        its graph. Never requires perfect knowledge: endpoints, techs,
-        identities and resources accumulate as producers run."""
-        import json as _json
-        app_path = out_dir / "application.json"
-        graph_path = out_dir / "application_graph.json"
-        cov_path = out_dir / "coverage.json"
-        if resume and ck.is_complete("mapping") and app_path.exists():
-            try:
-                application = Application.from_dict(
-                    _json.loads(app_path.read_text()))
-                graph = ApplicationGraph.load(graph_path) \
-                    if graph_path.exists() else \
-                    build_from_application(application)
-                if cov_path.exists():
-                    loaded = CoverageTracker.from_dict(
-                        _json.loads(cov_path.read_text()))
-                    coverage.status.update(loaded.status)
-                    coverage.detail.update(loaded.detail)
-                    coverage.counts.update(loaded.counts)
-                log.info("application state resumed: %d endpoints, "
-                         "%d resources, %d graph nodes",
-                         len(application.endpoints),
-                         len(application.resources), len(graph.nodes))
-            except Exception as e:
-                log.warning("app state resume failed (%s) — rebuilding", e)
-                application, graph = self._fresh_app_state(
-                    endpoints, host, out_dir, ck)
-        else:
-            application, graph = self._fresh_app_state(
-                endpoints, host, out_dir, ck)
-        metrics.resources_discovered = len(application.resources)
-        identities = application.identities
-        metrics.identities_tested = len(identities)
-        metrics.roles_tested = len({r.name for r in application.roles})
-        metrics.tenants_tested = len({t.name for t in application.tenants})
-        metrics.graph_nodes = len(graph.nodes)
-        metrics.graph_edges = len(graph.edges)
-        return application, graph
-
-    def _fresh_app_state(self, endpoints: List[Endpoint], host: str,
-                         out_dir: Path, ck: Checkpoint):
-        techs = read_jsonl(out_dir / "technologies.jsonl")
-        application = build_from_scan(host, endpoints, techs,
-                                      self.cfg.auth.contexts)
-        graph = build_from_application(application)
-        (out_dir / "application.json").write_text(
-            __import__("json").dumps(application.to_dict(), indent=2))
-        graph.save(out_dir / "application_graph.json")
-        if not (out_dir / "attack_chains.jsonl").exists():
-            (out_dir / "attack_chains.jsonl").write_text("")
-        ck.save_blob("application", application.to_dict())
-        ck.save_blob("application_graph", graph.to_dict())
-        log.info("application state built: %d endpoints, %d identities, "
-                 "%d resources, %d graph nodes/%d edges",
-                 len(application.endpoints), len(application.identities),
-                 len(application.resources),
-                 len(graph.nodes), len(graph.edges))
-        return application, graph
-
-    # ── ARJUN PARAM MINING (spec §1) ───────────────────────────────────
-    def _mine_hidden_params(self, endpoints: List[Endpoint], host: str,
-                            out_dir: Path, metrics: Metrics,
-                            all_headers: Dict[str, str],
-                            tech_by_name: Dict):
-        if not self.cfg.discovery.arjun:
-            return
-        if not param_miner.arjun_available():
-            log.info("arjun not installed — hidden param mining skipped "
-                     "(pipx install arjun)")
-            return
-        eligible = [e for e in endpoints
-                    if e.method == "GET"
-                    and e.endpoint_type in ("api", "page", "authentication")]
-        if self.cfg.discovery.arjun_require_existing_param:
-            eligible = [e for e in eligible
-                        if e.query_parameters or e.body_parameters]
-        # endpoints that already have params are the highest-yield targets
-        eligible.sort(key=lambda e: -(len(e.query_parameters)
-                                      + len(e.body_parameters)))
-        eligible = eligible[:self.cfg.discovery.arjun_max_endpoints]
-        if not eligible:
-            return
-        log.info("arjun: mining %d endpoints (methods=%s)",
-                 len(eligible), ",".join(self.cfg.discovery.arjun_methods))
-        for i, ep in enumerate(eligible):
-            if not self.scope.active_test_allowed(ep.url):
-                continue
-            found = param_miner.mine_hidden_params(
-                ep.url,
-                methods=self.cfg.discovery.arjun_methods,
-                out_dir=out_dir / "arjun",
-                timeout=self.cfg.discovery.arjun_timeout,
-                stable=self.cfg.discovery.arjun_stable,
-                rate_limit=self.cfg.scan.rate_limit)
-            new_params: List[Parameter] = []
-            for method, names in found.items():
-                loc = "query" if method == "GET" else "body"
-                for name in names:
-                    if any(p.name == name and p.location == loc
-                           for p in
-                           (ep.query_parameters if loc == "query"
-                            else ep.body_parameters)):
-                        continue
-                    new_params.append(Parameter(
-                        name=name, location=loc, source=["arjun"],
-                        confidence=Confidence.PROBABLE.value))
-            if new_params:
-                for p in new_params:
-                    if p.location == "query":
-                        ep.query_parameters = param_mod.merge(
-                            ep.query_parameters, [p])
-                    else:
-                        ep.body_parameters = param_mod.merge(
-                            ep.body_parameters, [p])
-                metrics.arjun_params_found += len(new_params)
-                metrics.arjun_endpoints_mined += 1
-                log.info("arjun: %s +%d params: %s", ep.url,
-                         len(new_params),
-                         ", ".join(p.name for p in new_params[:10]))
-
-        # LinkFinder passive JS params (spec §1, Gaia-style) — best effort
-        if self.cfg.discovery.linkfinder and which("linkfinder"):
-            js_files = [out_dir / "cache" / f for f in
-                        (out_dir / "cache").glob("*")
-                        if f.is_file()] if (out_dir / "cache").exists() else []
-            names = param_miner.linkfinder_params(
-                [f for f in js_files if f.suffix in ("", ".js")],
-                host, out_dir / "linkfinder")
-            if names:
-                attached = 0
-                for ep in eligible:
-                    for name in names:
-                        if attached >= 30:
-                            break
-                        if any(p.name == name for p in
-                               ep.query_parameters):
-                            continue
-                        ep.query_parameters.append(Parameter(
-                            name=name, location="query",
-                            source=["linkfinder"],
-                            confidence=Confidence.POSSIBLE.value))
-                        attached += 1
-                log.info("linkfinder: attached %d JS params", attached)
-
-    # ── PROBE LIVE  (BUGFIX A) ──────────────────────────────────────────
 
 
 
