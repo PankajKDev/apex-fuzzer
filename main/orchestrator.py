@@ -30,32 +30,16 @@ from .http import HTTPClient
 from .stages.recon import (harvest_api_specs, harvest_robots, merge_recon,
                            recon_identity_headers, run_recon)
 from .stages.validation import ProbeControls
+from .stages.validation.coordinator import run_validation
 from .stages.endpoints import build_endpoints
 from .stages.scanning import (probe_live, run_nuclei_stage,
                               takeover_check)
-from .stages.validation.cache import cache_probe
-from .stages.validation.differential import differential_probe
-from .stages.validation.identity import mfa_transition_probe, oauth_probe
-from .stages.validation.authz import authz_matrix_probe
-from .stages.validation.introspection import graphql_introspection_probe
-from .stages.validation.oast import oast_sweep
-from .stages.validation.second_order import (second_order_probe,
-                                             second_order_ssrf_probe)
-from .stages.validation.business import business_logic_probe
-from .stages.validation.race import race_probe
-from .stages.validation.plugins import (apply_plugin_results,
-                                         finding_endpoint)
-from .stages.validation.prescreen import prescreen_sweep
-from .reporting.coverage import classify_finding
 from .application.application_model import (Application,
                                             build_from_scan)
-from .application.identities import from_auth_contexts
 from .graph.application_graph import (ApplicationGraph,
                                       build_from_application)
 from .reporting.coverage import CoverageTracker
-from .plugins.base import (TestTarget, TestContext, run_plugins)
 from .plugins import adapters as _plugin_adapters  # noqa: F401 (registry)
-from .plugins.adapters import PLUGIN_ORDER
 from .discovery.url_normalizer import normalize_url
 from .discovery import parameters as param_mod
 from .discovery import technologies as tech_mod
@@ -325,20 +309,28 @@ class Orchestrator:
         # automated login minting (agent Phase 2): configured identities
         # without headers get a real session; MFA stops at a checkpoint
         self._login_identities(out_dir, metrics)
-        run_validation = (self.profile.run_validation
-                          or self.cfg.validation.enabled)
+        run_validation_enabled = (self.profile.run_validation
+                                  or self.cfg.validation.enabled)
         run_second_order = (self.profile.second_order
                             or self.cfg.validation.second_order
                             or self.cfg.validation.second_order_ssrf)
         run_diff = (self.profile.differential
                     or self.cfg.validation.differential)
         run_oast = self.profile.oast or self.cfg.validation.ssrf
-        if run_validation or run_diff or run_oast or run_second_order:
+        if run_validation_enabled or run_diff or run_oast or run_second_order:
             ck.mark("validation", "running")
-            findings = self._validate(findings, endpoints, evidence,
-                                      metrics, client, out_dir,
-                                      budgets, coverage,
-                                      app_graph=app_graph, ck=ck)
+            result = run_validation(
+                findings, endpoints, evidence, metrics, client,
+                out_dir, budgets, coverage, self.cfg, self.scope,
+                self.profile, ProbeControls.from_orchestrator(self),
+                app_graph=app_graph, ck=ck)
+            findings = result.findings
+            self._active_waf = result.active_waf
+            self._harvest_pool = result.harvest_pool
+            self._last_matrix = result.matrix
+            if app_graph is not None and result.matrix is not None:
+                self._record_behavioral_state(app_graph, result.matrix,
+                                              out_dir)
             write_jsonl(out_dir / "findings.jsonl", findings)
             ck.mark("validation")
         else:
@@ -468,34 +460,6 @@ class Orchestrator:
             log.info("reviews: %d finding(s) marked", marked)
         return marked
 
-    @staticmethod
-    def _fp_suppression_reason(f, test_class, reviews) -> str:
-        """Why this finding must skip plugin re-validation, or "".
-
-        Finding-ID marks stick across runs via stable IDs; triple
-        marks catch findings whose IDs rotate per run (swap findings
-        embed victim values). Either suppresses — the probe already
-        ran and a human ruled it out.
-        """
-        if reviews is None:
-            return ""
-        mark = reviews.verdict_for_finding(getattr(f, "id", ""))
-        if mark and mark.get("verdict") == "false_positive":
-            reason = mark.get("reason", "")
-            return (f"operator-marked false positive ({f.id})"
-                    + (f": {reason}" if reason else ""))
-        from .reporting.reviews import finding_test_class
-        cls = test_class or finding_test_class(f)
-        url = normalize_url(getattr(f, "endpoint_url", "") or
-                            getattr(f, "matched_at", "") or "")
-        param = getattr(f, "parameter", "") or ""
-        if cls and url and reviews.is_fp_triple(cls, url, param):
-            from .reporting.reviews import (canonical_test_class,
-                                            canonical_triple_url)
-            return (f"operator-marked false positive "
-                    f"({canonical_test_class(cls)} "
-                    f"{canonical_triple_url(url)}::{param.strip().lower()})")
-        return ""
 
     def _flush_run_audit(self, out_dir: Path, target: str, host: str,
                            started_epoch: float,
@@ -901,273 +865,6 @@ class Orchestrator:
 
 
     # ── VALIDATION (spec §2/3/4/8) ─────────────────────────────────────
-    def _validate(self, findings: List[Finding],
-                  endpoints: List[Endpoint], evidence: EvidenceStore,
-                  metrics: Metrics, client, out_dir: Path,
-                  budgets: BudgetTracker, coverage: CoverageTracker,
-                  app_graph=None, ck=None) -> List[Finding]:
-        out: List[Finding] = []
-        # Operator review marks (reviews.jsonl): FP triples suppress
-        # repeat prescreen probing; finding-ID marks link via triples.
-        from .reporting.reviews import load_reviews, resolve_finding_triples
-        reviews = load_reviews(out_dir / "reviews.jsonl")
-        if len(reviews):
-            linked = resolve_finding_triples(reviews, findings)
-            log.info("reviews: %d mark(s), %d FP triple(s) (%d linked)",
-                     len(reviews), len(reviews.triples), linked)
-        controls = ProbeControls.from_orchestrator(self)
-
-        # Open redirects are checked only during an explicitly enabled
-        # validation run, never merely because OAST/differential was selected.
-        if ((self.profile.run_validation or self.cfg.validation.enabled)
-                and self.cfg.validation.open_redirect):
-            from .validation.open_redirect import probe_open_redirects
-            out += probe_open_redirects(
-                endpoints, client, evidence, metrics, coverage, self.scope,
-                max_endpoints=self.cfg.validation.open_redirect_max_endpoints,
-                max_params=self.cfg.validation.open_redirect_max_params,
-                timeout=self.cfg.scan.http_timeout)
-
-        # GraphQL introspection exposure (schema disclosure inventory).
-        if (self.profile.run_validation or self.cfg.validation.enabled):
-            out += graphql_introspection_probe(
-                endpoints, evidence, metrics, budgets, coverage, client,
-                self.cfg, self.scope, controls)
-
-        # 0) WAF fingerprint from a live probe (drives mutation choice)
-        waf = metrics.waf_detected or ""
-        if endpoints and not waf:
-            try:
-                r = client.get(endpoints[0].url,
-                               timeout=self.cfg.scan.http_timeout)
-                waf = fingerprint_waf(r.headers) or ""
-                if waf:
-                    metrics.waf_detected = waf
-            except Exception:
-                pass
-        self._active_waf = waf or None
-
-        techs = read_jsonl(out_dir / "technologies.jsonl")
-        identities, _, _ = from_auth_contexts(self.cfg.auth.contexts)
-
-        # CORS needs an explicitly configured cookie-authenticated identity;
-        # anonymous header reflection is not treated as a bounty finding.
-        if ((self.profile.run_validation or self.cfg.validation.enabled)
-                and self.cfg.validation.cors):
-            from .validation.cors import probe_cors
-            cors_findings = probe_cors(
-                endpoints, client, evidence, metrics, coverage, self.scope,
-                identities,
-                max_endpoints=self.cfg.validation.cors_max_endpoints,
-                max_identities=self.cfg.validation.cors_max_identities,
-                timeout=self.cfg.scan.http_timeout)
-            if self.cfg.validation.cors_browser:
-                from .validation.cors_browser import confirm_cors_readability
-                identities_by_name = {item.name: item for item in identities}
-                for finding in cors_findings:
-                    if not budgets.consume_test(
-                            "browser", finding.endpoint_url, limit=1):
-                        finding.raw["browser_confirmation"] = {
-                            "status": "blocked",
-                            "reason": "browser action budget exhausted"}
-                        continue
-                    identity = identities_by_name.get(finding.identity)
-                    if identity is None:
-                        result = {
-                            "status": "unavailable",
-                            "reason": "candidate identity is unavailable"}
-                    else:
-                        result = confirm_cors_readability(
-                            finding, identity, self.cfg,
-                            timeout_ms=self.cfg.browser.navigation_timeout_ms)
-                    finding.raw["browser_confirmation"] = result
-                    if result.get("status") != "confirmed":
-                        continue
-                    finding.validation_status = ValidationStatus.CONFIRMED.value
-                    finding.confidence = Confidence.CONFIRMED.value
-                    finding.tags.append("cors-browser-readable")
-                    finding.description += (
-                        " Chromium confirmed that a cross-origin page could "
-                        "read the successful response while the configured "
-                        "cookie was sent. The response body was not retained.")
-                    evidence.record(
-                        finding,
-                        request_text=(
-                            f"GET {finding.endpoint_url}\n"
-                            f"Origin: {result.get('origin', finding.raw.get('origin', ''))}\n"
-                            f"[browser identity: {finding.identity}; cookie value omitted]\n"),
-                        response_text=(
-                            f"Chromium fetch status: "
-                            f"{result.get('response_status')}\n"
-                            f"[body readable; {result.get('response_length')} "
-                            "characters; body omitted]\n"),
-                        response_headers=finding.response_headers)
-                    metrics.validated_confirmed += 1
-                    coverage.record(
-                        "cors", "confirmed",
-                        "Chromium read a successful cross-origin response "
-                        "with the configured cookie present")
-            out += cors_findings
-
-        # 1) differential auth-context testing (spec §2)
-        if (self.profile.differential or self.cfg.validation.differential):
-            diff = DifferentialTester(self.cfg, client)
-            out += differential_probe(endpoints, diff, evidence,
-                                      metrics, budgets, coverage,
-                                      self.cfg, self.scope, controls)
-
-        # 1b) MFA session transitions (pre- vs post-MFA test sessions)
-        if (self.profile.differential or self.cfg.validation.differential
-                or self.profile.authz_matrix
-                or self.cfg.authorization.enabled):
-            out += mfa_transition_probe(
-                endpoints, evidence, metrics, budgets, coverage, client,
-                self.cfg, self.scope, controls, identities)
-
-        # 1b) web-cache deception (unique keys, read-only) ─────────
-        if ((self.profile.run_validation or self.cfg.validation.enabled)
-                and self.cfg.validation.cache):
-            out += cache_probe(endpoints, evidence, metrics,
-                                 budgets, coverage, client, self.cfg,
-                                 self.scope, controls, identities)
-
-        # 1b) authz matrix: harvest → swap → per-method sweep (#1–2)
-        if (self.profile.authz_matrix or self.cfg.authorization.enabled):
-            matrix_out, matrix, pool = authz_matrix_probe(
-                endpoints, evidence, metrics, budgets, coverage,
-                client, out_dir, identities, self.cfg, self.scope,
-                controls, app_graph=app_graph)
-            out += matrix_out
-            self._harvest_pool = pool
-            self._last_matrix = matrix
-            if app_graph is not None:
-                self._record_behavioral_state(app_graph, matrix,
-                                              out_dir)
-
-        # 2) OAST sweep for blind SSRF (spec §3)
-        oast_provider = self._maybe_register_oast()
-        try:
-            run_oast_sweep = (self.profile.oast
-                              or self.cfg.validation.ssrf
-                              or self.cfg.validation.enabled)
-            if (run_oast_sweep and oast_provider and
-                    oast_provider.available()):
-                out += oast_sweep(endpoints, oast_provider,
-                                    evidence, metrics, client, out_dir,
-                                    budgets, coverage, self.cfg,
-                                    self.scope, controls)
-
-            # 2b) OAuth transitions (passive analysis + bounded probes)
-            if (self.profile.differential
-                    or self.cfg.validation.differential
-                    or self.profile.authz_matrix
-                    or self.cfg.authorization.enabled):
-                out += oauth_probe(
-                    endpoints, out_dir, evidence, metrics, budgets,
-                    coverage, client, self.cfg, self.scope, controls,
-                    identities, oast_provider)
-
-            # 2c) lead-independent prescreen sweep: endpoints x params
-            # feed the mutation prescreens directly so findings do not
-            # depend on Nuclei leads; hits re-enter the plugin loop below
-            if ((self.profile.run_validation
-                    or self.cfg.validation.enabled)
-                    and self.cfg.validation.mutation):
-                findings += prescreen_sweep(
-                    endpoints, findings, evidence, metrics, budgets,
-                    coverage, client, self.cfg, self.scope, controls,
-                    self._active_waf, reviews)
-
-            # 3) per-finding plugins (§48: registry + TestResult)
-            test_ctx = TestContext(
-                self.cfg, http=client, scope=self.scope,
-                budgets=budgets, oast_provider=oast_provider,
-                waf=waf or None, technologies=techs,
-                identities=identities, evidence=evidence,
-                timeout=self.cfg.scan.http_timeout,
-                browser_enabled=(self.profile.browser or
-                                 self.cfg.browser.enabled))
-            by_norm = {e.normalized_url: e for e in endpoints}
-            for f in findings:
-                test_class = classify_finding(f)
-                suppressed = self._fp_suppression_reason(
-                    f, test_class, reviews)
-                if suppressed:
-                    coverage.mark_untestable(test_class, suppressed)
-                    log.info("plugins: skipping %s (%s)", f.id,
-                             suppressed)
-                    continue
-                ep = finding_endpoint(f, by_norm)
-                target = TestTarget(
-                    f.matched_at,
-                    endpoint_type=ep.endpoint_type if ep else "unknown",
-                    parameter=f.parameter, method=f.method,
-                    finding=f, endpoint=ep, test_class=test_class)
-                applicable = []
-                for plugin, res in run_plugins(target, test_ctx,
-                                               PLUGIN_ORDER):
-                    if res.status in ("skipped", "error"):
-                        continue
-                    if res.status == "blocked":
-                        coverage.record(test_class, "blocked",
-                                        f"{plugin.name} blocked")
-                        continue
-                    applicable.append((plugin, res))
-                applied = bool(applicable)
-                if applicable:
-                    apply_plugin_results(
-                        f, applicable, evidence, test_class, coverage)
-                if applied:
-                    metrics.validation_candidates += 1
-                    if f.validation_status == "confirmed":
-                        metrics.validated_confirmed += 1
-                        self._note_candidate()
-                    elif f.validation_status == "strong_candidate":
-                        self._note_candidate()
-                    elif f.validation_status == "false_positive":
-                        metrics.false_positives += 1
-                out.append(f)
-
-            # 4) stored-XSS correlation (bounty item #3, opt-in: persists
-            # canaries server-side)
-            if (self.profile.second_order or
-                    self.cfg.validation.second_order):
-                out += second_order_probe(
-                    endpoints, evidence, metrics, budgets, coverage,
-                    client, self.cfg, self.scope, controls, identities)
-            if self.cfg.validation.second_order_ssrf:
-                out += second_order_ssrf_probe(
-                    endpoints, evidence, metrics, budgets, coverage,
-                    client, self.cfg, self.scope, controls, identities,
-                    oast_provider)
-            # 5) business-logic mutations (opt-in: submits abuse values)
-            if (self.profile.business_logic or
-                    self.cfg.business.enabled):
-                out += business_logic_probe(
-                    endpoints, evidence, metrics, budgets, coverage,
-                    client, self.cfg, self.scope, controls, identities)
-            # 6) race engine (opt-in: synchronized bursts of
-            # state-changing requests)
-            if (self.profile.race or self.cfg.race.enabled):
-                out += race_probe(
-                    endpoints, evidence, metrics, budgets, coverage,
-                    client, self.cfg, self.scope, controls, identities)
-            # behavioral state accumulated above → persist the graph
-            # (agent Phase 3: validation findings ride on observations)
-            if app_graph is not None:
-                try:
-                    app_graph.save(out_dir / "application_graph.json")
-                    if ck is not None:
-                        ck.save_blob("application_graph",
-                                     app_graph.to_dict())
-                    metrics.graph_nodes = len(app_graph.nodes)
-                    metrics.graph_edges = len(app_graph.edges)
-                except Exception as e:
-                    log.debug("graph persist failed: %s", e)
-        finally:
-            if oast_provider is not None:
-                oast_provider.close()
-        return out
 
     # ── AUTOMATED LOGIN (agent Phase 2) ──────────────────────────────
     def _login_identities(self, out_dir: Path, metrics: Metrics):
@@ -1589,22 +1286,6 @@ class Orchestrator:
 
 
 
-    def _maybe_register_oast(self) -> Optional[InteractshProvider]:
-        want = (self.profile.oast or self.cfg.validation.ssrf
-                or self.cfg.validation.enabled
-                or self.cfg.validation.second_order_ssrf)
-        if not want or not self.cfg.oast.enabled:
-            return None
-        provider = InteractshProvider(
-            server=self.cfg.oast.server,
-            api_base=self.cfg.oast.api_base,
-            timeout=self.cfg.scan.http_timeout,
-            callback_url=self.cfg.oast.callback_url)
-        if provider.register():
-            return provider
-        log.info("OAST unavailable — SSRF blind probes will not be "
-                 "confirmed out-of-band")
-        return None
 
 
     # ── AI LOOP CLOSURE (spec §8) ──────────────────────────────────────

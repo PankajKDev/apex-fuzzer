@@ -819,9 +819,13 @@ def test_validate_runs_authz_and_second_order_steps():
            _ep("https://t.com/comment", ["body"], "page"),
            _ep("https://t.com/list", [], "page")]
     m, cov = Metrics(), CoverageTracker()
-    found = orch._validate(
+    from main.stages.validation import ProbeControls
+    from main.stages.validation.coordinator import run_validation
+    result = run_validation(
         [], eps, EvidenceStore(out / "proofs"), m, H(), out,
-        BudgetTracker(cfg), cov)
+        BudgetTracker(cfg), cov, cfg, orch.scope, orch.profile,
+        ProbeControls.from_orchestrator(orch))
+    found = result.findings
     sources = {f.source for f in found}
     assert "idor-swap" in sources
     assert "second-order" in sources

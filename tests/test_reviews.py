@@ -124,26 +124,26 @@ def test_prescreen_skips_fp_triples(tmp_path):
 
 def test_plugin_loop_suppression_by_finding_id():
     from main.models import Finding
-    from main.orchestrator import Orchestrator
     import main.reporting.reviews as rev
+    from main.reporting.reviews import fp_suppression_reason
     idx = rev.ReviewIndex()
     idx.by_finding["diff-abc"] = {"verdict": "false_positive",
                                   "reason": "login wall"}
     f = Finding(id="diff-abc", source="differential",
                 endpoint_url="https://example.com/other",
                 parameter="other")
-    reason = Orchestrator._fp_suppression_reason(f, "authz", idx)
+    reason = fp_suppression_reason(f, "authz", idx)
     assert "diff-abc" in reason and "login wall" in reason
     # true-positive marks never suppress
     idx.by_finding["diff-abc"] = {"verdict": "true_positive",
                                   "reason": ""}
-    assert Orchestrator._fp_suppression_reason(f, "authz", idx) == ""
+    assert fp_suppression_reason(f, "authz", idx) == ""
 
 
 def test_plugin_loop_suppression_by_rotating_swap_id():
     from main.models import Finding
-    from main.orchestrator import Orchestrator
     import main.reporting.reviews as rev
+    from main.reporting.reviews import fp_suppression_reason
     idx = rev.ReviewIndex()
     # swap IDs embed victim values, so they rotate per run: the
     # triple (not the ID) is what sticks (stored canonical form).
@@ -151,17 +151,17 @@ def test_plugin_loop_suppression_by_rotating_swap_id():
     f = Finding(id="swap-NEWVICTIM", source="idor-swap",
                 endpoint_url="https://example.com/api/u/1?id=9",
                 parameter="id")
-    reason = Orchestrator._fp_suppression_reason(f, "", idx)
+    reason = fp_suppression_reason(f, "", idx)
     assert "authz https://example.com/api/u/1::id" in reason
 
 
 def test_plugin_loop_no_suppression_without_marks():
     from main.models import Finding
-    from main.orchestrator import Orchestrator
     import main.reporting.reviews as rev
+    from main.reporting.reviews import fp_suppression_reason
     f = Finding(id="swap-x", source="idor-swap",
                 endpoint_url="https://example.com/api/u/1",
                 parameter="id")
-    assert Orchestrator._fp_suppression_reason(
+    assert fp_suppression_reason(
         f, "authz", rev.ReviewIndex()) == ""
-    assert Orchestrator._fp_suppression_reason(f, "authz", None) == ""
+    assert fp_suppression_reason(f, "authz", None) == ""

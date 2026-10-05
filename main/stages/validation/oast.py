@@ -17,6 +17,27 @@ from . import ProbeControls, reserve_or_block
 
 log = get_logger("stages-validation")
 
+
+def maybe_register_oast(cfg, profile):
+    """Build the OAST provider when any blind probe family is armed."""
+    from ...validation.oast import InteractshProvider
+    want = (profile.oast or cfg.validation.ssrf
+            or cfg.validation.enabled
+            or cfg.validation.second_order_ssrf)
+    if not want or not cfg.oast.enabled:
+        return None
+    provider = InteractshProvider(
+        server=cfg.oast.server,
+        api_base=cfg.oast.api_base,
+        timeout=cfg.scan.http_timeout,
+        callback_url=cfg.oast.callback_url)
+    if provider.register():
+        return provider
+    log.info("OAST unavailable — SSRF blind probes will not be "
+             "confirmed out-of-band")
+    return None
+
+
 _OAST_PRIORITY_TYPES = ("proxy", "webhook", "callback", "import",
                         "export", "download", "upload", "api")
 

@@ -15,6 +15,7 @@ malformed lines are ignored (never fail a scan).
 from pathlib import Path
 from typing import Dict, List, Optional, Set, Tuple
 
+from ..discovery.url_normalizer import normalize_url
 from ..logging_setup import get_logger
 
 log = get_logger("reviews")
@@ -172,4 +173,30 @@ def finding_test_class(finding) -> str:
                       "traversal", "cache"):
         if candidate in tags:
             return candidate
+    return ""
+
+
+def fp_suppression_reason(f, test_class, reviews) -> str:
+    """Why this finding must skip plugin re-validation, or "".
+
+    Finding-ID marks stick across runs via stable IDs; triple
+    marks catch findings whose IDs rotate per run (swap findings
+    embed victim values). Either suppresses — the probe already
+    ran and a human ruled it out.
+    """
+    if reviews is None:
+        return ""
+    mark = reviews.verdict_for_finding(getattr(f, "id", ""))
+    if mark and mark.get("verdict") == "false_positive":
+        reason = mark.get("reason", "")
+        return (f"operator-marked false positive ({f.id})"
+                + (f": {reason}" if reason else ""))
+    cls = test_class or finding_test_class(f)
+    url = normalize_url(getattr(f, "endpoint_url", "") or
+                        getattr(f, "matched_at", "") or "")
+    param = getattr(f, "parameter", "") or ""
+    if cls and url and reviews.is_fp_triple(cls, url, param):
+        return (f"operator-marked false positive "
+                f"({canonical_test_class(cls)} "
+                f"{canonical_triple_url(url)}::{param.strip().lower()})")
     return ""
