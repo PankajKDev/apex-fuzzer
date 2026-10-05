@@ -41,6 +41,14 @@ force, destructive actions, and any disallowed activity.
 - The shared request budget applies to Apex's HTTP client. Nuclei, sqlmap,
   Dalfox, Arjun, Katana, httpx, and other subprocesses may have independent
   request behavior; use their individual caps and inspect the plan.
+- Subprocesses follow redirects themselves, outside the scope gate. Apex
+  only hands them scope-filtered inputs (`probe-input.txt`,
+  `nuclei-input.txt`) and scope-filters their findings afterwards, but a
+  redirect chain inside a subprocess is untrusted discovery, never proof.
+- Soft-404 baselines are recorded (`soft404.json`), not yet enforced:
+  matched fetches are tagged for triage, but no endpoint is dropped on
+  template match alone. Treat a 200-everything host as suspect inventory
+  until the follow-up filtering pass lands.
 - `--dry-run` sends no scan requests, but its cost estimate is not a packet
   count for external tools.
 - A configured authorization context can be expired, incomplete, or

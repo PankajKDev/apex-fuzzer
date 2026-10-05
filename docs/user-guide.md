@@ -348,7 +348,12 @@ vs explicitly untested classes — untested means untested, not safe.
 `findings.jsonl` is the machine-readable record; `sarif.json` is the
 same findings as SARIF 2.1.0 for CI ingestion (triage feed, not
 evidence); `proofs/finding-NNN/` holds the raw evidence;
-`coverage.json`/`metrics.json` summarize. Ask for any finding's full
+`coverage.json`/`metrics.json` summarize. `apex.db` records every
+run with its scope denials and endpoint inventory; `changes.json`
+diffs the inventory against the previous finished run (new/changed/
+gone — retest those first). `soft404.json` holds the not-found
+baseline: on template-serving hosts, treat unmatched inventory as
+suspect until a human confirms. Ask for any finding's full
 story with `apex-fuzzer --explain FINDING-ID` (searches `--output`,
 zero network): status, signals, FP checks, review marks, and the
 human checklist.

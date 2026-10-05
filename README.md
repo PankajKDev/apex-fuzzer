@@ -173,7 +173,13 @@ apex-fuzzer -d example.com --resume --output output
 Results land in `output/<host>/`: `report.html`, `findings.jsonl`,
 `endpoints.jsonl`, `technologies.jsonl`, `hypotheses.jsonl`, `metrics.json`,
 `coverage.json`, `application.json`, `application_graph.json`,
-`attack_chains.jsonl`, `leads.jsonl`, `burp/`, `proofs/`.
+`attack_chains.jsonl`, `leads.jsonl`, `sarif.json` (CI triage feed),
+`changes.json` (new/changed/gone endpoints vs the previous finished
+run), `soft404.json` (not-found baseline plus matched fetches),
+`apex.db` (run + scope-decision + endpoint-inventory audit trail),
+`burp/`, `proofs/`. Operator input lives alongside output:
+`reviews.jsonl` (false/true-positive marks that stick across runs
+via stable finding IDs).
 
 `burp/` is the manual-testing handoff: `urls.txt` (scope seed),
 `requests/` (paste-ready raw requests, one per endpoint — drop one
@@ -202,6 +208,14 @@ in [sample artifacts](docs/sample-artifacts/).
 ```
 -d, --domain DOMAIN     Single domain (host or URL)
 -f, --file FILE         File with one target per line
+--scope-check URL       Explain the scope decision for URL(s) and exit
+                        (repeatable; zero network; exit 1 if any denied)
+--explain FINDING-ID    Explain every signal behind a finding ID from a
+                        previous run (searches --output; zero network)
+--seed-urls FILE        File with manual seed URLs (one per line),
+                        merged into discovery for every target
+--har FILE              HAR 1.2 capture to import into the endpoint pool
+                        (repeatable; inventory only, no replay)
 -c, --config CONFIG     Path to config.yaml (defaults if missing)
 --fast                  rate_limit → 200
 --deep                  rate_limit → 20
@@ -221,6 +235,8 @@ in [sample artifacts](docs/sample-artifacts/).
 --no-js                 disable JavaScript analysis
 --min-sev {info,low,medium,high,critical}
                         minimum severity rendered in the report
+--fail-on {info,low,medium,high,critical}
+                        CI mode: exit 1 when any finding meets the severity
 --resume                skip checkpoint-complete stages
 --output OUTPUT         base output dir (default: output)
 --profile {passive,standard,deep,api,authenticated,validation,leads}

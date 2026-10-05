@@ -87,6 +87,11 @@ that the selected modules can write data. A strict refusal exits before scan
 traffic. Keep the output directory private because reports can contain
 application data and evidence.
 
+For owned applications in CI, append `--fail-on high` (or your gate
+severity): the scan exits 1 when any finding meets the threshold, so
+the pipeline fails closed while humans triage `report.html`. Bounty
+runs omit it and always exit 0 with a report.
+
 ## Scope, impact, and limits
 
 - Start with a single exact host. Add targets only after confirming each one
