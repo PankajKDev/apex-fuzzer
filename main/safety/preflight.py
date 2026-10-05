@@ -158,6 +158,17 @@ def plan_graphql_introspection(n_endpoints: int) -> RequestPlan:
     return RequestPlan("graphql_introspection", "*", 0, n_endpoints)
 
 
+def plan_jwt(n_endpoints: int, n_identities: int) -> RequestPlan:
+    # baseline plus up to two confusion replays per identity
+    return RequestPlan("jwt", "*", 0, n_endpoints * n_identities * 3)
+
+
+def plan_header(n_endpoints: int, max_params: int) -> RequestPlan:
+    # Host override pair plus one CRLF probe per parameter
+    return RequestPlan("header", "*", 0,
+                       n_endpoints * (2 + max_params))
+
+
 def plan_upload(n_endpoints: int) -> RequestPlan:
     # submit plus bounded readback per upload endpoint
     return RequestPlan("upload", "*", 0, n_endpoints * 3)

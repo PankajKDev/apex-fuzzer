@@ -29,9 +29,10 @@ from .authz import authz_matrix_probe
 from .business import business_logic_probe
 from .cache import cache_probe
 from .differential import differential_probe
-from .identity import mfa_transition_probe, oauth_probe
+from .identity import (jwt_confusion_probe, mfa_transition_probe,
+                        oauth_probe)
 from .introspection import graphql_introspection_probe
-from .misconfig import misconfig_probe
+from .misconfig import header_probe, misconfig_probe
 from .oast import maybe_register_oast, oast_sweep
 from .plugins import apply_plugin_results, finding_endpoint
 from .prescreen import prescreen_sweep
@@ -85,6 +86,9 @@ def run_validation(findings: List[Finding],
     # Passive misconfiguration sweep (framing + form tokens).
     if (profile.run_validation or cfg.validation.enabled):
         out += misconfig_probe(
+            endpoints, evidence, metrics, budgets, coverage, client,
+            cfg, scope, controls)
+        out += header_probe(
             endpoints, evidence, metrics, budgets, coverage, client,
             cfg, scope, controls)
 
@@ -171,6 +175,9 @@ def run_validation(findings: List[Finding],
         out += differential_probe(endpoints, diff, evidence,
                                   metrics, budgets, coverage,
                                   cfg, scope, controls)
+        out += jwt_confusion_probe(endpoints, evidence, metrics,
+                                   budgets, coverage, client, cfg,
+                                   scope, controls, identities)
 
     # 1b) MFA session transitions (pre- vs post-MFA test sessions)
     if (profile.differential or cfg.validation.differential

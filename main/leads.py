@@ -25,11 +25,16 @@ URL_PARAM_NAMES = {
 
 # Path segments worth a human look even with zero parameters:
 # /panel, /inv, /api ... — robots/sitemap paths on login-walled apps
-# are often the whole inventory.
+# are often the whole inventory. Auth-flow segments (reset, OTP,
+# OAuth) get manual-review leads: those flows need test accounts
+# and app-specific knowledge no probe can assume.
 INTERESTING_PATH_HINTS = {
     "panel", "admin", "login", "invite", "inv", "api", "internal",
     "debug", "console", "dashboard", "account", "auth", "manage",
     "private", "register", "settings", "config",
+    "forgot", "forgot-password", "reset", "password-reset", "recover",
+    "recovery", "otp", "verify", "2fa", "mfa", "oauth", "authorize",
+    "sso", "callback",
 }
 
 # Parameter names that commonly control redirects.

@@ -272,10 +272,16 @@ Validation runs only in validation-enabled scans, in this order:
    state-change gate, so they need `--ack-state-change`.
 2. **Misconfiguration sweep** — read-only GETs over page endpoints:
    missing framing protection (clickjacking) and state-changing
-   forms without token fields (CSRF exposure). Informational
-   candidates only; protected pages record genuine negatives.
+   forms without token fields (CSRF exposure). Parameterized
+   endpoints also get Host-override (redirect impact only) and
+   CRLF marker checks; bare reflection never upgrades.
+   Informational candidates only; protected pages record genuine
+   negatives.
 3. **Differential testing** — same endpoint under each identity;
-   two matching 200s (or anonymous 200 on admin/API) become BOLA /
+   JWT confusion replays each identity's own Bearer token with
+   neutralized signatures (alg-none, empty signature); acceptance
+   like the baseline is a candidate, denial is a genuine negative.
+   Two matching 200s (or anonymous 200 on admin/API) become BOLA /
    broken-access candidates. Shape matches require agreeing
    content types; an anonymous HTML 200 against API content is
    login-wall shadowing, not access. Same-status error-signature

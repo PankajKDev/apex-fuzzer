@@ -12,7 +12,7 @@ from main.safety.preflight import (
     resolve_modules, RequestPlan, plan_differential, plan_authz_matrix,
     plan_race, plan_business, plan_second_order, plan_oast,
     plan_second_order_ssrf, plan_graphql_introspection,
-    plan_misconfig,
+    plan_misconfig, plan_jwt, plan_header,
     render_plan_text, check_fit, StopFlag, Pacer,
     get_interrupt_flag, install_signal_handlers)
 from main.config import Config
@@ -185,6 +185,8 @@ def test_planner_math():
     g = plan_graphql_introspection(4)
     assert (g.mutation_requests, g.total) == (4, 4)
     assert plan_misconfig(6).total == 6
+    assert plan_jwt(2, 2).total == 12
+    assert plan_header(4, 3).total == 20
 
 
 # ── dry-run: zero network ─────────────────────────────────────────────

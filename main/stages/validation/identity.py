@@ -9,7 +9,7 @@ from ...models import (Confidence, Endpoint, Finding, ValidationStatus,
 from ...reporting.coverage import CoverageTracker
 from ...validation.evidence import EvidenceStore
 from ...reporting.metrics import Metrics
-from ...safety.preflight import plan_differential
+from ...safety.preflight import plan_differential, plan_jwt
 from ...validation.differential import PRIVILEGED_TYPES, has_idor_params
 from . import ProbeControls, reserve_or_block
 
@@ -301,4 +301,100 @@ def oauth_probe(endpoints: List[Endpoint], out_dir, evidence: EvidenceStore,
         evidence.record(
             f, request_text=f"GET {f.endpoint_url}",
             response_text=(f.description or "")[:2000])
+    return findings
+
+
+def jwt_confusion_probe(endpoints: List[Endpoint],
+                        evidence: EvidenceStore, metrics: Metrics,
+                        budgets: BudgetTracker,
+                        coverage: CoverageTracker, client, cfg, scope,
+                        controls: ProbeControls,
+                        identities) -> List[Finding]:
+    """Replay caller-owned Bearer tokens with neutralized signatures."""
+    from ...validation.jwt_replay import (
+        bearer_token, jwt_confusion_probe as _replay)
+    targets = [e for e in endpoints or []
+               if (getattr(e, "method", "GET") or "GET").upper() == "GET"
+               and getattr(e, "endpoint_type", "") == "api"
+               and scope.active_test_allowed(e.url)][:10]
+    if not targets:
+        log.info("jwt: no in-scope API endpoints — nothing to compare")
+        return []
+    authed = [i for i in identities or []
+              if bearer_token(
+                  dict(getattr(i, "auth_headers", None) or {}))]
+    if not authed:
+        log.info("jwt: no identity carries a Bearer JWT — skipping")
+        return []
+    if not reserve_or_block(
+            budgets, coverage, "jwt",
+            plan_jwt(len(targets), len(authed))):
+        return []
+    findings: List[Finding] = []
+    for ep in targets:
+        if controls.halted():
+            log.info("jwt: halted by stop control")
+            break
+        for ident in authed:
+            headers = dict(getattr(ident, "auth_headers", None) or {})
+            name = getattr(ident, "name", "tester")
+            if not budgets.consume_test("jwt", ep.normalized_url,
+                                        limit=3):
+                coverage.record("jwt", "blocked",
+                                f"budget: {ep.normalized_url}")
+                break
+            try:
+                res = _replay(
+                    client, ep.url, headers, name,
+                    timeout=cfg.scan.http_timeout)
+            except BudgetExceeded:
+                coverage.record("jwt", "blocked",
+                                f"budget: {ep.normalized_url}")
+                break
+            if res is None or res.verdict == "untestable":
+                continue
+            metrics.authorization_tests += 1
+            if res.verdict == "accepted":
+                metrics.authorization_confirmed += 1
+                controls.noted()
+                coverage.record("jwt", "candidate", res.notes)
+                f = Finding(
+                    id=stable_finding_id("jwt", ep.normalized_url,
+                                         name),
+                    source="jwt-confusion",
+                    name=(f"JWT signature not enforced ({ep.path})"),
+                    severity="high",
+                    confidence=Confidence.PROBABLE.value,
+                    validation_status=ValidationStatus.
+                    STRONG_CANDIDATE.value,
+                    host=ep.host, matched_at=ep.url,
+                    endpoint_url=ep.url, method="GET",
+                    description=res.notes + " Confirm with a second "
+                                    "account and check whether key "
+                                    "confusion (e.g. RSA-as-HMAC) "
+                                    "applies before reporting.",
+                    tags=["jwt", "auth", "authz", ep.endpoint_type],
+                    raw={"jwt": res.to_dict()},
+                    false_positive_notes=(
+                        "The tampered token was served like the "
+                        "baseline. Rule out shared caches, static "
+                        "responses, and middleware that ignores the "
+                        "token entirely (200 on garbage input means "
+                        "no check ran at all)."),
+                    identity=name,
+                )
+                evidence.allocate(f)
+                evidence.record(
+                    f,
+                    request_text=(f"GET {ep.url}\n(as {name}; "
+                                  f"signature-neutralized Bearer)"),
+                    response_text=res.notes)
+                findings.append(f)
+                log.info("jwt: %s", res.notes)
+            elif res.verdict == "denied":
+                coverage.record("jwt", "tested_negative",
+                                f"{ep.normalized_url}: {res.notes}")
+            else:
+                coverage.record("jwt", "inconclusive",
+                                f"{ep.normalized_url}: {res.notes}")
     return findings

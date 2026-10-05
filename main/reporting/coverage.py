@@ -34,7 +34,7 @@ KNOWN_CLASSES = [
     "business_logic", "race", "idor", "authz", "mfa", "ssti", "xxe", "cmdi",
     "second_order_ssrf",
     "path_traversal", "open_redirect", "info_disclosure", "takeover",
-    "tenant_isolation", "clickjacking",
+    "tenant_isolation", "clickjacking", "header_injection",
 ]
 
 _PRECEDENCE = [CONFIRMED, CANDIDATE, INCONCLUSIVE, BLOCKED,

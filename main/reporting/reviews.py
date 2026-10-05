@@ -35,7 +35,7 @@ _AUTHZ_FAMILY = frozenset({"idor", "bola", "authz", "authz_matrix"})
 
 def canonical_test_class(name) -> str:
     """One vocabulary for triple matching (authz family merged)."""
-    norm = _norm(name)
+    norm = _norm(name).replace("-", "_")
     if norm in _AUTHZ_FAMILY:
         return "authz"
     return norm
@@ -158,20 +158,24 @@ def finding_test_class(finding) -> str:
     for alias, mapped in (("differential", "authz"),
                           ("second-order", "xss"),
                           ("second_order", "xss"),
+                          ("misconfig-host-header", "header_injection"),
                           ("oast", "ssrf")):
         if alias in source:
             return mapped
     for candidate in ("sqli", "xss", "cmdi", "ssrf", "ssti", "xxe",
                       "idor", "bola", "authz", "cors", "redirect",
-                      "traversal", "cache"):
-        if candidate in source:
+                      "traversal", "cache", "jwt", "header_injection",
+                      "clickjacking"):
+        if candidate in source or candidate.replace("_", "-") in source:
             return candidate
     tags = [str(t).lower() for t in
             (getattr(finding, "tags", None) or [])]
     for candidate in ("sqli", "xss", "cmdi", "ssrf", "ssti", "xxe",
                       "idor", "bola", "authz", "cors", "redirect",
-                      "traversal", "cache"):
-        if candidate in tags:
+                      "traversal", "cache", "jwt", "header_injection",
+                      "clickjacking"):
+        dashed = candidate.replace("_", "-")
+        if any(candidate in tag or dashed in tag for tag in tags):
             return candidate
     return ""
 

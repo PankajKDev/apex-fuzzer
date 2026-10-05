@@ -127,3 +127,99 @@ def _finding(ep, source: str, name: str, severity: str, notes: str,
                     response_text=notes[:2000])
     log.info("misconfig: %s on %s", source, ep.url)
     return f
+
+
+_MAX_HEADER_ENDPOINTS = 10
+_MAX_HEADER_PARAMS = 3
+
+
+def header_probe(endpoints: List[Endpoint],
+                 evidence: EvidenceStore, metrics: Metrics,
+                 budgets: BudgetTracker,
+                 coverage: CoverageTracker, client, cfg, scope,
+                 controls: ProbeControls) -> List[Finding]:
+    """Host-override and CRLF checks over query-bearing endpoints."""
+    from ...validation.header_probe import (
+        check_crlf, check_host_override, query_param_names)
+    from ...safety.preflight import plan_header
+    targets = [e for e in endpoints or []
+               if (getattr(e, "method", "GET") or "GET").upper() == "GET"
+               and query_param_names(getattr(e, "url", "") or "")
+               and scope.active_test_allowed(e.url)][: _MAX_HEADER_ENDPOINTS]
+    if not targets:
+        log.info("header-probe: no in-scope parameterized GET "
+                 "endpoints — nothing to check")
+        return []
+    if not reserve_or_block(
+            budgets, coverage, "host_header",
+            plan_header(len(targets), _MAX_HEADER_PARAMS)):
+        return []
+    findings: List[Finding] = []
+    for ep in targets:
+        if controls.halted():
+            log.info("header-probe: halted by stop control")
+            break
+        params = query_param_names(ep.url)[:_MAX_HEADER_PARAMS]
+        if not budgets.consume_test("host_header", ep.normalized_url,
+                                    limit=2 + _MAX_HEADER_PARAMS):
+            coverage.record("host_header", "blocked",
+                            f"budget: {ep.normalized_url}")
+            continue
+        try:
+            host_res = check_host_override(
+                client, ep.url, timeout=cfg.scan.http_timeout)
+        except BudgetExceeded:
+            coverage.record("host_header", "blocked",
+                            f"budget: {ep.normalized_url}")
+            continue
+        if host_res.verdict == "candidate":
+            controls.noted()
+            coverage.record("host_header", "candidate",
+                            f"{ep.normalized_url}: {host_res.notes}")
+            findings.append(_finding(
+                ep, "host-header",
+                "Host-dependent redirect", "medium",
+                host_res.notes,
+                f"{host_res.notes}. A redirect target derived from a "
+                f"client-controlled Host header enables phishing and "
+                f"password-reset poisoning chains. Confirm the redirect "
+                f"is reachable cross-context before reporting.",
+                evidence, {"check": "host-override",
+                           "evidence": host_res.evidence}))
+        elif host_res.verdict == "negative":
+            coverage.record("host_header", "tested_negative",
+                            f"{ep.normalized_url}: {host_res.notes}")
+        else:
+            coverage.record("host_header", "inconclusive",
+                            f"{ep.normalized_url}: {host_res.notes}")
+        for param in params:
+            try:
+                crlf = check_crlf(client, ep.url, param,
+                                  timeout=cfg.scan.http_timeout)
+            except BudgetExceeded:
+                coverage.record("header_injection", "blocked",
+                                f"budget: {ep.normalized_url}")
+                break
+            if crlf.verdict == "candidate":
+                controls.noted()
+                coverage.record("header_injection", "candidate",
+                                f"{ep.normalized_url}::{param}: "
+                                f"{crlf.notes}")
+                findings.append(_finding(
+                    ep, "crlf",
+                    "CRLF response splitting", "medium",
+                    crlf.notes,
+                    f"{crlf.notes}. A split header enables cache "
+                    f"poisoning and reflected XSS chains. Confirm the "
+                    f"header survives to the client (no proxy "
+                    f"sanitization) before reporting.",
+                    evidence, {"check": "crlf",
+                               "evidence": crlf.evidence}))
+            elif crlf.verdict == "negative":
+                coverage.record("header_injection", "tested_negative",
+                                f"{ep.normalized_url}::{param}")
+            else:
+                coverage.record("header_injection", "inconclusive",
+                                f"{ep.normalized_url}::{param}: "
+                                f"{crlf.notes}")
+    return findings
