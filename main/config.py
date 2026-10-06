@@ -400,6 +400,10 @@ class Config:
     # pool with observed request shapes; scope-filtered, inventory only
     # (nothing is sent or replayed at import). Set via --har (repeatable).
     har_files: List[str] = field(default_factory=list)
+    # Identity to attribute HAR shapes to (default "har"). Set this to
+    # the auth context name active during the capture (via
+    # --har-identity) so identity-bound proofs can use the shapes.
+    har_identity: str = ""
     # dotted `section.key` paths from the file that match no known field.
     # Unknown content stays ignored (backward compatibility), but the
     # paths are reported so typos do not fail silently.
@@ -427,6 +431,9 @@ class Config:
             if section == "har_files" and isinstance(values, list):
                 cfg.har_files = [str(p).strip() for p in values
                                  if str(p).strip()]
+                continue
+            if section == "har_identity" and isinstance(values, str):
+                cfg.har_identity = values.strip()
                 continue
             if not hasattr(cfg, section) or not isinstance(values, dict):
                 if isinstance(values, dict):
@@ -729,6 +736,19 @@ class Config:
             elif not Path(path).exists():
                 warn(f"har_files entry {path!r} not found: it will be "
                      f"skipped at import")
+        if self.har_identity:
+            ident = self.har_identity
+            if not isinstance(ident, str) or not ident.strip() or \
+                    len(ident) > 64 or "\n" in ident or "\r" in ident:
+                err("har_identity must be a single-line string of at "
+                    "most 64 characters")
+            else:
+                known = {getattr(c, "name", "") for c in
+                         getattr(getattr(self, "auth", None),
+                                 "contexts", None) or []}
+                if ident not in known:
+                    warn(f"har_identity {ident!r} matches no auth "
+                         f"context: HAR shapes stay unattributed")
         for unknown in self.unknown_keys:
             warn(f"unknown configuration key {unknown!r} is ignored "
                  f"(possible typo)")
@@ -803,4 +823,6 @@ def apply_cli_overrides(cfg: Config, args) -> Config:
     if getattr(args, "har", None):
         cfg.har_files = list(cfg.har_files or []) + [
             str(p) for p in args.har if str(p).strip()]
+    if getattr(args, "har_identity", None):
+        cfg.har_identity = str(args.har_identity)
     return cfg

@@ -25,7 +25,7 @@ from ...reporting.metrics import Metrics
 from ...safety.preflight import plan_authz_matrix
 from ...validation.differential import PRIVILEGED_TYPES, has_idor_params
 from . import ProbeControls, reserve_or_block
-from .authz_graphql import authz_graphql_probe
+from .authz_graphql import authz_graphql_probe, graphql_schema_probe
 
 log = get_logger("stages-validation")
 
@@ -138,13 +138,18 @@ def authz_matrix_probe(endpoints: List[Endpoint],
     bfla_proofs = (len(targets) * _BFLA_PROOFS_PER_ENDPOINT
                    if write_gated else 0)
     mass_assignments = len(targets) if write_gated else 0
+    gql_targets = [e for e in targets
+                   if getattr(e, "endpoint_type", "") == "graphql"]
+    schema_requests = len(gql_targets) * (
+        1 + 5 * 2 * max(0, len(identities) - 1))
     if not reserve_or_block(
             budgets, coverage, "authz",
             plan_authz_matrix(len(targets), len(identities),
                               len(cfg_a.methods),
                               cfg_a.max_ids_per_endpoint,
                               write_replays, graphql_replays,
-                              bfla_proofs, mass_assignments)):
+                              bfla_proofs, mass_assignments,
+                              schema_requests)):
         return [], AuthorizationMatrix(), []
     matrix = AuthorizationMatrix()
     findings: List[Finding] = []
@@ -446,6 +451,14 @@ def authz_matrix_probe(endpoints: List[Endpoint],
             metrics, coverage, client, matrix, cfg, scope, controls))
     except BudgetExceeded:
         coverage.record("authz", "blocked", "graphql replay budget")
+    # ── schema-driven field replay (read side; mutations are never
+    # generated) over advertised Query fields with identifier args ──
+    try:
+        findings.extend(graphql_schema_probe(
+            endpoints, pool, identities, owner_headers, evidence,
+            metrics, coverage, client, matrix, cfg, scope, controls))
+    except BudgetExceeded:
+        coverage.record("authz", "blocked", "graphql schema budget")
     # ── Phase 7 views: extended matrix + role/tenant/resource/
     # action analytics over everything the sweeps observed ──────
     from ...authz.matrix import build_extended

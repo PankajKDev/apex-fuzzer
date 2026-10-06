@@ -122,13 +122,7 @@ def replay_operations(http, endpoint: Any, victims: List[Any], tester: Any,
                       ownership_fields: Optional[List[str]] = None
                       ) -> List[GraphqlReplayResult]:
     """Replay query operations with victim variables; grade the response."""
-    from ..validation.differential import normalize_response
     from ..validation.graphql import set_variable, variable_leaf
-    from ..authz.compare import compare_access, is_generic_response
-    from ..authorization.harvest import (extract_ids_from_body,
-                                         extract_named_fields)
-    from ..authorization.matrix import AuthorizationObservation
-    from ..shell import redact
     out: List[GraphqlReplayResult] = []
     tester_name = getattr(tester, "name", "anonymous")
     tester_tenant = getattr(tester, "tenant", "") or ""
@@ -216,123 +210,160 @@ def replay_operations(http, endpoint: Any, victims: List[Any], tester: Any,
                 continue
             if base.status_code != 200:
                 continue
-            try:
-                baseline = normalize_response(base)
-            except Exception:
-                continue
-            shape_sig = baseline.get("key_shape", "")
-            body_hash = baseline.get("body_hash", "")
-            if not shape_sig and not body_hash:
-                continue
-            try:
-                markers = dict(extract_ids_from_body(base.text or ""))
-                markers.update(extract_named_fields(
-                    base.text or "", ownership_fields or []))
-            except Exception:
-                markers = {}
-            try:
-                owner_generic, _ = is_generic_response(base.text or "")
-            except Exception:
-                owner_generic = False
             # tester replay: identical operation, victim variable
-            try:
-                headers = _replay_headers(shape, tester_headers)
-                resp = http.request("POST", url, headers=headers,
-                                    data=owner_body, timeout=timeout)
-            except BudgetExceeded:
-                raise
-            except Exception as exc:
-                log.debug("graphql replay %s as %s failed: %s",
-                          url, tester_name, exc)
+            resp = _fetch_replay(
+                http, url, _replay_headers(shape, tester_headers),
+                owner_body, timeout, tester_name)
+            if resp is None:
                 continue
-            try:
-                norm = normalize_response(resp)
-            except Exception:
+            res = _grade_replay(
+                base, resp, url=url, operation=operation,
+                full_path=full_path, value=value, owner=owner,
+                tester_name=tester_name, tester_tenant=tester_tenant,
+                owner_tenant=owner_tenant,
+                ownership_fields=ownership_fields, matrix=matrix,
+                endpoint=endpoint, exclude=variable_leaf(full_path))
+            if res is None:
                 continue
-            match = norm.get("status") == 200 and (
-                (norm.get("body_hash") and
-                 norm["body_hash"] == body_hash) or
-                (norm.get("key_shape") and norm["key_shape"] == shape_sig))
-            comparison = {"level": "medium", "matched": [],
-                          "detail": "shape match stands alone"}
-            tester_snippet = ""
-            from ..validation.differential import looks_like_edge_deny
-            try:
-                tester_edge = looks_like_edge_deny(
-                    norm.get("status", 0), resp.text or "",
-                    getattr(resp, "headers", None))
-            except Exception:
-                tester_edge = False
-            if match:
-                if tester_edge:
-                    match = False
-                    comparison = {"level": "none", "matched": [],
-                                  "detail": "tester hit edge/bot-wall "
-                                            "infrastructure, not the app"}
-                else:
-                    comparison = compare_access(
-                        markers, resp.text or "", ownership_fields,
-                        exclude=variable_leaf(full_path),
-                        owner_generic=owner_generic)
-                    try:
-                        tester_snippet = redact((resp.text or "")[:500])
-                    except Exception:
-                        tester_snippet = ""
-                    if comparison["level"] == "none":
-                        match = False
-            res = GraphqlReplayResult(
-                endpoint_url=url, operation=operation,
-                variable=full_path, victim_value=value, owner=owner,
-                tester=tester_name, owner_tenant=owner_tenant,
-                tester_tenant=tester_tenant,
-                status=norm.get("status", 0), match=bool(match),
-                markers_matched=comparison.get("matched", []),
-                generic_response=comparison["level"] == "none" and
-                "generic" in comparison.get("detail", ""),
-                edge_denied=bool(tester_edge))
-            try:
-                res.owner_snippet = redact((base.text or "")[:500])
-            except Exception:
-                res.owner_snippet = ""
-            res.tester_snippet = tester_snippet
-            if match:
-                if tester_tenant and owner_tenant and \
-                        tester_tenant != owner_tenant:
-                    res.verdict = "strong_candidate"
-                    res.notes = (f"cross-tenant GraphQL read: "
-                                 f"'{tester_name}' (tenant {tester_tenant}) "
-                                 f"reads '{value}' via {operation}."
-                                 f"{full_path} owned by '{owner}' "
-                                 f"(tenant {owner_tenant}). "
-                                 f"{comparison['detail']}")
-                else:
-                    res.verdict = "strong_candidate"
-                    res.notes = (f"GraphQL BOLA: '{tester_name}' reads "
-                                 f"'{owner}''s '{full_path}={value}' via "
-                                 f"operation '{operation}'. "
-                                 f"{comparison['detail']}")
-            elif comparison["level"] == "none" and \
-                    norm.get("status") == 200:
-                res.notes = ("shape matched but voided: "
-                             f"{comparison['detail']}")
-            else:
-                res.notes = (f"no cross-access ({tester_name}→"
-                             f"{norm.get('status')})")
-            if matrix is not None:
-                try:
-                    matrix.record(AuthorizationObservation(
-                        identity=tester_name, tenant=tester_tenant,
-                        endpoint=getattr(endpoint, "normalized_url", url),
-                        resource=value, method="POST",
-                        status=norm.get("status", 0),
-                        shape=norm.get("key_shape", ""),
-                        body_hash=norm.get("body_hash", ""),
-                        length_bucket=norm.get("length_bucket", 0),
-                        evidence=res.notes))
-                except Exception as exc:
-                    log.debug("graphql matrix record failed: %s", exc)
             out.append(res)
     return out
+
+
+def _fetch_replay(http, url: str, headers: Dict[str, str], data: str,
+                  timeout: int, who: str):
+    """POST one replay; None on transport failure (BudgetExceeded rises)."""
+    try:
+        return http.request("POST", url, headers=headers, data=data,
+                            timeout=timeout)
+    except BudgetExceeded:
+        raise
+    except Exception as exc:
+        log.debug("graphql replay %s as %s failed: %s", url, who, exc)
+        return None
+
+
+def _grade_replay(base, resp, url: str, operation: str, full_path: str,
+                  value: str, owner: str, tester_name: str,
+                  tester_tenant: str, owner_tenant: str,
+                  ownership_fields: Optional[List[str]],
+                  matrix, endpoint, exclude: str
+                  ) -> Optional[GraphqlReplayResult]:
+    """Grade one owner-vs-tester pair with ownership comparison.
+
+    Returns None only when the baseline is ungradable (no shape or
+    hash); every completed comparison yields a result (match, void,
+    or no-access notes) so callers record genuine negatives.
+    """
+    from ..validation.differential import (looks_like_edge_deny,
+                                           normalize_response)
+    from ..authz.compare import compare_access, is_generic_response
+    from ..authorization.harvest import (extract_ids_from_body,
+                                         extract_named_fields)
+    from ..authorization.matrix import AuthorizationObservation
+    from ..shell import redact
+    try:
+        baseline = normalize_response(base)
+    except Exception:
+        return None
+    shape_sig = baseline.get("key_shape", "")
+    body_hash = baseline.get("body_hash", "")
+    if not shape_sig and not body_hash:
+        return None
+    try:
+        markers = dict(extract_ids_from_body(base.text or ""))
+        markers.update(extract_named_fields(
+            base.text or "", ownership_fields or []))
+    except Exception:
+        markers = {}
+    try:
+        owner_generic, _ = is_generic_response(base.text or "")
+    except Exception:
+        owner_generic = False
+    try:
+        norm = normalize_response(resp)
+    except Exception:
+        return None
+    match = norm.get("status") == 200 and (
+        (norm.get("body_hash") and
+         norm["body_hash"] == body_hash) or
+        (norm.get("key_shape") and norm["key_shape"] == shape_sig))
+    comparison = {"level": "medium", "matched": [],
+                  "detail": "shape match stands alone"}
+    tester_snippet = ""
+    try:
+        tester_edge = looks_like_edge_deny(
+            norm.get("status", 0), resp.text or "",
+            getattr(resp, "headers", None))
+    except Exception:
+        tester_edge = False
+    if match:
+        if tester_edge:
+            match = False
+            comparison = {"level": "none", "matched": [],
+                          "detail": "tester hit edge/bot-wall "
+                                    "infrastructure, not the app"}
+        else:
+            comparison = compare_access(
+                markers, resp.text or "", ownership_fields,
+                exclude=exclude, owner_generic=owner_generic)
+            try:
+                tester_snippet = redact((resp.text or "")[:500])
+            except Exception:
+                tester_snippet = ""
+            if comparison["level"] == "none":
+                match = False
+    res = GraphqlReplayResult(
+        endpoint_url=url, operation=operation,
+        variable=full_path, victim_value=value, owner=owner,
+        tester=tester_name, owner_tenant=owner_tenant,
+        tester_tenant=tester_tenant,
+        status=norm.get("status", 0), match=bool(match),
+        markers_matched=comparison.get("matched", []),
+        generic_response=comparison["level"] == "none" and
+        "generic" in comparison.get("detail", ""),
+        edge_denied=bool(tester_edge))
+    try:
+        res.owner_snippet = redact((base.text or "")[:500])
+    except Exception:
+        res.owner_snippet = ""
+    res.tester_snippet = tester_snippet
+    if match:
+        if tester_tenant and owner_tenant and \
+                tester_tenant != owner_tenant:
+            res.verdict = "strong_candidate"
+            res.notes = (f"cross-tenant GraphQL read: "
+                         f"'{tester_name}' (tenant {tester_tenant}) "
+                         f"reads '{value}' via {operation}."
+                         f"{full_path} owned by '{owner}' "
+                         f"(tenant {owner_tenant}). "
+                         f"{comparison['detail']}")
+        else:
+            res.verdict = "strong_candidate"
+            res.notes = (f"GraphQL BOLA: '{tester_name}' reads "
+                         f"'{owner}''s '{full_path}={value}' via "
+                         f"operation '{operation}'. "
+                         f"{comparison['detail']}")
+    elif comparison["level"] == "none" and \
+            norm.get("status") == 200:
+        res.notes = ("shape matched but voided: "
+                     f"{comparison['detail']}")
+    else:
+        res.notes = (f"no cross-access ({tester_name}→"
+                     f"{norm.get('status')})")
+    if matrix is not None:
+        try:
+            matrix.record(AuthorizationObservation(
+                identity=tester_name, tenant=tester_tenant,
+                endpoint=getattr(endpoint, "normalized_url", url),
+                resource=value, method="POST",
+                status=norm.get("status", 0),
+                shape=norm.get("key_shape", ""),
+                body_hash=norm.get("body_hash", ""),
+                length_bucket=norm.get("length_bucket", 0),
+                evidence=res.notes))
+        except Exception as exc:
+            log.debug("graphql matrix record failed: %s", exc)
+    return res
 
 
 def _shape_text(shape: Dict[str, Any]) -> str:
@@ -370,3 +401,93 @@ def _replay_headers(shape: Dict[str, Any],
     if not any(key.lower() == "content-type" for key in headers):
         headers["Content-Type"] = "application/json"
     return headers
+
+
+def replay_schema_fields(http, endpoint: Any, schema_fields: list,
+                         victims: List[Any], tester: Any,
+                         owner_headers: Dict[str, Dict[str, str]],
+                         timeout: int = 10, max_ids: int = 3,
+                         scope=None, matrix=None,
+                         ownership_fields: Optional[List[str]] = None
+                         ) -> List[GraphqlReplayResult]:
+    """Replay schema-generated field documents with victim IDs.
+
+    Same verdict contract as operation replay (graded matches become
+    strong_candidate, completed denials are genuine negatives), but
+    the documents come from the advertised schema instead of observed
+    traffic: one identifier argument moves per document, nothing else.
+    Mutations are never generated upstream, so none can replay here.
+    """
+    import json as _json
+    from ..validation.graphql_schema import build_field_query
+    out: List[GraphqlReplayResult] = []
+    tester_name = getattr(tester, "name", "anonymous")
+    tester_tenant = getattr(tester, "tenant", "") or ""
+    tester_headers = dict(getattr(tester, "auth_headers", None) or {})
+    url = str(getattr(endpoint, "url", "") or "")
+    if not url:
+        return out
+    if scope is not None:
+        try:
+            if not scope.active_test_allowed(url):
+                return out
+        except Exception:
+            return out
+    tried = 0
+    seen = set()
+    for victim in victims or []:
+        if tried >= max_ids:
+            break
+        owner = getattr(victim, "owner", "")
+        if not owner or owner == tester_name:
+            continue
+        leaf = str(getattr(victim, "param", "") or "").split(".")[-1]
+        value = getattr(victim, "value", "")
+        if not leaf or not value:
+            continue
+        owner_tenant = getattr(victim, "owner_tenant", "") or ""
+        for schema_field in schema_fields or []:
+            if tried >= max_ids:
+                break
+            arg = str(getattr(schema_field, "arg", "") or "")
+            if not arg or arg.lower() != leaf.lower():
+                continue
+            field_name = str(getattr(schema_field, "field", "") or "")
+            key = (field_name, arg, value, owner)
+            if key in seen:
+                continue
+            seen.add(key)
+            document, label = build_field_query(schema_field, value)
+            body = _json.dumps({"query": document})
+            tried += 1
+            # owner baseline on the SAME generated document first
+            try:
+                base = http.request(
+                    "POST", url,
+                    headers=_replay_headers(
+                        {}, (owner_headers or {}).get(owner)),
+                    data=body, timeout=timeout)
+            except BudgetExceeded:
+                raise
+            except Exception as exc:
+                log.debug("graphql schema baseline %s as %s failed: %s",
+                          url, owner, exc)
+                continue
+            if base.status_code != 200:
+                continue
+            resp = _fetch_replay(
+                http, url, _replay_headers({}, tester_headers),
+                body, timeout, tester_name)
+            if resp is None:
+                continue
+            res = _grade_replay(
+                base, resp, url=url, operation=f"schema:{field_name}",
+                full_path=f"{field_name}({arg})", value=value,
+                owner=owner, tester_name=tester_name,
+                tester_tenant=tester_tenant, owner_tenant=owner_tenant,
+                ownership_fields=ownership_fields, matrix=matrix,
+                endpoint=endpoint, exclude=arg)
+            if res is None:
+                continue
+            out.append(res)
+    return out

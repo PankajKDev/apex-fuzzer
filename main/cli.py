@@ -43,6 +43,9 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--har", default=None, action="append",
                    help="HAR 1.2 capture to import into the endpoint "
                         "pool (repeatable; inventory only, no replay)")
+    p.add_argument("--har-identity", default=None,
+                   help="Auth context name active during the --har "
+                        "capture (default: unattributed 'har')")
     p.add_argument("-c", "--config", help="Path to config.yaml")
     p.add_argument("--fast", action="store_true")
     p.add_argument("--deep", action="store_true")
@@ -104,6 +107,15 @@ def build_parser() -> argparse.ArgumentParser:
                    help="CI mode: exit 1 when any finding meets the "
                         "severity (bounty mode stays exit 0 with a "
                         "report; refusals always exit 2)")
+    p.add_argument("--regression", default=None,
+                   help="Baseline directory holding a prior run "
+                        "(same per-host layout): compare findings by "
+                        "stable ID, write regression.json, exit 1 on "
+                        "new findings at the --fail-on threshold "
+                        "(medium when unset)")
+    p.add_argument("--ci", action="store_true",
+                   help="CI guardrail: requires --fail-on (exit 2 "
+                        "without it) so pipelines always gate")
     p.add_argument("--resume", action="store_true")
     p.add_argument("--output", default="output")
     p.add_argument("--profile", default="standard",
@@ -434,6 +446,15 @@ _SEVERITY_RANK = {"info": 0, "low": 1, "medium": 2, "high": 3,
                   "critical": 4}
 
 
+def ci_gate_error(args) -> str:
+    """Usage error when --ci runs without its --fail-on gate."""
+    if getattr(args, "ci", False) and not getattr(args, "fail_on",
+                                                  None):
+        return "--ci requires --fail-on so the pipeline gates " \
+               "on findings"
+    return ""
+
+
 def fail_on_triggered(output_base, targets,
                       threshold: str) -> list[str]:
     """Findings at/above threshold after a run (CI gating).
@@ -550,6 +571,16 @@ def main():
                   "--ack-state-change, approved domains/modules and a "
                   "valid window, or drop --strict", EXIT_REFUSED)
         sys.exit(EXIT_REFUSED)
+    if (error := ci_gate_error(args)):
+        log.error("%s", error)
+        sys.exit(2)
+    if getattr(args, "regression", None):
+        from .reporting.regression import run_regression_gate
+        code = run_regression_gate(args.regression, args.output,
+                                   targets,
+                                   args.fail_on or "medium")
+        if code:
+            sys.exit(code)
     if getattr(args, "fail_on", None):
         hits = fail_on_triggered(args.output, targets, args.fail_on)
         if hits:

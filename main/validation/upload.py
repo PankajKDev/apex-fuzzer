@@ -38,6 +38,8 @@ class UploadResult:
     status: int = 0
     served_url: str = ""
     served_content_type: str = ""
+    served_disposition: str = ""
+    served_nosniff: bool = False
     evidence: Dict[str, Any] = field(default_factory=dict)
 
     def to_dict(self) -> Dict[str, Any]:
@@ -46,6 +48,8 @@ class UploadResult:
                 "verdict": self.verdict, "notes": self.notes,
                 "status": self.status, "served_url": self.served_url,
                 "served_content_type": self.served_content_type,
+                "served_disposition": self.served_disposition,
+                "served_nosniff": self.served_nosniff,
                 "evidence": dict(self.evidence)}
 
 
@@ -140,8 +144,12 @@ def _readback_urls(response, base_url: str) -> List[str]:
 
 
 def probe_upload(client, endpoint_url: str, field_name: str,
-                 timeout: int = 10) -> List[UploadResult]:
-    """Submit probing filenames, verify each via readback."""
+                 timeout: int = 10, scope=None) -> List[UploadResult]:
+    """Submit probing filenames, verify each via readback.
+
+    Served-URL fetches are scope-checked: a server-returned location
+    outside scope is never fetched (fail closed).
+    """
     results = []
     for spec in upload_variants():
         result = UploadResult(
@@ -177,6 +185,9 @@ def probe_upload(client, endpoint_url: str, field_name: str,
         # accepted: verify what the server actually stored/served
         served = ""
         served_ct = ""
+        served_disp = ""
+        served_nosniff = False
+        skipped_scope = 0
         text = getattr(r, "text", "") or ""
         if ".." in spec["filename"] and (".." in text or
                                          "%2e%2e" in text.lower()):
@@ -193,6 +204,19 @@ def probe_upload(client, endpoint_url: str, field_name: str,
                 continue
             if parts.scheme not in ("http", "https"):
                 continue
+            if scope is not None:
+                try:
+                    # Domain/port/path enforcement only: this is a
+                    # targeted verification fetch of our own artifact,
+                    # not discovery, so crawl extension exclusions do
+                    # not apply (a .jpg served as text/html is the
+                    # finding).
+                    allowed = bool(scope.is_in_scope(candidate_url))
+                except Exception:
+                    allowed = False
+                if not allowed:
+                    skipped_scope += 1
+                    continue
             try:
                 fetched = client.get(candidate_url, timeout=timeout)
             except BudgetExceeded:
@@ -204,21 +228,41 @@ def probe_upload(client, endpoint_url: str, field_name: str,
             served = candidate_url
             for name, value in (
                     getattr(fetched, "headers", None) or {}).items():
-                if str(name).lower() == "content-type":
+                lowered = str(name).lower()
+                if lowered == "content-type":
                     served_ct = str(value or "")
-                    break
+                elif lowered == "content-disposition":
+                    served_disp = str(value or "").split(";")[0]. \
+                        strip().lower()
+                elif lowered == "x-content-type-options" and \
+                        str(value or "").strip().lower() == "nosniff":
+                    served_nosniff = True
             break
         result.served_url = served
         result.served_content_type = served_ct
+        result.served_disposition = served_disp
+        result.served_nosniff = served_nosniff
+        result.evidence = {"disposition": served_disp or "absent",
+                           "nosniff": served_nosniff}
         if not served:
             result.notes = "accepted but no readable artifact " \
                            "found (no readback, no verification)"
+            if skipped_scope:
+                result.notes += f" ({skipped_scope} readback URL(s) " \
+                                f"out of scope, skipped)"
             results.append(result)
             continue
         if _is_active_content_type(served_ct):
-            result.verdict = "candidate"
-            result.notes = f"stored file served as active content " \
-                           f"({served_ct}): stored-XSS vector"
+            if served_disp == "attachment":
+                result.verdict = "safe"
+                result.notes = f"stored file served as active content " \
+                               f"({served_ct}) but with " \
+                               f"Content-Disposition: attachment " \
+                               f"(not directly renderable)"
+            else:
+                result.verdict = "candidate"
+                result.notes = f"stored file served as active content " \
+                               f"({served_ct}): stored-XSS vector"
         elif ".." in served or "%2e" in served.lower():
             result.verdict = "candidate"
             result.notes = "stored path preserves traversal " \

@@ -78,12 +78,14 @@ def har_import(cfg, scope) -> List[Dict]:
     request is sent. Missing/unreadable files log a skip.
     """
     out: List[Dict] = []
+    identity = str(getattr(cfg, "har_identity", "") or "").strip() \
+        or "har"
     for path in (getattr(cfg, "har_files", None) or []):
         data = har_mod.load_har_file(path)
         if data is None:
             log.info("har: skipping unreadable file %s", path)
             continue
-        found = har_mod.parse_har(data, scope)
+        found = har_mod.parse_har(data, scope, identity=identity)
         log.info("har: %s → %d endpoints", path, len(found))
         out.extend(found)
     return out

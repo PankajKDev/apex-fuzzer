@@ -33,15 +33,18 @@ from .identity import (jwt_confusion_probe, mfa_transition_probe,
                         oauth_probe, otp_bypass_probe, reset_probe)
 from .introspection import graphql_introspection_probe
 from .misconfig import (csrf_browser_probe, header_probe, hpp_probe,
-                         info_disclosure_probe, misconfig_probe)
+                         html_injection_probe, info_disclosure_probe,
+                         misconfig_probe)
 from .postmessage import postmessage_probe
 from .oast import maybe_register_oast, oast_sweep
 from .plugins import apply_plugin_results, finding_endpoint
 from .prescreen import deser_probe, prescreen_sweep
 from .race import race_probe
-from .second_order import (blind_xss_probe, second_order_probe,
+from .second_order import (blind_xss_probe, second_order_generalized_probe,
+                             second_order_probe,
                              second_order_ssrf_probe)
 from .upload import upload_probe
+from .websocket import websocket_probe
 
 log = get_logger("stages-validation")
 
@@ -97,6 +100,9 @@ def run_validation(findings: List[Finding],
             endpoints, evidence, metrics, budgets, coverage, client,
             cfg, scope, controls)
         out += hpp_probe(
+            endpoints, evidence, metrics, budgets, coverage, client,
+            cfg, scope, controls)
+        out += html_injection_probe(
             endpoints, evidence, metrics, budgets, coverage, client,
             cfg, scope, controls)
         out += postmessage_probe(
@@ -184,6 +190,13 @@ def run_validation(findings: List[Finding],
                     "Chromium read a successful cross-origin response "
                     "with the configured cookie present")
         out += cors_findings
+
+    # WebSocket handshake layer (auth boundary + origin validation
+    # over recorded ws addresses; no frames are spoken).
+    if (profile.run_validation or cfg.validation.enabled):
+        out += websocket_probe(
+            out_dir, evidence, metrics, budgets, coverage, client,
+            cfg, scope, controls, identities)
 
     # CSRF cross-site execution proof over this run's tokenless-form
     # findings (opt-in Chromium + state-change ack; needs a victim
@@ -324,6 +337,9 @@ def run_validation(findings: List[Finding],
         if (profile.second_order or
                 cfg.validation.second_order):
             out += second_order_probe(
+                endpoints, evidence, metrics, budgets, coverage,
+                client, cfg, scope, controls, identities)
+            out += second_order_generalized_probe(
                 endpoints, evidence, metrics, budgets, coverage,
                 client, cfg, scope, controls, identities)
             out += blind_xss_probe(

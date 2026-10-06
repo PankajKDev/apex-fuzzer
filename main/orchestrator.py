@@ -28,8 +28,9 @@ from .chains.builder import build_attack_chains
 from .stages.recon import (harvest_api_specs, harvest_robots, merge_recon,
                            run_recon)
 from .stages.mapping import build_app_state, map_attack_surface
-from .stages.intel import (build_resource_intel, discover_invariants,
-                           discover_workflows, record_behavioral_state)
+from .stages.intel import (build_js_intel, build_resource_intel,
+                           discover_invariants, discover_workflows,
+                           record_behavioral_state)
 from .stages.reporting import render_report
 from .stages.validation import ProbeControls
 from .stages.validation.coordinator import run_validation
@@ -209,6 +210,10 @@ class Orchestrator:
         # the run record; JSONL stays the system of record). Stashed
         # on both fresh and resume paths so a resumed mapping never
         # diffs as all-gone.
+        # ── 4a. API DIFF (spec-declared vs observed, offline) ─────────
+        # Runs on the final mapped inventory so form/API params count.
+        from .stages.mapping import build_api_diff
+        build_api_diff(out_dir, endpoints)
         self._last_endpoints = list(endpoints or [])
 
         # ── 4b. APPLICATION MODEL + GRAPH (§4–5, built incrementally) ────
@@ -303,6 +308,12 @@ class Orchestrator:
         if inv_findings:
             findings += inv_findings
             write_jsonl(out_dir / "findings.jsonl", findings)
+
+        # ── 8e. JS INTEL (Phase 24, offline) ─────────────────────────
+        # Feature flags, admin routes, and flag SDKs from cached
+        # first-party bundles: js_intel.json for the leads stage plus
+        # flag nodes in the graph. Zero network, never fails.
+        build_js_intel(out_dir, app_graph, metrics)
 
         # ── 9. AI (+ loop closure into deterministic testing) ───────────
         hypotheses: List[Hypothesis] = []

@@ -329,3 +329,91 @@ def discover_invariants(out_dir: Path, endpoints,
         {"discovered": [r.to_dict() for r in discovered],
          "summary": engine.summary()}, indent=2))
     return new_findings
+
+
+_MAX_INTEL_BUNDLES = 20
+
+
+def build_js_intel(out_dir: Path, app_graph,
+                   metrics: Metrics) -> dict:
+    """Feature flags, admin routes, and flag SDKs from cached JS.
+
+    Pure file reads over out_dir/cache (files need their .meta sidecar
+    for source attribution). Persists js_intel.json for the leads
+    stage, and links flag nodes into the graph (host CONTAINS flag).
+    Never fails: every per-file and graph step is guarded.
+    """
+    from ..discovery.js_intel import analyze_bundle
+    bundles = []
+    cache = Path(out_dir) / "cache"
+    files = []
+    if cache.exists():
+        try:
+            files = sorted(
+                f for f in cache.glob("*")
+                if f.is_file() and f.suffix != ".meta"
+                and Path(str(f) + ".meta").exists())[:_MAX_INTEL_BUNDLES]
+        except OSError as exc:
+            log.debug("js intel cache list failed: %s", exc)
+    for path in files:
+        try:
+            import json as _json
+            meta = _json.loads(Path(str(path) + ".meta").read_text())
+            source = str(meta.get("url", "") or "")
+            js = path.read_text(errors="ignore")
+        except (OSError, ValueError) as exc:
+            log.debug("js intel unreadable cache %s: %s", path, exc)
+            continue
+        try:
+            row = analyze_bundle(js, source)
+        except Exception as exc:
+            log.debug("js intel analysis failed %s: %s", path, exc)
+            continue
+        row["bundle"] = path.name
+        bundles.append(row)
+    payload = {"bundles": bundles}
+    try:
+        import json as _json
+        (Path(out_dir) / "js_intel.json").write_text(
+            _json.dumps(payload, indent=2))
+    except OSError as exc:
+        log.debug("js intel persist failed: %s", exc)
+    n_flags = sum(len(b.get("flags", [])) for b in bundles)
+    n_routes = sum(len(b.get("admin_routes", [])) for b in bundles)
+    if app_graph is not None and bundles:
+        try:
+            from ..graph.application_graph import nid
+            from urllib.parse import urlsplit
+            for row in bundles:
+                try:
+                    host = (urlsplit(row.get("source", "") or "").
+                            hostname or "")
+                except ValueError:
+                    continue
+                if not host:
+                    continue
+                hid = nid("host", host)
+                try:
+                    app_graph.add_node(hid, "host", host)
+                except (ValueError, KeyError, TypeError):
+                    pass
+                for flag in row.get("flags", []) or []:
+                    name = str(flag.get("name", "") or "")
+                    if not name:
+                        continue
+                    try:
+                        app_graph.add_node(
+                            nid("feature_flag", name), "feature_flag",
+                            name, {"value": flag.get("value"),
+                                   "source_bundle": row.get("bundle",
+                                                            "")})
+                        app_graph.add_edge(hid,
+                                           nid("feature_flag", name),
+                                           "CONTAINS")
+                    except (ValueError, KeyError, TypeError):
+                        continue
+        except Exception as exc:
+            log.debug("js intel graph sync failed: %s", exc)
+    log.info("js intel: %d bundles, %d flags, %d admin routes",
+             len(bundles), n_flags, n_routes)
+    return payload

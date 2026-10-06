@@ -106,6 +106,48 @@ def test_non_upload_endpoints_skipped():
     assert found == []
 
 
+def test_attachment_downgrades_active_content():
+    from main.config import ScopeConfig
+    from main.scope import Scope
+    from main.validation import upload as upload_mod
+
+    class Http2(Http):
+        def get(self, url, **kw):
+            self.gets.append(url)
+            return _R(200, "apex probe",
+                      {"content-type": "text/html",
+                       "content-disposition":
+                       "attachment; filename=x",
+                       "x-content-type-options": "nosniff"})
+
+    http = Http2(submit=(200, '{"url": "/files/a.html"}'),
+                 fetched=(200, "apex probe", "text/html"))
+    out = upload_mod.probe_upload(
+        http, "https://example.com/upload", "file", scope=Scope(
+            ScopeConfig(allowed_domains=["example.com"])))
+    assert out
+    assert all(r.verdict == "safe" for r in out if r.served_url)
+    assert any("attachment" in r.notes for r in out if r.served_url)
+    assert all(r.served_nosniff for r in out if r.served_url)
+    assert all(r.evidence.get("disposition") == "attachment"
+               for r in out if r.served_url)
+
+
+def test_off_scope_readback_is_never_fetched():
+    from main.config import ScopeConfig
+    from main.scope import Scope
+    from main.validation import upload as upload_mod
+
+    http = Http(submit=(200, '{"url": "https://evil.test/files/x"}'),
+                fetched=(200, "apex probe", "text/html"))
+    out = upload_mod.probe_upload(
+        http, "https://example.com/upload", "file", scope=Scope(
+            ScopeConfig(allowed_domains=["example.com"])))
+    assert http.gets == []
+    assert all(r.served_url == "" for r in out)
+    assert any("out of scope" in r.notes for r in out)
+
+
 def test_inert_content_only(tmp_path):
     from main.budgets import BudgetTracker
     from main.config import Config

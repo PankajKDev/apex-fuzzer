@@ -216,6 +216,8 @@ in [sample artifacts](docs/sample-artifacts/).
                         merged into discovery for every target
 --har FILE              HAR 1.2 capture to import into the endpoint pool
                         (repeatable; inventory only, no replay)
+--har-identity NAME   auth context name active during the --har capture
+                        (default: unattributed 'har')
 -c, --config CONFIG     Path to config.yaml (defaults if missing)
 --fast                  rate_limit → 200
 --deep                  rate_limit → 20
@@ -237,6 +239,10 @@ in [sample artifacts](docs/sample-artifacts/).
                         minimum severity rendered in the report
 --fail-on {info,low,medium,high,critical}
                         CI mode: exit 1 when any finding meets the severity
+--regression DIR      compare findings against a prior run (same layout);
+                        write regression.json; exit 1 on new findings at
+                        the --fail-on threshold (medium when unset)
+--ci                  CI guardrail: requires --fail-on (exit 2 without it)
 --resume                skip checkpoint-complete stages
 --output OUTPUT         base output dir (default: output)
 --profile {passive,standard,deep,api,authenticated,validation,leads}
@@ -1001,6 +1007,7 @@ they are not vulnerability outcomes and cannot map to `negative`.
 | idor-swap (same + cross-endpoint) | victim object served to another identity, same shape | — (swap proves access; impact confirmed by human) |
 | bola-write (opt-in replay) | replay accepted with victim ID echoed (200) | clean readback shows attacker's values newly persisted on victim object |
 | graphql-bola | victim variable served to another identity on the same operation, same shape | — (replay proves access; impact confirmed by human) |
+| graphql-bola (schema field) | victim ID served through a schema-generated read document | — (same ownership grading; mutations never generated) |
 | authz-matrix BFLA | method treats roles/tenants identically (200s match) | opt-in replay of the lower-priv identity's observed POST/PUT/PATCH shape confirms on newly-persisted readback values |
 | reset-enum | same reset request with known vs unknown identifier | responses differ beyond input echo (candidate); identical completed responses are genuine negatives |
 | reset-poison | reset request with attacker Host header | reset link or redirect honours the evil host (candidate); bare reflection never upgrades |
@@ -1010,8 +1017,12 @@ they are not vulnerability outcomes and cannot map to `negative`.
 | hpp | baseline vs duplicated param vs repeat control | inconsistent handling beyond input echo (candidate); identical or echo-only handling is a genuine negative |
 | mass-assignment | own observed shape + `role`/`is_admin` (inert value) | probe value persists on own object (candidate, impact needs human); completed 4xx denial is a genuine negative |
 | deser-oracle | scalar control + array/object JSON type confusion | deserializer exception with clean control (candidate only; gadget reachability unproven) |
+| second-order-sqli/cmdi/ssti/traversal | stored inert payload + lifecycle nonce + render sweep | class signal tied to our nonce (candidate); completed sweep without one is a genuine negative |
 | postmessage-static | cached first-party JS patterns | unguarded message handler, wildcard targetOrigin, document.domain (static candidates; no code persisted) |
 | csrf-execution | null-origin auto-submit with victim session | server accepts 2xx with cookie (high finding); denial is a genuine negative |
+| upload-probe | inert submit + served execution-context readback | active content served inline (stored-XSS vector); attachment downgrades to safe; off-scope readback never fetched |
+| html-injection | inert structural tags over GET query fields | tag parsed as a real element (candidate); neutralized/absent tags are genuine negatives |
+| websocket-handshake/origin | Upgrade handshake via gated client, evil-Origin replay | anonymous accept on privileged path or evil-Origin accept on authed-only endpoint (high); enforced boundaries are genuine negatives |
 | business-logic | abuse value accepted (echoed, 200) **and** invariant violated | clean re-read shows the mutated value persisted (`verified-effect`) |
 | stored-XSS | inert canary persists and renders unescaped in active sink | — (confirm script execution manually) |
 | race | synchronized burst all-200 with divergent object IDs | sequential idempotency re-check accepts twice with different objects |
@@ -1222,12 +1233,15 @@ Per target, `output/<host>/`:
 | `coverage.json` | per-class test coverage (Phase 1) |
 | `authorization_matrix.json` | authz observations per identity×method |
 | `workflows.json` | discovered flows + mutation catalog (Phase 4) |
+| `js_intel.json` | feature flags, admin routes, flag SDKs per cached bundle (Phase 24) |
+| `api_diff.json` | spec-declared vs observed API gaps (shadow/unseen/param) |
 | `resources.json` | lifecycle-aware resource records (Phase 5) |
 | `state/snapshots.jsonl` | point-in-time behavior snapshots (Phase 3) |
 | `state/transitions.jsonl` | observed cross-run cell changes (Phase 3) |
 | `attack_chains.jsonl` | hypothesized finding→capability→impact chains (Phase 19, ATO first) |
 | `state/` | checkpoint blobs (application, graph, coverage, budgets) |
 | `proofs/finding-NNN/` | `request.txt`, `response.txt`, `metadata.json` |
+| `proofs/integrity.json` | sha256 manifest over all evidence files |
 | `metrics.json` | coverage + validation counters |
 | `report.html` | triage-ready report |
 | `scan.log`, `checkpoint.json` | logs, resume state |

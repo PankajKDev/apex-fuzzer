@@ -208,3 +208,107 @@ def find_renders(http, render_urls: List[str], canary: str,
             log.info("stored XSS: canary from %s renders %s at %s",
                      inject_url, verdict["context"], url)
     return hits
+
+
+# ── generalized stored-injection oracles ─────────────────────────────
+# Sink matrix: one inert payload per class, each correlated by a fresh
+# lifecycle nonce, each judged by a class-specific render signal.
+# Signals prove the stored value reached a dangerous sink; anything
+# else is negative (completed oracle, no signal) or inconclusive
+# (nothing fetched). Dynamic/temporal oracles (time-based, blind
+# boolean over renders) are excluded: renders are polled once, never
+# watched.
+SECOND_ORDER_SINK_HINTS = ("preview", "webhook", "export", "import",
+                           "pdf", "render", "download")
+
+_SSTI_ARITHMETIC = "49"
+_SSTI_WINDOW = 100
+
+
+def make_stored_nonce() -> str:
+    """Fresh lifecycle correlator: apexso-<12 hex>."""
+    return f"apexso-{secrets.token_hex(6)}"
+
+
+def stored_payloads(nonce: str, marker_path: str = "") -> List[Any]:
+    """(class, inert value) pairs for one lifecycle nonce.
+
+    Every value is inert on arrival: a tautology over its own nonce,
+    a harmless echo, paired arithmetic, or a marker-relative path.
+    Traversal needs the operator-configured marker path.
+    """
+    payloads = [
+        ("sqli", f"' OR '{nonce}'='{nonce}"),
+        ("cmdi", f";echo {nonce}"),
+        ("ssti", f"{{{{7*7}}}}${{{{7*7}}}}{nonce}"),
+    ]
+    if marker_path:
+        payloads.append(("traversal", f"../../../../{marker_path}"))
+    return payloads
+
+
+def classify_stored_signal(kind: str, text: str, nonce: str,
+                           marker_content: str = "") -> str:
+    """Signal state of one render body: signal | stored-inert | absent.
+
+    - signal: class danger tied to OUR nonce (error markers with the
+      nonce, arithmetic adjacent to the nonce without literal braces,
+      or the operator marker contents).
+    - stored-inert: our nonce present without class danger.
+    - absent: neither (pre-existing errors without our nonce count
+      as absent — they are not our payload's doing).
+    """
+    body = text or ""
+    if kind == "traversal":
+        if marker_content and marker_content in body:
+            return "signal"
+        return "stored-inert" if nonce and nonce in body else "absent"
+    if kind == "ssti":
+        if nonce and nonce in body and "{{7*7}}" not in body:
+            pos = body.find(nonce)
+            window = body[max(0, pos - _SSTI_WINDOW):
+                          pos + _SSTI_WINDOW]
+            if _SSTI_ARITHMETIC in window:
+                return "signal"
+        return "stored-inert" if nonce and nonce in body else "absent"
+    if kind == "sqli":
+        from .mutate import sqli_error_families
+        markers = sqli_error_families(body)
+    elif kind == "cmdi":
+        from .mutate import cmdi_error_markers as _cmdi_families
+        markers = _cmdi_families(body)
+    else:
+        return "absent"
+    if markers and nonce and nonce in body:
+        return "signal"
+    if nonce and nonce in body:
+        return "stored-inert"
+    return "absent"
+
+
+def inject_stored_payload(http, endpoint, identity_headers: Dict[str, str],
+                          identity_name: str, value: str,
+                          timeout: int = 10) -> InjectionResult:
+    """POST one stored-injection value in every body parameter."""
+    params = list(getattr(endpoint, "body_parameters", []) or [])
+    if not params:
+        return InjectionResult(endpoint_url=endpoint.url,
+                               identity=identity_name, canary=value,
+                               notes="no body parameters to inject")
+    data = {p.name: value for p in params if p.name}
+    try:
+        r = http.post(endpoint.url, data=data, headers=identity_headers,
+                      timeout=timeout)
+        status = r.status_code
+        notes = f"POST {len(data)} fields, HTTP {status}"
+    except BudgetExceeded:
+        raise
+    except Exception as e:
+        return InjectionResult(
+            endpoint_url=endpoint.url, identity=identity_name,
+            canary=value, fields=sorted(data),
+            notes=f"inject failed: {e}"[:200])
+    return InjectionResult(endpoint_url=endpoint.url,
+                           identity=identity_name, canary=value,
+                           fields=sorted(data), status=status,
+                           notes=notes)

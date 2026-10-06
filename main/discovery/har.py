@@ -120,7 +120,8 @@ def _body_fields(post_data, headers: Dict[str, str]) -> Dict[str, str]:
 
 def parse_har(data: Dict[str, Any],
               scope=None,
-              max_entries: int = _MAX_ENTRIES) -> List[Dict[str, Any]]:
+              max_entries: int = _MAX_ENTRIES,
+              identity: str = "har") -> List[Dict[str, Any]]:
     """HAR dict → browser-contract entry dicts (no network, no replay)."""
     entries: List[Dict[str, Any]] = []
     by_key: Dict[Any, Dict[str, Any]] = {}
@@ -188,6 +189,6 @@ def parse_har(data: Dict[str, Any],
             "url": url, "method": method, "headers": headers,
             "post_data": retained or None,
             "content_type": str((post_data or {}).get("mimeType", "")),
-            "multipart": [], "identity": "har",
+            "multipart": [], "identity": identity or "har",
             "resource_type": "", "status": status or None})
     return entries

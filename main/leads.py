@@ -75,7 +75,9 @@ def _is_redirect_param(name: str) -> bool:
 
 
 def collect_leads(endpoints: List[Any], technologies: List[Dict],
-                  takeover_notes: List[str]) -> List[Dict]:
+                  takeover_notes: List[str],
+                  js_intel: Dict = None,
+                  api_diff: Dict = None) -> List[Dict]:
     """Rank discovered-but-untested surface. No network, pure ranking."""
     leads: List[Dict] = []
 
@@ -170,6 +172,67 @@ def collect_leads(endpoints: List[Any], technologies: List[Dict],
         add("takeover-fingerprint", "medium", str(note),
             "dangling-service fingerprint; ownership unclaimed",
             "manual claim review (tko-subs -takeover needs tokens)")
+
+    for bundle in (js_intel or {}).get("bundles", []) or []:
+        origin = str(bundle.get("source", "") or "")
+        try:
+            from urllib.parse import urlsplit as _split
+            host = _split(origin).hostname or "" if origin else ""
+        except ValueError:
+            host = ""
+        base = f"https://{host}" if host else ""
+        for route in bundle.get("admin_routes", []) or []:
+            path = str((route or {}).get("path", "") or "")
+            if not path or not base:
+                continue
+            add("js-admin-route", "high", base + path,
+                f"client-declared privileged route {path} (unverified "
+                f"server-side; seen in {bundle.get('bundle', '?')})",
+                "verify by hand, then differential + authz-matrix "
+                "with 2 test identities")
+        for flag in bundle.get("flags", []) or []:
+            name = str((flag or {}).get("name", "") or "")
+            if not name:
+                continue
+            add("feature-flag", "medium", base,
+                f"client feature flag '{name}'"
+                f"{' = ' + str(flag['value']) if flag.get('value') is not None else ''} "
+                f"(seen in {bundle.get('bundle', '?')})",
+                "toggle-aware differential review; flag-gated "
+                "endpoints join the authz matrix")
+
+    for row in (api_diff or {}).get("shadow", []) or []:
+        url = str((row or {}).get("url", "") or "")
+        if not url:
+            continue
+        add("shadow-api", "medium", url,
+            f"{row.get('method', 'GET')} {row.get('path', '')} "
+            f"observed with no spec operation",
+            "undocumented surface: differential + authz-matrix "
+            "with 2 test identities")
+    for row in (api_diff or {}).get("unseen", []) or []:
+        path = str((row or {}).get("path", "") or "")
+        if not path:
+            continue
+        add("spec-unseen", "info",
+            f"spec:{row.get('method', 'GET')} {path}",
+            f"declared operation never observed in crawl "
+            f"(params: {', '.join((row.get('params') or [])[:5]) or 'none'})",
+            "seed the path and re-crawl, then probe inputs")
+    for row in (api_diff or {}).get("param_gaps", []) or []:
+        url = str((row or {}).get("url", "") or "")
+        if not url:
+            continue
+        extra = list((row.get("extra_params") or [])[:3])
+        missing = list((row.get("missing_params") or [])[:3])
+        detail = "; ".join(
+            ([f"accepts undeclared: {', '.join(extra)}"] if extra else [])
+            + ([f"declared untested: {', '.join(missing)}"]
+               if missing else []))
+        add("spec-param-gap", "medium", url, detail,
+            "extra params hint at mass assignment; untested declared "
+            "params hint at missed inputs",
+            param=(extra + missing)[0] if (extra + missing) else "")
 
     leads.sort(key=lambda lead: (_PRIORITY_RANK.get(lead["priority"], 4),
                                  lead["url"], lead["kind"]))

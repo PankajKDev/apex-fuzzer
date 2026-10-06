@@ -49,7 +49,7 @@ def upload_probe(endpoints: List[Endpoint],
         try:
             results = probe_upload(
                 client, ep.url, field,
-                timeout=cfg.scan.http_timeout)
+                timeout=cfg.scan.http_timeout, scope=scope)
         except BudgetExceeded:
             coverage.record("upload", "blocked",
                             f"budget: {ep.normalized_url}")

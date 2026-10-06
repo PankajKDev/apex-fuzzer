@@ -573,3 +573,197 @@ def blind_xss_probe(endpoints: List[Endpoint],
         coverage.record("second_order", "inconclusive",
                         "blind-XSS injection flow was incomplete")
     return findings
+
+
+_CLASS_SEVERITY = {"sqli": "high", "cmdi": "high", "ssti": "high",
+                   "traversal": "high"}
+
+_CLASS_FP_NOTES = {
+    "sqli": "Error text tied to our fresh nonce proves the stored "
+            "value reached a database error path. Confirm it is "
+            "injectable (not just verbose errors) before reporting.",
+    "cmdi": "Shell diagnostics tied to our fresh nonce prove the "
+            "stored value reached command execution context. Confirm "
+            "with a harmless read-only command before reporting.",
+    "ssti": "Paired arithmetic next to our fresh nonce proves server- "
+            "side template evaluation. Confirm the engine and context "
+            "before reporting.",
+    "traversal": "The operator marker contents rendered from a stored "
+                 "path proves file readback. Confirm the read path is "
+                 "attacker-reachable before reporting.",
+}
+
+
+def second_order_generalized_probe(
+        endpoints: List[Endpoint],
+        evidence: EvidenceStore, metrics: Metrics,
+        budgets: BudgetTracker,
+        coverage: CoverageTracker, client,
+        cfg, scope, controls: ProbeControls,
+        identities) -> List[Finding]:
+    """Stored SQLi/CMDi/SSTI/traversal correlation (same opt-in).
+
+    One inert payload per class per form, each correlated by a fresh
+    lifecycle nonce; render sweeps are sink-hint ordered. A class
+    signal tied to our nonce is a candidate; completed sweeps without
+    one are genuine negatives for that error oracle.
+    """
+    from ...validation.second_order import (
+        SECOND_ORDER_SINK_HINTS, classify_stored_signal,
+        inject_stored_payload, make_stored_nonce, stored_payloads)
+    from ...safety.preflight import plan_second_order_generalized
+    cfg_v = cfg.validation
+    forms = [e for e in endpoints
+             if e.body_parameters
+             and scope.active_test_allowed(e.url)]
+    forms = forms[:cfg_v.second_order_max_endpoints]
+    renders = []
+    for e in endpoints:
+        if e.endpoint_type == "page" and \
+                scope.is_in_scope(e.url) and \
+                e.url not in renders:
+            renders.append(e.url)
+    renders = renders[:cfg_v.second_order_max_renders]
+    marker_path = str(getattr(
+        cfg_v, "path_traversal_marker_path", "") or "")
+    marker_content = str(getattr(
+        cfg_v, "path_traversal_marker_content", "") or "")
+
+    def _sink_rank(url: str) -> int:
+        try:
+            path = urlsplit(url).path.lower()
+        except ValueError:
+            return 1
+        return 0 if any(h in path for h in SECOND_ORDER_SINK_HINTS) \
+            else 1
+
+    renders = sorted(renders, key=_sink_rank)
+    if not forms or not renders:
+        coverage.record("second_order", "untestable",
+                        "no HTML forms or render candidates")
+        return []
+    # Traversal needs the operator marker (8+ content chars); other
+    # classes always run under the second-order opt-in.
+    n_classes = 3 + (1 if marker_path and len(marker_content) >= 8
+                     else 0)
+    if not reserve_or_block(
+            budgets, coverage, "second_order",
+            plan_second_order_generalized(len(forms), len(renders),
+                                          n_classes)):
+        return []
+    injectors = [i for i in identities if i.name != "anonymous"] or \
+        identities[:1]
+    log.info("second-order-generalized: %d forms × %d renders (%d "
+             "classes) as %s", len(forms), len(renders), n_classes,
+             [i.name for i in injectors[:1]])
+    findings: List[Finding] = []
+    for ep in forms:
+        if controls.halted():
+            log.info("second-order-generalized: halted by stop "
+                     "control; remaining targets stay untested")
+            break
+        controls.paced()
+        inj = injectors[0]
+        iname = getattr(inj, "name", "anonymous")
+        iheaders = dict(getattr(inj, "auth_headers", None) or {})
+        if not budgets.consume_test("second_order",
+                                    ep.normalized_url):
+            coverage.record("second_order", "blocked",
+                            f"budget: {ep.normalized_url}")
+            continue
+        metrics.second_order_tests += 1
+        nonce = make_stored_nonce()
+        form_blocked = False
+        for cls, value in stored_payloads(nonce, marker_path
+                                          if len(marker_content) >= 8
+                                          else ""):
+            if form_blocked:
+                break
+            try:
+                inj_res = inject_stored_payload(
+                    client, ep, iheaders, iname, value,
+                    timeout=cfg.scan.http_timeout)
+            except BudgetExceeded:
+                coverage.record("second_order", "blocked",
+                                f"budget: {ep.normalized_url}")
+                break
+            if not inj_res.fields:
+                continue
+            signal = None
+            fetched_any = False
+            for url in renders + [ep.url]:
+                try:
+                    r = client.get(url, timeout=cfg.scan.http_timeout)
+                except BudgetExceeded:
+                    coverage.record("second_order", "blocked",
+                                    f"budget: {ep.normalized_url}")
+                    form_blocked = True
+                    break
+                except Exception as e:
+                    log.debug("generalized render fetch %s failed: %s",
+                              url, e)
+                    continue
+                if r.status_code != 200 or not r.text:
+                    continue
+                fetched_any = True
+                state = classify_stored_signal(
+                    cls, r.text, nonce, marker_content)
+                if state == "signal":
+                    signal = (url, r.text)
+                    break
+            if form_blocked:
+                break
+            if signal is None:
+                coverage.record(
+                    "second_order",
+                    "tested_negative" if fetched_any else "inconclusive",
+                    f"{ep.normalized_url}::{cls}: "
+                    f"{'no class signal in completed sweep' if fetched_any else 'no render observed'}")
+                continue
+            url, text = signal
+            metrics.second_order_candidates += 1
+            controls.noted()
+            coverage.record("second_order", "candidate",
+                            f"{ep.normalized_url}::{cls}: class signal "
+                            f"at {url}")
+            pos = text.find(nonce)
+            if pos < 0:
+                pos = text.find(marker_content) \
+                    if marker_content and marker_content in text else 0
+            snippet = text[max(0, pos - 300):pos + 600]
+            f = Finding(
+                id=stable_finding_id("so", cls, ep.normalized_url,
+                                     url),
+                source=f"second-order-{cls}",
+                name=(f"Stored {cls.upper()} candidate: payload from "
+                      f"{ep.path} triggers class signal at "
+                      f"{urlsplit(url).path}"),
+                severity=_CLASS_SEVERITY.get(cls, "high"),
+                confidence=Confidence.PROBABLE.value,
+                validation_status=ValidationStatus.
+                STRONG_CANDIDATE.value,
+                host=ep.host, matched_at=url,
+                endpoint_url=url, method="GET",
+                parameter=",".join(inj_res.fields[:3]),
+                description=(
+                    f"Stored {cls} payload (lifecycle {nonce}) injected "
+                    f"via POST {ep.url} triggers a class signal at "
+                    f"{url}."),
+                tags=[f"stored-{cls}", "second-order", cls],
+                raw={"inject": inj_res.to_dict(), "class": cls,
+                     "nonce": nonce, "render_url": url},
+                false_positive_notes=_CLASS_FP_NOTES.get(cls, ""),
+                identity=iname,
+            )
+            evidence.allocate(f)
+            evidence.record(
+                f,
+                request_text=(f"POST {ep.url} "
+                              f"(fields: {inj_res.fields})\n"
+                              f"class: {cls}; lifecycle: {nonce}"),
+                response_text=(f"class signal at {url}\n"
+                                f"--- snippet ---\n{snippet[:1500]}"))
+            findings.append(f)
+            log.info("second-order-generalized: STORED %s at %s",
+                     cls.upper(), url)
+    return findings

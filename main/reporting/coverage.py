@@ -36,7 +36,7 @@ KNOWN_CLASSES = [
     "second_order_ssrf",
     "path_traversal", "open_redirect", "info_disclosure", "takeover",
     "tenant_isolation", "clickjacking", "header_injection",
-    "deserialization", "postmessage",
+    "deserialization", "postmessage", "html",
 ]
 
 _PRECEDENCE = [CONFIRMED, CANDIDATE, INCONCLUSIVE, BLOCKED,

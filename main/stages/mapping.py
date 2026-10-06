@@ -310,3 +310,34 @@ def mine_hidden_params(endpoints: List[Endpoint], host: str,
                             confidence=Confidence.POSSIBLE.value))
                         attached += 1
                 log.info("linkfinder: attached %d JS params", attached)
+
+
+def build_api_diff(out_dir: Path, endpoints) -> dict:
+    """Spec-declared vs observed API surface (offline, never fails).
+
+    Reads api_specs.json (when discovery fetched any) and diffs it
+    against the mapped inventory into api_diff.json for the leads
+    stage. Gaps are untested surface, never verdicts.
+    """
+    from ..discovery.api_diff import diff_api
+    payload: dict = {"shadow": [], "unseen": [], "param_gaps": []}
+    spec_file = Path(out_dir) / "api_specs.json"
+    if spec_file.exists():
+        try:
+            import json as _json
+            data = _json.loads(spec_file.read_text(errors="ignore")
+                               or "[]")
+            specs = data if isinstance(data, list) else []
+            payload = diff_api(specs, endpoints)
+        except Exception as exc:
+            log.debug("api diff failed: %s", exc)
+    try:
+        import json as _json
+        (Path(out_dir) / "api_diff.json").write_text(
+            _json.dumps(payload, indent=2))
+    except OSError as exc:
+        log.debug("api diff persist failed: %s", exc)
+    log.info("api diff: %d shadow, %d unseen, %d param gaps",
+             len(payload["shadow"]), len(payload["unseen"]),
+             len(payload["param_gaps"]))
+    return payload

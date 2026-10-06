@@ -590,3 +590,103 @@ def hpp_probe(endpoints: List[Endpoint],
                                 f"{ep.normalized_url}::{param}: "
                                 f"{res.notes}")
     return findings
+
+
+_MAX_HTML_ENDPOINTS = 10
+_MAX_HTML_PARAMS = 3
+
+
+def html_injection_probe(endpoints: List[Endpoint],
+                         evidence: EvidenceStore, metrics: Metrics,
+                         budgets: BudgetTracker,
+                         coverage: CoverageTracker, client, cfg, scope,
+                         controls: ProbeControls) -> List[Finding]:
+    """Inert structural tags over observed GET query fields.
+
+    Read-only GETs only. A tag parsed as a real element is a
+    candidate (phishing/defacement primitive); neutralized or
+    absent tags with completed probes are genuine negatives.
+    Script execution stays with the XSS engine.
+    """
+    from ...safety.preflight import plan_html
+    from ...validation.html_injection import check_html_injection
+    from ...validation.param_pollution import query_params
+    targets = [e for e in endpoints or []
+               if (getattr(e, "method", "GET") or "GET").upper() == "GET"
+               and query_params(getattr(e, "url", "") or "")
+               and scope.active_test_allowed(e.url)][: _MAX_HTML_ENDPOINTS]
+    if not targets:
+        log.info("html: no in-scope parameterized GET endpoints — "
+                 "nothing to check")
+        return []
+    if not reserve_or_block(
+            budgets, coverage, "html",
+            plan_html(len(targets), _MAX_HTML_PARAMS)):
+        return []
+    findings: List[Finding] = []
+    for ep in targets:
+        if controls.halted():
+            log.info("html: halted by stop control")
+            break
+        params = [p for p in query_params(ep.url)
+                  if p][: _MAX_HTML_PARAMS]
+        if not budgets.consume_test("html", ep.normalized_url,
+                                    limit=1 + 2 * len(params)):
+            coverage.record("html", "blocked",
+                            f"budget: {ep.normalized_url}")
+            continue
+        for param in params:
+            try:
+                res = check_html_injection(
+                    client, ep.url, param,
+                    timeout=cfg.scan.http_timeout)
+            except BudgetExceeded:
+                coverage.record("html", "blocked",
+                                f"budget: {ep.normalized_url}")
+                break
+            if res.verdict == "candidate":
+                controls.noted()
+                coverage.record("html", "candidate",
+                                f"{ep.normalized_url}::{param}: "
+                                f"{res.notes}")
+                f = Finding(
+                    id=stable_finding_id("html", ep.normalized_url,
+                                         param, res.evidence.get(
+                                             "shape", "")),
+                    source="html-injection",
+                    name=(f"HTML injection: inert {res.evidence.get('shape', '')} "
+                          f"tag via '{param}' parsed as an element "
+                          f"({ep.path})"),
+                    severity="medium",
+                    confidence=Confidence.PROBABLE.value,
+                    validation_status=ValidationStatus.
+                    STRONG_CANDIDATE.value,
+                    host=ep.host, matched_at=ep.url,
+                    endpoint_url=ep.url, method="GET",
+                    parameter=param,
+                    description=res.notes,
+                    tags=["html", "html-injection", "phishing-surface",
+                          ep.endpoint_type],
+                    raw={"html": res.to_dict()},
+                    false_positive_notes=(
+                        f"{res.notes}. Element injection proves tag "
+                        f"survival, not impact: confirm a phishing or "
+                        f"defacement primitive (link target, form "
+                        f"action, page context) before reporting. "
+                        f"Script execution belongs to the XSS engine."),
+                )
+                evidence.allocate(f)
+                evidence.record(
+                    f,
+                    request_text=(f"GET {ep.url}\n(html probe ::{param})"),
+                    response_text=res.notes)
+                findings.append(f)
+                log.info("html: %s on %s", param, ep.url)
+            elif res.verdict == "negative":
+                coverage.record("html", "tested_negative",
+                                f"{ep.normalized_url}::{param}")
+            else:
+                coverage.record("html", "inconclusive",
+                                f"{ep.normalized_url}::{param}: "
+                                f"{res.notes}")
+    return findings

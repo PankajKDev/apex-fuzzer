@@ -105,7 +105,8 @@ def plan_authz_matrix(n_endpoints: int, n_identities: int,
                       write_replays: int = 0,
                       graphql_replays: int = 0,
                       bfla_proofs: int = 0,
-                      mass_assignments: int = 0) -> RequestPlan:
+                      mass_assignments: int = 0,
+                      schema_requests: int = 0) -> RequestPlan:
     harvest = n_endpoints * n_identities
     swap = n_endpoints * max_ids * max(0, n_identities - 1) * 2
     sweep = n_endpoints * n_methods * n_identities
@@ -118,8 +119,10 @@ def plan_authz_matrix(n_endpoints: int, n_identities: int,
     graphql = graphql_replays * 2
     bfla = bfla_proofs * 3
     mass = mass_assignments * 5
+    schema = schema_requests
     return RequestPlan("authz_matrix", "*", harvest,
-                       swap + sweep + write + graphql + bfla + mass)
+                       swap + sweep + write + graphql + bfla + mass
+                       + schema)
 
 
 def plan_race(n_endpoints: int, concurrency: int,
@@ -136,6 +139,15 @@ def plan_business(n_endpoints: int, max_params: int) -> RequestPlan:
 def plan_second_order(n_forms: int, n_renders: int) -> RequestPlan:
     return RequestPlan("second_order", "*", 0, n_forms,
                        verification_requests=n_forms * n_renders)
+
+
+def plan_second_order_generalized(n_forms: int, n_renders: int,
+                                  n_classes: int) -> RequestPlan:
+    # one injection plus a full render sweep per class and form
+    forms = max(0, n_forms)
+    per_form = max(0, n_classes) * (1 + max(0, n_renders))
+    return RequestPlan("second_order_generalized", "*", 0,
+                       forms * per_form)
 
 
 def plan_second_order_ssrf(n_injections: int,
@@ -203,9 +215,21 @@ def plan_hpp(n_endpoints: int, max_params: int) -> RequestPlan:
                        n_endpoints * (1 + 2 * max_params))
 
 
+def plan_html(n_endpoints: int, max_params: int) -> RequestPlan:
+    # baseline plus one inert-tag probe per shape and parameter
+    return RequestPlan("html", "*", 0,
+                       n_endpoints * (1 + 2 * max_params))
+
+
 def plan_csrf(n_forms: int) -> RequestPlan:
     # same-origin baseline plus one cross-site browser execution each
     return RequestPlan("csrf", "*", 0, n_forms * 3)
+
+
+def plan_websocket(n_endpoints: int, n_identities: int) -> RequestPlan:
+    # one handshake per identity plus one evil-Origin replay each
+    return RequestPlan("websocket", "*", 0,
+                       n_endpoints * (2 + max(0, n_identities)))
 
 
 def plan_reset(n_endpoints: int) -> RequestPlan:

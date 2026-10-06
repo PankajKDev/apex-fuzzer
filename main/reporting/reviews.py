@@ -155,31 +155,34 @@ def resolve_finding_triples(index: ReviewIndex,
 def finding_test_class(finding) -> str:
     """Best-effort finding → test-class mapping for triple keys."""
     source = str(getattr(finding, "source", "") or "").lower()
+    # Bare stored-XSS sources stay XSS; suffixed second-order sources
+    # (sqli/cmdi/ssti/traversal/ssrf) fall through to the candidate
+    # loop so each maps to its own class.
+    if source in ("second-order", "second_order"):
+        return "xss"
     for alias, mapped in (("differential", "authz"),
-                          ("second-order", "xss"),
-                          ("second_order", "xss"),
                           ("misconfig-host-header", "header_injection"),
                           ("oast", "ssrf")):
         if alias in source:
             return mapped
     for candidate in ("sqli", "xss", "cmdi", "ssrf", "ssti", "xxe",
                       "idor", "bola", "authz", "auth", "cors", "csrf",
-                      "redirect",
+                      "redirect", "websocket",
                       "traversal", "cache", "jwt", "header_injection",
                       "clickjacking", "info_disclosure",
                       "mass_assignment", "parameter_pollution",
-                      "deserialization", "postmessage"):
+                      "deserialization", "postmessage", "html"):
         if candidate in source or candidate.replace("_", "-") in source:
             return candidate
     tags = [str(t).lower() for t in
             (getattr(finding, "tags", None) or [])]
     for candidate in ("sqli", "xss", "cmdi", "ssrf", "ssti", "xxe",
                       "idor", "bola", "authz", "auth", "cors", "csrf",
-                      "redirect",
+                      "redirect", "websocket",
                       "traversal", "cache", "jwt", "header_injection",
                       "clickjacking", "info_disclosure",
                       "mass_assignment", "parameter_pollution",
-                      "deserialization", "postmessage"):
+                      "deserialization", "postmessage", "html"):
         dashed = candidate.replace("_", "-")
         if any(candidate in tag or dashed in tag for tag in tags):
             return candidate

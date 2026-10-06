@@ -48,7 +48,30 @@ def collect_leads_bundle(out_dir: Path, endpoints, metrics: Metrics):
     """Ranked follow-ups plus the Burp manual-testing handoff."""
     takeover = takeover_notes_from_file(out_dir / "takeover.txt")
     tech_dicts = read_jsonl(out_dir / "technologies.jsonl")
-    leads = collect_leads(endpoints, tech_dicts, takeover)
+    js_intel = {}
+    intel_file = out_dir / "js_intel.json"
+    if intel_file.exists():
+        try:
+            import json as _json
+            data = _json.loads(intel_file.read_text(errors="ignore")
+                               or "{}")
+            if isinstance(data, dict):
+                js_intel = data
+        except Exception as exc:
+            log.debug("leads: js intel unreadable: %s", exc)
+    api_diff = {}
+    diff_file = out_dir / "api_diff.json"
+    if diff_file.exists():
+        try:
+            import json as _json
+            data = _json.loads(diff_file.read_text(errors="ignore")
+                               or "{}")
+            if isinstance(data, dict):
+                api_diff = data
+        except Exception as exc:
+            log.debug("leads: api diff unreadable: %s", exc)
+    leads = collect_leads(endpoints, tech_dicts, takeover, js_intel,
+                          api_diff)
     write_leads(out_dir / "leads.jsonl", leads)
     metrics.leads_total = len(leads)
     log.info("leads: %d ranked follow-ups -> leads.jsonl", len(leads))
@@ -189,6 +212,13 @@ def render_report(out_dir: Path, target: str, host: str,
                 burp=burp_summary,
                 changes=changes or None,
                 chains=load_chains(out_dir))
+    try:
+        from ..validation.evidence import EvidenceStore
+        manifest_path = EvidenceStore(
+            out_dir / "proofs").write_manifest()
+        log.info("evidence integrity manifest -> %s", manifest_path)
+    except Exception as e:
+        log.debug("integrity manifest skipped: %s", e)
     ck.mark("report")
     log.info("done: %s (%.1fs)", host, metrics.scan_duration_seconds)
     from ..reporting.sarif import write_sarif

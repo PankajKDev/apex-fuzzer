@@ -25,7 +25,9 @@ NODE_TYPES = {"domain", "host", "service", "endpoint", "parameter",
               # agent Phase 3 (behavioral): additive, old artifacts unaffected
               "state", "transition", "request", "response",
               "observation", "token", "resource_field",
-              "workflow_step"}
+              "workflow_step",
+              # Phase 24 (JS intel): client-declared feature flags
+              "feature_flag"}
 
 EDGE_TYPES = {"HOSTS", "CALLS", "AUTHENTICATES_TO", "OWNS", "BELONGS_TO",
               "CAN_ACCESS", "READS", "WRITES", "CREATES", "DELETES",

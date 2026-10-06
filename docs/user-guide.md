@@ -111,8 +111,13 @@ Practical guidance:
   the auth engines. Race and business-logic stay opt-in flags because
   they submit state-changing requests.
 - **CI mode for owned apps** (`--fail-on high`): exit 1 when any
-  finding meets the severity — gate merges on it. Bounty mode is the
-  default (exit 0 with a report; strict refusals always exit 2).
+  finding meets the severity — gate merges on it. `--ci` enforces
+  the gate (exit 2 without `--fail-on`); `--regression DIR`
+  compares stable finding IDs against a prior run, writes
+  `regression.json` (plus graph endpoint deltas, exit-neutral),
+  and exits 1 on new findings at the threshold.
+  Bounty mode is the default (exit 0 with a report; strict refusals
+  always exit 2).
   A pinned `python:3.12-slim` runtime image lives in `Dockerfile`
   (`docker build -t apex-fuzzer .`); DAST binaries stay out of the
   image — run `apex-fuzzer --update` inside, or mount a tools volume.
@@ -288,7 +293,11 @@ Validation runs only in validation-enabled scans, in this order:
    differences are not candidates). Cached first-party JS gets a
    postMessage/SOP sweep (unguarded message handlers, wildcard
    targetOrigin, document.domain) — static candidates only, no
-   code excerpts persisted.
+   code excerpts persisted. Recorded WebSocket addresses get a
+   handshake-layer check through the gated client (no frames ever
+   spoken): anonymous accept on a privileged path and evil-Origin
+   accept on an authed-only endpoint are high candidates;
+   enforced boundaries are genuine negatives.
    Informational candidates only; protected pages record genuine
    negatives.
 3. **Differential testing** — same endpoint under each identity;
@@ -327,7 +336,10 @@ Validation runs only in validation-enabled scans, in this order:
    inconclusive.
 5. **Authz matrix** — harvest object IDs per identity, swap them
    cross-identity (GET reads), sweep HTTP methods per identity
-   (BFLA), replay GraphQL query operations with victim variables.
+   (BFLA), replay GraphQL query operations with victim variables
+   plus schema-driven field replay (introspected Query fields with
+   identifier args, one generated read document per field, owner
+   baseline first; mutations are never generated).
    Optional **write replay** (`authorization.write_replay` plus
    `--ack-state-change`, test accounts only): the attacker's own
    observed mutating request with the victim ID, confirmed only by
@@ -354,8 +366,11 @@ Validation runs only in validation-enabled scans, in this order:
    time-based only with `--sqli-time`), Dalfox with Playwright
    execution confirmation (query, fragment, then cookie sources),
    paired-arithmetic SSTI, nonce-correlated XXE on retained XML,
-   marker-file traversal. Each tool's result is kept; conflicting
-   positive/negative signals resolve to inconclusive.
+   marker-file traversal, and an **HTML injection** sweep (inert
+   structural tags over GET query fields, element-parse proof —
+   script execution stays with Dalfox/browser). Each tool's result
+   is kept; conflicting positive/negative signals resolve to
+   inconclusive.
    A **deserialization error oracle** (needs `--ack-state-change`)
    sends scalar-control plus array/object type-confusion JSON to
    JSON body params: deserializer exception text with a clean
@@ -368,9 +383,18 @@ Validation runs only in validation-enabled scans, in this order:
 9. **Stored XSS / stored SSRF / blind XSS** (opt-in, they persist
    server-side canaries; blind XSS correlates a stored script-src
    URL with an OAST callback and stays a candidate until script
-   execution is proven in a controlled browser), **file-upload review**
+   execution is proven in a controlled browser). The same opt-in
+   generalizes to stored **SQLi/CMDi/SSTI/traversal**: one inert
+   payload per class with a fresh lifecycle nonce, sink-hint-ordered
+   render sweeps; a class signal tied to our nonce is a candidate,
+   completed sweeps without one are genuine negatives for that
+   error oracle (traversal needs the configured marker). **file-upload review**
    (opt-in `--upload`: benign text files under probing filenames,
-   verified by readback; test accounts only), **business logic** (needs your invariants plus
+   verified by execution-context readback — served content type,
+   Content-Disposition, and nosniff; active content served inline
+   is a stored-XSS vector, attachment downgrades to safe;
+   server-returned readback URLs outside scope are never fetched;
+   test accounts only), **business logic** (needs your invariants plus
    readback), **race** (synchronized bursts, most aggressive test in
    the suite — enable deliberately or not at all).
 10. **OAuth transitions** — authorize URLs from traffic analyzed
@@ -405,7 +429,9 @@ one-liner, and evidence-file links. The Coverage section names tested
 vs explicitly untested classes — untested means untested, not safe.
 `findings.jsonl` is the machine-readable record; `sarif.json` is the
 same findings as SARIF 2.1.0 for CI ingestion (triage feed, not
-evidence); `proofs/finding-NNN/` holds the raw evidence;
+evidence); `proofs/finding-NNN/` holds the raw evidence, and
+`proofs/integrity.json` carries per-file sha256 hashes so the
+handoff is tamper-evident (re-hash and compare before forwarding);
 `coverage.json`/`metrics.json` summarize. `apex.db` records every
 run with its scope denials and endpoint inventory; `changes.json`
 diffs the inventory against the previous finished run (new/changed/
